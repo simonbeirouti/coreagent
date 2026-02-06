@@ -23,18 +23,24 @@ impl AuthState {
 
     pub fn set_session(&self, session: SessionData) {
         let mut s = self.session.lock().unwrap();
-        println!("Session stored for user: {}", session.user_id);
+        println!("[AUTH] Session stored for user: {} (expires: {})", 
+                 session.user_id, session.expires_at);
         *s = Some(session);
     }
 
-    #[allow(dead_code)]
     pub fn get_session(&self) -> Option<SessionData> {
-        self.session.lock().unwrap().clone()
+        let session = self.session.lock().unwrap().clone();
+        if let Some(ref s) = session {
+            println!("[AUTH] Session retrieved for user: {}", s.user_id);
+        } else {
+            println!("[AUTH] No session found in backend");
+        }
+        session
     }
 
     pub fn clear_session(&self) {
         let mut s = self.session.lock().unwrap();
         *s = None;
-        println!("Session cleared");
+        println!("[AUTH] Session cleared from backend");
     }
 }

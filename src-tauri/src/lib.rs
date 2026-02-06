@@ -20,12 +20,20 @@ fn clear_session(state: tauri::State<AuthState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn verify_session(user_id: String, state: tauri::State<AuthState>) -> Result<bool, String> {
+    match state.get_session() {
+        Some(session) => Ok(session.user_id == user_id),
+        None => Ok(false),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AuthState::new())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, set_session, clear_session])
+        .invoke_handler(tauri::generate_handler![greet, set_session, clear_session, verify_session])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
