@@ -13,8 +13,10 @@
     "windows": [
       {
         "title": "coreagent",
-        "width": 800,
-        "height": 600
+        "width": 1620,
+        "height": 1080,
+        "hiddenTitle": true,
+        "titleBarStyle": "Visible"
       }
     ],
     "security": {
