@@ -1,14 +1,29 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
+import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { AuthProvider, useAuth } from "./hooks/use-auth";
 import { LoginForm } from "./components/login-form";
+import { ThemeProvider } from "./components/theme-provider";
+import { routeTree } from './routeTree.gen'
 import "./App.css";
 
-function AuthGuard() {
-  const { isAuthenticated, loading } = useAuth();
+// Create a new router instance
+const router = createRouter({
+  routeTree,
+  defaultPreload: 'intent',
+})
 
-  if (loading) {
+// Register the router for type safety
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: typeof router
+  }
+}
+
+function AuthGuard() {
+  const auth = useAuth();
+
+  if (auth.loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
@@ -19,7 +34,7 @@ function AuthGuard() {
     );
   }
 
-  if (!isAuthenticated) {
+  if (!auth.isAuthenticated) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-4">
         <div className="w-full max-w-md">
@@ -29,13 +44,15 @@ function AuthGuard() {
     );
   }
 
-  return <App />;
+  return <RouterProvider router={router} />;
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <AuthProvider>
-      <AuthGuard />
-    </AuthProvider>
+    <ThemeProvider defaultTheme="dark" storageKey="coreagent-ui-theme">
+      <AuthProvider>
+        <AuthGuard />
+      </AuthProvider>
+    </ThemeProvider>
   </React.StrictMode>,
 );

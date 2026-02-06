@@ -20,13 +20,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // Check active session on mount
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setUser(session?.user ?? null)
-      
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session) {
-        // Sync session to Rust backend
-        syncSessionToBackend(session)
+        // Verify session exists in Rust backend
+        const isValid = await verifySessionWithBackend(session.user.id)
+        
+        if (isValid) {
+          setSession(session)
+          setUser(session.user)
+        } else {
+          // Backend doesn't have session - sync it
+          console.warn("Session mismatch - resyncing to backend")
+          await syncSessionToBackend(session)
+          setSession(session)
+          setUser(session.user)
+        }
       }
       
       setLoading(false)
@@ -50,6 +58,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => subscription.unsubscribe()
   }, [])
+
+  const verifySessionWithBackend = async (userId: string): Promise<boolean> => {
+    try {
+      return await invoke<boolean>("verify_session", { userId })
+    } catch (error) {
+      console.error("Failed to verify session with backend:", error)
+      return false
+    }
+  }
 
   const syncSessionToBackend = async (session: Session) => {
     try {

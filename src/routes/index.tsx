@@ -1,16 +1,20 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import reactLogo from "../assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { createFileRoute } from '@tanstack/react-router'
 import { useAuth } from "@/hooks/use-auth";
-import "./App.css";
 
-function App() {
+export const Route = createFileRoute('/')({
+  component: Dashboard,
+})
+
+function Dashboard() {
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
-  const { user, signOut } = useAuth();
+  const { user } = useAuth();
 
   async function greet() {
     // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -18,22 +22,15 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <div className="flex justify-between items-start mb-2">
-            <div className="flex-1">
-              <CardTitle className="text-2xl font-bold">Welcome to CoreAgent</CardTitle>
-              {user && (
-                <CardDescription className="mt-1">
-                  Signed in as {user.email}
-                </CardDescription>
-              )}
-            </div>
-            <Button variant="outline" size="sm" onClick={() => signOut()}>
-              Sign Out
-            </Button>
-          </div>
+    <div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-xl font-bold">Welcome to CoreAgent</CardTitle>
+          {user && (
+            <CardDescription>
+              Signed in as {user.email}
+            </CardDescription>
+          )}
           <CardDescription>
             Click on the logos below to learn more about our tech stack
           </CardDescription>
@@ -93,7 +90,5 @@ function App() {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }
-
-export default App;
