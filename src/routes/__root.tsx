@@ -1,6 +1,7 @@
 import { Outlet, createRootRoute, useMatches, Link } from '@tanstack/react-router'
 import { useMemo } from 'react'
 import { AppSidebar } from '@/components/dashboard/app-sidebar'
+import { QueryProvider } from '@/providers/query-provider'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -16,6 +17,7 @@ import {
   SidebarTrigger,
 } from '@/components/ui/sidebar'
 import { useAuth } from '@/hooks/use-auth'
+import { useAgent } from '@/hooks/useAgents'
 
 export const Route = createRootRoute({
   component: RootLayout,
@@ -23,7 +25,6 @@ export const Route = createRootRoute({
 
 function RootLayout() {
   const { user, signOut } = useAuth()
-  const matches = useMatches()
 
   // Format user data for sidebar - memoized to prevent re-renders
   const sidebarUser = useMemo(() =>
@@ -37,6 +38,30 @@ function RootLayout() {
       avatar: '',
     }, [user]
   )
+
+  return (
+    <QueryProvider>
+      <LayoutContent user={sidebarUser} onSignOut={signOut} />
+    </QueryProvider>
+  )
+}
+
+function LayoutContent({ 
+  user, 
+  onSignOut 
+}: { 
+  user: { name: string; email: string; avatar: string }
+  onSignOut?: () => void 
+}) {
+  const matches = useMatches()
+
+  // Extract agentId from route params if present
+  const currentMatch = matches[matches.length - 1]
+  const params = currentMatch?.params as { agentId?: string } | undefined
+  const agentId = params?.agentId
+  
+  // Fetch agent data if we have an agentId (now inside QueryProvider)
+  const { data: agent } = useAgent(agentId || '')
 
   // Extract pathname for stable memoization dependency
   const pathname = useMemo(() =>
@@ -66,7 +91,18 @@ function RootLayout() {
         // Create breadcrumb for each path segment
         pathSegments.forEach((segment, index) => {
           const isLast = index === pathSegments.length - 1
-          const segmentName = segment.charAt(0).toUpperCase() + segment.slice(1)
+          // Check if this segment is a UUID (agent ID)
+          const isUUID = segment.length > 20 && segment.includes('-')
+          
+          // Use agent name if available and this is a UUID, otherwise capitalize
+          let segmentName: string
+          if (isUUID && agent?.name) {
+            segmentName = agent.name
+          } else if (isUUID) {
+            segmentName = 'Agent'
+          } else {
+            segmentName = segment.charAt(0).toUpperCase() + segment.slice(1)
+          }
 
           if (isLast) {
             breadcrumbItems.push(
@@ -104,12 +140,12 @@ function RootLayout() {
     }
 
     return breadcrumbItems
-  }, [pathname, matches.length])
+  }, [pathname, matches.length, agent?.name])
 
   return (
-    <SidebarProvider>
-      <AppSidebar user={sidebarUser} onSignOut={signOut} />
-      <SidebarInset>
+    <SidebarProvider className="h-full">
+      <AppSidebar user={user} onSignOut={onSignOut} />
+      <SidebarInset className="h-full flex flex-col">
         <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12">
           <div className="flex items-center gap-2 px-4">
             <SidebarTrigger className="-ml-1" />
@@ -124,7 +160,7 @@ function RootLayout() {
             </Breadcrumb>
           </div>
         </header>
-        <div className="flex flex-1 flex-col px-4">
+        <div className="flex flex-1 flex-col overflow-hidden">
           <Outlet />
         </div>
       </SidebarInset>

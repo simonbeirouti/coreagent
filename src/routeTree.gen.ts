@@ -13,10 +13,11 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as DocumentationRouteImport } from './routes/documentation'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as PlaygroundIndexRouteImport } from './routes/playground/index'
-import { Route as PlaygroundStarredRouteImport } from './routes/playground/starred'
-import { Route as PlaygroundSettingsRouteImport } from './routes/playground/settings'
-import { Route as PlaygroundHistoryRouteImport } from './routes/playground/history'
+import { Route as AgentsIndexRouteImport } from './routes/agents/index'
+import { Route as AgentsCreateRouteImport } from './routes/agents/create'
+import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as AgentsAgentIdSettingsRouteImport } from './routes/agents/$agentId.settings'
+import { Route as AgentsAgentIdChatRouteImport } from './routes/agents/$agentId.chat'
 
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
@@ -38,25 +39,30 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PlaygroundIndexRoute = PlaygroundIndexRouteImport.update({
-  id: '/playground/',
-  path: '/playground/',
+const AgentsIndexRoute = AgentsIndexRouteImport.update({
+  id: '/agents/',
+  path: '/agents/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PlaygroundStarredRoute = PlaygroundStarredRouteImport.update({
-  id: '/playground/starred',
-  path: '/playground/starred',
+const AgentsCreateRoute = AgentsCreateRouteImport.update({
+  id: '/agents/create',
+  path: '/agents/create',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PlaygroundSettingsRoute = PlaygroundSettingsRouteImport.update({
-  id: '/playground/settings',
-  path: '/playground/settings',
+const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
+  id: '/agents/$agentId',
+  path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PlaygroundHistoryRoute = PlaygroundHistoryRouteImport.update({
-  id: '/playground/history',
-  path: '/playground/history',
-  getParentRoute: () => rootRouteImport,
+const AgentsAgentIdSettingsRoute = AgentsAgentIdSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
+const AgentsAgentIdChatRoute = AgentsAgentIdChatRouteImport.update({
+  id: '/chat',
+  path: '/chat',
+  getParentRoute: () => AgentsAgentIdRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -64,20 +70,22 @@ export interface FileRoutesByFullPath {
   '/documentation': typeof DocumentationRoute
   '/models': typeof ModelsRoute
   '/settings': typeof SettingsRoute
-  '/playground/history': typeof PlaygroundHistoryRoute
-  '/playground/settings': typeof PlaygroundSettingsRoute
-  '/playground/starred': typeof PlaygroundStarredRoute
-  '/playground/': typeof PlaygroundIndexRoute
+  '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/agents/create': typeof AgentsCreateRoute
+  '/agents/': typeof AgentsIndexRoute
+  '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/documentation': typeof DocumentationRoute
   '/models': typeof ModelsRoute
   '/settings': typeof SettingsRoute
-  '/playground/history': typeof PlaygroundHistoryRoute
-  '/playground/settings': typeof PlaygroundSettingsRoute
-  '/playground/starred': typeof PlaygroundStarredRoute
-  '/playground': typeof PlaygroundIndexRoute
+  '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/agents/create': typeof AgentsCreateRoute
+  '/agents': typeof AgentsIndexRoute
+  '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -85,10 +93,11 @@ export interface FileRoutesById {
   '/documentation': typeof DocumentationRoute
   '/models': typeof ModelsRoute
   '/settings': typeof SettingsRoute
-  '/playground/history': typeof PlaygroundHistoryRoute
-  '/playground/settings': typeof PlaygroundSettingsRoute
-  '/playground/starred': typeof PlaygroundStarredRoute
-  '/playground/': typeof PlaygroundIndexRoute
+  '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/agents/create': typeof AgentsCreateRoute
+  '/agents/': typeof AgentsIndexRoute
+  '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -97,30 +106,33 @@ export interface FileRouteTypes {
     | '/documentation'
     | '/models'
     | '/settings'
-    | '/playground/history'
-    | '/playground/settings'
-    | '/playground/starred'
-    | '/playground/'
+    | '/agents/$agentId'
+    | '/agents/create'
+    | '/agents/'
+    | '/agents/$agentId/chat'
+    | '/agents/$agentId/settings'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/documentation'
     | '/models'
     | '/settings'
-    | '/playground/history'
-    | '/playground/settings'
-    | '/playground/starred'
-    | '/playground'
+    | '/agents/$agentId'
+    | '/agents/create'
+    | '/agents'
+    | '/agents/$agentId/chat'
+    | '/agents/$agentId/settings'
   id:
     | '__root__'
     | '/'
     | '/documentation'
     | '/models'
     | '/settings'
-    | '/playground/history'
-    | '/playground/settings'
-    | '/playground/starred'
-    | '/playground/'
+    | '/agents/$agentId'
+    | '/agents/create'
+    | '/agents/'
+    | '/agents/$agentId/chat'
+    | '/agents/$agentId/settings'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -128,10 +140,9 @@ export interface RootRouteChildren {
   DocumentationRoute: typeof DocumentationRoute
   ModelsRoute: typeof ModelsRoute
   SettingsRoute: typeof SettingsRoute
-  PlaygroundHistoryRoute: typeof PlaygroundHistoryRoute
-  PlaygroundSettingsRoute: typeof PlaygroundSettingsRoute
-  PlaygroundStarredRoute: typeof PlaygroundStarredRoute
-  PlaygroundIndexRoute: typeof PlaygroundIndexRoute
+  AgentsAgentIdRoute: typeof AgentsAgentIdRouteWithChildren
+  AgentsCreateRoute: typeof AgentsCreateRoute
+  AgentsIndexRoute: typeof AgentsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -164,46 +175,66 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/playground/': {
-      id: '/playground/'
-      path: '/playground'
-      fullPath: '/playground/'
-      preLoaderRoute: typeof PlaygroundIndexRouteImport
+    '/agents/': {
+      id: '/agents/'
+      path: '/agents'
+      fullPath: '/agents/'
+      preLoaderRoute: typeof AgentsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/playground/starred': {
-      id: '/playground/starred'
-      path: '/playground/starred'
-      fullPath: '/playground/starred'
-      preLoaderRoute: typeof PlaygroundStarredRouteImport
+    '/agents/create': {
+      id: '/agents/create'
+      path: '/agents/create'
+      fullPath: '/agents/create'
+      preLoaderRoute: typeof AgentsCreateRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/playground/settings': {
-      id: '/playground/settings'
-      path: '/playground/settings'
-      fullPath: '/playground/settings'
-      preLoaderRoute: typeof PlaygroundSettingsRouteImport
+    '/agents/$agentId': {
+      id: '/agents/$agentId'
+      path: '/agents/$agentId'
+      fullPath: '/agents/$agentId'
+      preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/playground/history': {
-      id: '/playground/history'
-      path: '/playground/history'
-      fullPath: '/playground/history'
-      preLoaderRoute: typeof PlaygroundHistoryRouteImport
-      parentRoute: typeof rootRouteImport
+    '/agents/$agentId/settings': {
+      id: '/agents/$agentId/settings'
+      path: '/settings'
+      fullPath: '/agents/$agentId/settings'
+      preLoaderRoute: typeof AgentsAgentIdSettingsRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
+    '/agents/$agentId/chat': {
+      id: '/agents/$agentId/chat'
+      path: '/chat'
+      fullPath: '/agents/$agentId/chat'
+      preLoaderRoute: typeof AgentsAgentIdChatRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
     }
   }
 }
+
+interface AgentsAgentIdRouteChildren {
+  AgentsAgentIdChatRoute: typeof AgentsAgentIdChatRoute
+  AgentsAgentIdSettingsRoute: typeof AgentsAgentIdSettingsRoute
+}
+
+const AgentsAgentIdRouteChildren: AgentsAgentIdRouteChildren = {
+  AgentsAgentIdChatRoute: AgentsAgentIdChatRoute,
+  AgentsAgentIdSettingsRoute: AgentsAgentIdSettingsRoute,
+}
+
+const AgentsAgentIdRouteWithChildren = AgentsAgentIdRoute._addFileChildren(
+  AgentsAgentIdRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DocumentationRoute: DocumentationRoute,
   ModelsRoute: ModelsRoute,
   SettingsRoute: SettingsRoute,
-  PlaygroundHistoryRoute: PlaygroundHistoryRoute,
-  PlaygroundSettingsRoute: PlaygroundSettingsRoute,
-  PlaygroundStarredRoute: PlaygroundStarredRoute,
-  PlaygroundIndexRoute: PlaygroundIndexRoute,
+  AgentsAgentIdRoute: AgentsAgentIdRouteWithChildren,
+  AgentsCreateRoute: AgentsCreateRoute,
+  AgentsIndexRoute: AgentsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
