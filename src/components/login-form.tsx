@@ -24,9 +24,16 @@ export function LoginForm({
 }: React.ComponentProps<"div">) {
   const [step, setStep] = useState<"email" | "otp">("email")
   const [email, setEmail] = useState("")
+  const [firstName, setFirstName] = useState("")
+  const [lastName, setLastName] = useState("")
   const [otp, setOtp] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<{
+    firstName?: string
+    lastName?: string
+    email?: string
+  }>({})
   const [resendDisabled, setResendDisabled] = useState(false)
   const [resendCountdown, setResendCountdown] = useState(0)
 
@@ -39,16 +46,59 @@ export function LoginForm({
     }
   }, [resendCountdown])
 
+  // Validation functions
+  const validateFirstName = (value: string): string | undefined => {
+    if (!value.trim()) return "First name is required"
+    if (value.trim().length < 2) return "First name must be at least 2 characters"
+    if (!/^[a-zA-Z\s-']+$/.test(value.trim())) return "First name can only contain letters, spaces, hyphens, and apostrophes"
+    return undefined
+  }
+
+  const validateLastName = (value: string): string | undefined => {
+    if (!value.trim()) return "Last name is required"
+    if (value.trim().length < 2) return "Last name must be at least 2 characters"
+    if (!/^[a-zA-Z\s-']+$/.test(value.trim())) return "Last name can only contain letters, spaces, hyphens, and apostrophes"
+    return undefined
+  }
+
+  const validateEmail = (value: string): string | undefined => {
+    if (!value.trim()) return "Email is required"
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
+    if (!emailRegex.test(value.trim())) return "Please enter a valid email address"
+    return undefined
+  }
+
+  const validateForm = (): boolean => {
+    const errors = {
+      firstName: validateFirstName(firstName),
+      lastName: validateLastName(lastName),
+      email: validateEmail(email),
+    }
+
+    setFieldErrors(errors)
+    return !Object.values(errors).some(error => error !== undefined)
+  }
+
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault()
-    setLoading(true)
     setError(null)
+
+    if (!validateForm()) {
+      return
+    }
+
+    setLoading(true)
 
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
         options: {
           shouldCreateUser: true,
+          data: {
+            first_name: firstName.trim(),
+            last_name: lastName.trim(),
+            full_name: `${firstName.trim()} ${lastName.trim()}`.trim(),
+          },
         },
       })
 
@@ -90,14 +140,25 @@ export function LoginForm({
   }
 
   const handleResendOtp = async () => {
-    setLoading(true)
     setError(null)
+    setFieldErrors({})
+
+    if (!validateForm()) {
+      return
+    }
+
+    setLoading(true)
 
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
         options: {
           shouldCreateUser: true,
+          data: {
+            first_name: firstName.trim(),
+            last_name: lastName.trim(),
+            full_name: `${firstName.trim()} ${lastName.trim()}`.trim(),
+          },
         },
       })
 
@@ -117,6 +178,8 @@ export function LoginForm({
     setStep("email")
     setOtp("")
     setError(null)
+    setFieldErrors({})
+    // Keep the name fields filled in case they want to resend
   }
 
   if (step === "otp") {
@@ -227,17 +290,67 @@ export function LoginForm({
             <div className="text-sm text-red-500 text-center">{error}</div>
           )}
 
+          <div className="grid grid-cols-2 gap-4">
+            <Field>
+              <FieldLabel htmlFor="firstName">First Name</FieldLabel>
+              <Input
+                id="firstName"
+                type="text"
+                placeholder="John"
+                value={firstName}
+                onChange={(e) => {
+                  setFirstName(e.target.value)
+                  if (fieldErrors.firstName) {
+                    setFieldErrors(prev => ({ ...prev, firstName: undefined }))
+                  }
+                }}
+                disabled={loading}
+                required
+              />
+              {fieldErrors.firstName && (
+                <p className="text-sm text-red-500 mt-1">{fieldErrors.firstName}</p>
+              )}
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="lastName">Last Name</FieldLabel>
+              <Input
+                id="lastName"
+                type="text"
+                placeholder="Doe"
+                value={lastName}
+                onChange={(e) => {
+                  setLastName(e.target.value)
+                  if (fieldErrors.lastName) {
+                    setFieldErrors(prev => ({ ...prev, lastName: undefined }))
+                  }
+                }}
+                disabled={loading}
+                required
+              />
+              {fieldErrors.lastName && (
+                <p className="text-sm text-red-500 mt-1">{fieldErrors.lastName}</p>
+              )}
+            </Field>
+          </div>
           <Field>
             <FieldLabel htmlFor="email">Email</FieldLabel>
             <Input
               id="email"
               type="email"
-              placeholder="m@example.com"
+              placeholder="john.doe@example.com"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value)
+                if (fieldErrors.email) {
+                  setFieldErrors(prev => ({ ...prev, email: undefined }))
+                }
+              }}
               disabled={loading}
               required
             />
+            {fieldErrors.email && (
+              <p className="text-sm text-red-500 mt-1">{fieldErrors.email}</p>
+            )}
           </Field>
           <Field>
             <Button type="submit" disabled={loading}>
