@@ -31,7 +31,7 @@ function Documentation() {
   ]
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 px-4">
       <Card>
         <CardHeader>
           <CardTitle>Documentation</CardTitle>
@@ -61,25 +61,6 @@ function Documentation() {
                 </CardContent>
               </Card>
             ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Quick Links</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-2 md:grid-cols-3">
-            <Button variant="outline" className="justify-start">
-              📚 API Reference
-            </Button>
-            <Button variant="outline" className="justify-start">
-              🐛 Report Issue
-            </Button>
-            <Button variant="outline" className="justify-start">
-              💬 Community Forum
-            </Button>
           </div>
         </CardContent>
       </Card>

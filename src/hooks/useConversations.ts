@@ -113,7 +113,7 @@ export function useSendMessage() {
         );
       }
     },
-    onSuccess: (data, request) => {
+    onSuccess: (_data, request) => {
       // Replace the entire messages list with fresh data from server
       // The server returns the AI response, so we need to refetch to get both messages
       queryClient.invalidateQueries({ 

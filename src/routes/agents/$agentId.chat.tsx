@@ -6,8 +6,9 @@ import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { MessageSquare, Send, Plus, History } from 'lucide-react';
+import { MessageSquare, Send, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
@@ -21,14 +22,14 @@ function AgentChatPage() {
   const userId = user?.id || '';
   
   const { data: agent, isLoading: agentLoading } = useAgent(agentId);
-  const { data: conversations } = useConversations(agentId);
+  const { data: conversations, isLoading: conversationsLoading } = useConversations(agentId);
   const createConversation = useCreateConversation();
   const sendMessage = useSendMessage();
 
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
 
-  const { data: messages } = useMessages(activeConversationId || '');
+  const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
@@ -51,12 +52,14 @@ function AgentChatPage() {
     prevMessagesCountRef.current = currentMessageCount;
   }, [messages]);
 
-  // Create or select the first conversation
+  // Auto-scroll to bottom when conversation loads or switches
   useEffect(() => {
-    if (!activeConversationId && conversations && conversations.length > 0) {
-      setActiveConversationId(conversations[0].id);
+    if (messages && messages.length > 0) {
+      // Scroll immediately when loading a conversation or switching to one
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     }
-  }, [conversations, activeConversationId]);
+  }, [activeConversationId, messages]);
+
 
   const handleStartNewConversation = async () => {
     try {
@@ -117,10 +120,37 @@ function AgentChatPage() {
     }
   };
 
-  if (agentLoading) {
+  if (agentLoading || conversationsLoading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-muted-foreground">Loading agent...</div>
+      <div className="flex h-full overflow-hidden">
+        {/* History Sidebar Skeleton */}
+        <div className="w-64 border-r bg-background flex flex-col h-full">
+          <div className="p-2 border-b shrink-0">
+            <Skeleton className="h-10 w-full" />
+          </div>
+          <div className="p-2 flex flex-col flex-1 min-h-0">
+            <div className="space-y-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="px-3 py-2">
+                  <Skeleton className="h-4 w-full mb-1" />
+                  <Skeleton className="h-3 w-3/4" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Chat Area Skeleton */}
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Empty State Placeholder */}
+          <div className="flex-1 overflow-hidden">
+            <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+              <Skeleton className="h-12 w-12 mb-4" />
+              <Skeleton className="h-4 w-40 mb-4" />
+              <Skeleton className="h-3 w-60 mb-4" />
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -184,9 +214,20 @@ function AgentChatPage() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Messages */}
         <div className="flex-1 overflow-hidden">
-          <ScrollArea className="h-full">
-            {messages && messages.length > 0 ? (
-              <div className="space-y-4 max-w-3xl mx-auto py-4 px-4">
+          {activeConversationId && messagesLoading ? (
+            /* Loading skeleton when messages are being fetched */
+            <div className="space-y-4 pt-4 px-4">
+              {Array.from({ length: 9 }).map((_, i) => (
+                <div key={i} className={`flex ${i % 2 === 0 ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] p-0`}>
+                    <Skeleton className="h-16 w-64" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : messages && messages.length > 0 ? (
+            <ScrollArea className="h-full">
+              <div className="space-y-4 px-4 pt-4">
                 {messages.map((message) => (
                   <div
                     key={message.id}
@@ -216,36 +257,38 @@ function AgentChatPage() {
                 ))}
                 <div ref={messagesEndRef} />
               </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-                <MessageSquare className="h-12 w-12 mb-4 opacity-50" />
-                <p className="text-lg font-medium">Start a conversation</p>
-                <p className="text-sm">Send a message to chat with {agent.name}</p>
-              </div>
-            )}
-          </ScrollArea>
+            </ScrollArea>
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+              <MessageSquare className="h-12 w-12 mb-4 opacity-50" />
+              <p className="text-lg font-medium">Start a conversation</p>
+              <p className="text-sm">Send a message to chat with {agent.name}</p>
+            </div>
+          )}
         </div>
 
-        {/* Message Input */}
-        <div className="border-t p-4 shrink-0 bg-background">
-          <div className="max-w-3xl mx-auto flex gap-2">
-            <Input
-              value={messageInput}
-              onChange={(e) => setMessageInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder={`Message ${agent.name}...`}
-              disabled={sendMessage.isPending}
-              className="flex-1"
-            />
-            <Button
-              onClick={handleSendMessage}
-              disabled={!messageInput.trim() || sendMessage.isPending}
-              size="icon"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
+        {/* Message Input - Only show when we have an active conversation */}
+        {activeConversationId && (
+          <div className="border-t p-4 shrink-0 bg-background">
+            <div className="mx-auto flex gap-2">
+              <Input
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder={`Message ${agent.name}...`}
+                disabled={sendMessage.isPending}
+                className="flex-1"
+              />
+              <Button
+                onClick={handleSendMessage}
+                disabled={!messageInput.trim() || sendMessage.isPending}
+                size="icon"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

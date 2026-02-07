@@ -11,6 +11,7 @@ import {
   BreadcrumbSeparator,
 } from '@/components/ui/breadcrumb'
 import { Separator } from '@/components/ui/separator'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   SidebarInset,
   SidebarProvider,
@@ -95,9 +96,12 @@ function LayoutContent({
           const isUUID = segment.length > 20 && segment.includes('-')
           
           // Use agent name if available and this is a UUID, otherwise capitalize
-          let segmentName: string
+          let segmentName: string | React.ReactNode
           if (isUUID && agent?.name) {
             segmentName = agent.name
+          } else if (isUUID && agentId && !agent) {
+            // Agent is loading
+            segmentName = <Skeleton className="h-4 w-20 inline-block" />
           } else if (isUUID) {
             segmentName = 'Agent'
           } else {

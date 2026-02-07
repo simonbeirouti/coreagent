@@ -1,4 +1,5 @@
 use crate::entities::agents::{self, Entity as Agents, ActiveModel, Model};
+use crate::user_profile_service::{UserProfileService, UserProfileData};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -14,6 +15,9 @@ pub struct AgentData {
     pub provider_type: String,
     pub model_id: String,
     pub state: String,
+    pub mission: Option<String>,
+    pub values: Option<Vec<String>>,
+    pub behavioral_constraints: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -25,6 +29,9 @@ pub struct CreateAgentRequest {
     pub provider_type: String,
     pub model_id: String,
     pub user_id: String,
+    pub mission: Option<String>,
+    pub values: Option<Vec<String>>,
+    pub behavioral_constraints: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +41,9 @@ pub struct UpdateAgentRequest {
     pub provider_type: Option<String>,
     pub model_id: Option<String>,
     pub state: Option<String>,
+    pub mission: Option<String>,
+    pub values: Option<Vec<String>>,
+    pub behavioral_constraints: Option<serde_json::Value>,
 }
 
 // Convert SeaORM model to our AgentData struct
@@ -47,6 +57,9 @@ impl From<agents::Model> for AgentData {
             provider_type: model.provider_type,
             model_id: model.model_id,
             state: model.state,
+            mission: model.mission,
+            values: model.values,
+            behavioral_constraints: model.behavioral_constraints,
             created_at: model.created_at.into(),
             updated_at: model.updated_at.into(),
         }
@@ -81,6 +94,9 @@ impl AgentService {
             provider_type: ActiveValue::Set(request.provider_type),
             model_id: ActiveValue::Set(request.model_id),
             state: ActiveValue::Set(state),
+            mission: ActiveValue::Set(request.mission),
+            values: ActiveValue::Set(request.values),
+            behavioral_constraints: ActiveValue::Set(request.behavioral_constraints),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
@@ -166,6 +182,15 @@ impl AgentService {
             }
             agent.state = Set(state);
         }
+        if let Some(mission) = updates.mission {
+            agent.mission = Set(Some(mission));
+        }
+        if let Some(values) = updates.values {
+            agent.values = Set(Some(values));
+        }
+        if let Some(behavioral_constraints) = updates.behavioral_constraints {
+            agent.behavioral_constraints = Set(Some(behavioral_constraints));
+        }
 
         agent.updated_at = Set(chrono::Utc::now().into());
 
@@ -217,12 +242,23 @@ impl AgentService {
 
         println!("[AGENT] Agent {} processing message with {} history items", agent.name, history.len());
 
-        // Call AI client with agent's configuration
+        // Fetch user profile for personalized context
+        let user_profile = UserProfileService::get_or_create_profile(
+            db,
+            agent.user_id.to_string()
+        ).await.ok();
+
+        // Call AI client with agent's configuration and user profile
         let response = ai_client
             .get_completion(
                 &agent.provider_type,
                 &agent.model_id,
+                &agent.name,
                 &agent.persona,
+                agent.mission.as_deref(),
+                agent.values.as_deref(),
+                agent.behavioral_constraints.as_ref(),
+                user_profile.as_ref(),
                 history,
                 &message,
             )

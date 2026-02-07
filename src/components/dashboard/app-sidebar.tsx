@@ -5,10 +5,12 @@ import {
   GalleryVerticalEnd,
   Bot,
   Home,
+  BookOpen,
+  Settings
 } from "lucide-react"
 
 import { NavAgents } from "./nav-agents"
-import { NavUser } from "./nav-user"
+import { NavFooter } from "./nav-footer"
 import { TeamSwitcher } from "./team-switcher"
 import {
   Sidebar,
@@ -40,11 +42,24 @@ const data = {
       icon: Bot,
     }
   ],
+  secondaryItems: [
+    {
+      title: "Documentation",
+      url: "/documentation",
+      icon: BookOpen,
+    },
+    {
+      title: "Settings",
+      url: "/settings",
+      icon: Settings,
+    },
+  ],
 }
 
 export const AppSidebar = React.memo(function AppSidebar({
   user,
   onSignOut,
+  footerLinks,
   ...props
 }: {
   user: {
@@ -53,6 +68,11 @@ export const AppSidebar = React.memo(function AppSidebar({
     avatar: string
   }
   onSignOut?: () => void
+  footerLinks?: Array<{
+    title: string
+    url: string
+    icon?: React.ComponentType<{ className?: string }>
+  }>
 } & React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -64,7 +84,11 @@ export const AppSidebar = React.memo(function AppSidebar({
         <NavAgents />
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={user} onSignOut={onSignOut} />
+        <NavFooter
+          footerLinks={footerLinks || data.secondaryItems}
+          user={user}
+          onSignOut={onSignOut}
+        />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

@@ -4,6 +4,7 @@ mod entities;
 mod agent_service;
 mod conversation_service;
 mod ai_client;
+mod user_profile_service;
 
 use tauri::Manager;
 use auth::{AuthState, SessionData};

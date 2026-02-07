@@ -1,0 +1,37 @@
+---
+description: Run comprehensive checks before commits and deployments
+alwaysApply: true
+---
+
+# Run Project Checks Regularly
+
+Before committing code or deploying, always run the comprehensive check suite:
+
+```bash
+pnpm run check
+```
+
+This command runs both TypeScript and Rust checks:
+- **TypeScript**: `tsc --noEmit` - Type checking without emitting files
+- **Rust**: `cargo check && cargo clippy` - Compilation and linting with warnings as errors
+
+## When to Run Checks
+
+- ✅ Before committing code
+- ✅ Before creating pull requests
+- ✅ After significant refactoring
+- ✅ Before deployments
+
+## Quick Individual Checks
+
+If you need to run checks on specific parts:
+
+```bash
+# TypeScript only
+pnpm run check:ts
+
+# Rust only
+pnpm run check:rust
+```
+
+Running checks early and often helps catch issues before they reach CI/CD pipelines.

@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Plus, Bot, Trash2, Edit, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
+import { Header } from '@/components/header';
 
 export const Route = createFileRoute('/agents/')({
   component: AgentsPage,
@@ -48,20 +49,14 @@ function AgentsPage() {
 
   return (
     <div className="space-y-6 px-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">AI Agents</h1>
-          <p className="text-muted-foreground">
-            Manage your AI agents and their configurations
-          </p>
-        </div>
+      <Header title="AI Agents" description="Manage your AI agents and their configurations">
         <Button asChild>
           <Link to="/agents/create">
             <Plus className="mr-2 h-4 w-4" />
             Create Agent
           </Link>
         </Button>
-      </div>
+      </Header>
 
       {agents && agents.length === 0 ? (
         <Card>

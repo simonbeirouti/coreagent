@@ -16,22 +16,14 @@ function AgentLayout() {
   const { agentId } = Route.useParams();
   const matchRoute = useMatchRoute();
   
-  const { data: agent, isLoading, error } = useAgent(agentId);
+  const { isLoading, error } = useAgent(agentId);
 
   // Check which route is currently active
   const isChatRoute = matchRoute({ to: '/agents/$agentId/chat', params: { agentId } });
   const isSettingsRoute = matchRoute({ to: '/agents/$agentId/settings', params: { agentId } });
   const isExactAgentRoute = matchRoute({ to: '/agents/$agentId', params: { agentId } });
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-muted-foreground">Loading agent...</div>
-      </div>
-    );
-  }
-
-  if (error || !agent) {
+  if (error) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-destructive">Error loading agent</div>
@@ -39,8 +31,8 @@ function AgentLayout() {
     );
   }
 
-  // Redirect to chat if on exact agent route
-  if (isExactAgentRoute && !isChatRoute && !isSettingsRoute) {
+  // Redirect to chat if on exact agent route (only when not loading)
+  if (!isLoading && isExactAgentRoute && !isChatRoute && !isSettingsRoute) {
     return <Navigate to="/agents/$agentId/chat" params={{ agentId }} replace />;
   }
 
@@ -70,7 +62,7 @@ function AgentLayout() {
       </div>
 
       {/* Child Routes */}
-      <div className="flex-1 overflow-hidden -mt-4">
+      <div className="flex-1 flex flex-col overflow-hidden -mt-4">
         <Outlet />
       </div>
     </div>

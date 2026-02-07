@@ -71,7 +71,7 @@ export function useCreateAgent() {
 
       return { previousAgents, userId: request.user_id };
     },
-    onError: (err, request, context) => {
+    onError: (err, _request, context) => {
       console.error('Failed to create agent:', err);
       
       // Rollback on error
@@ -82,7 +82,7 @@ export function useCreateAgent() {
         );
       }
     },
-    onSettled: (data, error, request) => {
+    onSettled: (_data, _error, _request) => {
       // Refetch to ensure consistency
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
     },
@@ -134,7 +134,7 @@ export function useUpdateAgent() {
 
       return { previousAgent, previousLists, agentId };
     },
-    onError: (err, variables, context) => {
+    onError: (err, _variables, context) => {
       console.error('Failed to update agent:', err);
       
       // Rollback on error
@@ -147,7 +147,7 @@ export function useUpdateAgent() {
         });
       }
     },
-    onSettled: (data, error, variables) => {
+    onSettled: (_data, _error, variables) => {
       // Refetch to ensure consistency
       queryClient.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
@@ -179,7 +179,7 @@ export function useDeleteAgent() {
 
       return { previousLists, agentId };
     },
-    onError: (err, agentId, context) => {
+    onError: (err, _agentId, context) => {
       console.error('Failed to delete agent:', err);
       
       // Rollback on error

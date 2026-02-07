@@ -8,6 +8,9 @@ export interface Agent {
   provider_type: 'openai' | 'anthropic';
   model_id: string;
   state: 'active' | 'paused' | 'stopped';
+  mission?: string;
+  values?: string[];
+  behavioral_constraints?: Record<string, any>;
   created_at: string;
   updated_at: string;
 }
@@ -18,6 +21,9 @@ export interface CreateAgentRequest {
   provider_type: 'openai' | 'anthropic';
   model_id: string;
   user_id: string;
+  mission?: string;
+  values?: string[];
+  behavioral_constraints?: Record<string, any>;
 }
 
 export interface UpdateAgentRequest {
@@ -26,6 +32,9 @@ export interface UpdateAgentRequest {
   provider_type?: 'openai' | 'anthropic';
   model_id?: string;
   state?: 'active' | 'paused' | 'stopped';
+  mission?: string;
+  values?: string[];
+  behavioral_constraints?: Record<string, any>;
 }
 
 export interface AgentStats {

@@ -14,6 +14,9 @@ pub struct Model {
     pub provider_type: String,
     pub model_id: String,
     pub state: String,
+    pub mission: Option<String>,
+    pub values: Option<Vec<String>>,
+    pub behavioral_constraints: Option<Json>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }
