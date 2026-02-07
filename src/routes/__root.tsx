@@ -1,7 +1,11 @@
 import { Outlet, createRootRoute, useMatches, Link } from '@tanstack/react-router'
-import { useMemo } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { AppSidebar } from '@/components/dashboard/app-sidebar'
 import { QueryProvider } from '@/providers/query-provider'
+import { ensureCacheLoaded } from '@/lib/tauri-store'
+
+// Module-level: start loading cache immediately
+const cachePromise = ensureCacheLoaded()
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -26,6 +30,16 @@ export const Route = createRootRoute({
 
 function RootLayout() {
   const { user, signOut } = useAuth()
+  const [cacheReady, setCacheReady] = useState(false)
+
+  // Wait for cache to load before rendering
+  useEffect(() => {
+    cachePromise.then(() => {
+      setCacheReady(true)
+    }).catch(() => {
+      setCacheReady(true) // Continue even if cache fails
+    })
+  }, [])
 
   // Format user data for sidebar - memoized to prevent re-renders
   const sidebarUser = useMemo(() =>
@@ -39,6 +53,11 @@ function RootLayout() {
       avatar: '',
     }, [user]
   )
+
+  // Wait for cache before rendering
+  if (!cacheReady) {
+    return null
+  }
 
   return (
     <QueryProvider>

@@ -33,6 +33,12 @@ function AgentChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
+  // Reset local state when switching agents
+  useEffect(() => {
+    setActiveConversationId(null);
+    setMessageInput('');
+  }, [agentId]);
+
   // Reset message count when switching conversations
   useEffect(() => {
     prevMessagesCountRef.current = messages?.length || 0;

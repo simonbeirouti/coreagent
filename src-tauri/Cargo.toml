@@ -36,3 +36,6 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenv = "0.15"
 
+# Store Plugin
+tauri-plugin-store = "2"
+

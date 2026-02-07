@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { Agent, CreateAgentRequest, UpdateAgentRequest } from '../types';
+import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 
 // Query keys
 export const agentKeys = {
@@ -13,23 +14,33 @@ export const agentKeys = {
 
 // Fetch all agents for a user
 export function useAgents(userId: string) {
+  const initialData = getCachedData<Agent[]>(agentKeys.list(userId));
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(agentKeys.list(userId));
+
   return useQuery({
     queryKey: agentKeys.list(userId),
     queryFn: async (): Promise<Agent[]> => {
       return await invoke('list_agents', { userId });
     },
     enabled: !!userId,
+    initialData,
+    initialDataUpdatedAt,
   });
 }
 
 // Fetch a single agent
 export function useAgent(agentId: string) {
+  const initialData = getCachedData<Agent>(agentKeys.detail(agentId));
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(agentKeys.detail(agentId));
+
   return useQuery({
     queryKey: agentKeys.detail(agentId),
     queryFn: async (): Promise<Agent> => {
       return await invoke('get_agent', { agentId });
     },
     enabled: !!agentId,
+    initialData,
+    initialDataUpdatedAt,
   });
 }
 

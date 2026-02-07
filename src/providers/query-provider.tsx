@@ -1,5 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+import { saveCache } from '@/lib/tauri-store';
+import { useEffect, useRef } from 'react';
 
 // Create a client
 function makeQueryClient() {
@@ -12,7 +14,7 @@ function makeQueryClient() {
         gcTime: 5 * 60 * 1000, // Keep unused data for 5 minutes
         refetchOnWindowFocus: true, // Refresh when user returns to tab
         refetchOnReconnect: true, // Refresh on network reconnect
-        retry: (failureCount, error) => {
+        retry: (failureCount: number, error: unknown) => {
           // Don't retry on 4xx errors
           if (error instanceof Error && error.message.includes('4')) {
             return false;
@@ -49,6 +51,35 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
   // because React will throw away the client on the initial render if
   // it suspends and there is no boundary
   const queryClient = getQueryClient();
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Subscribe to cache changes and persist them
+  useEffect(() => {
+    const unsubscribe = queryClient.getQueryCache().subscribe((event: any) => {
+      // Only save on successful mutations or query updates
+      if (event.type === 'added' || event.type === 'updated') {
+        // Debounce saves to avoid excessive disk writes
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
+        }
+
+        saveTimeoutRef.current = setTimeout(async () => {
+          try {
+            await saveCache(queryClient);
+          } catch (error) {
+            console.warn('[QueryProvider] Failed to save cache:', error);
+          }
+        }, 1000); // 1 second debounce
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [queryClient]);
 
   return (
     <QueryClientProvider client={queryClient}>

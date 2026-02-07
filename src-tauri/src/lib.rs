@@ -175,6 +175,7 @@ pub fn run() {
         })
         .manage(AuthState::new())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             greet,
             set_session,

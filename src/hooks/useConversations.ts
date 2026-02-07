@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest } from '../types';
+import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 
 // Query keys
 export const conversationKeys = {
@@ -14,34 +15,49 @@ export const conversationKeys = {
 
 // Fetch conversations for an agent
 export function useConversations(agentId: string) {
+  const initialData = getCachedData<Conversation[]>(conversationKeys.list(agentId));
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(conversationKeys.list(agentId));
+
   return useQuery({
     queryKey: conversationKeys.list(agentId),
     queryFn: async (): Promise<Conversation[]> => {
       return await invoke('list_conversations', { agentId });
     },
     enabled: !!agentId,
+    initialData,
+    initialDataUpdatedAt,
   });
 }
 
 // Fetch a single conversation
 export function useConversation(conversationId: string) {
+  const initialData = getCachedData<Conversation>(conversationKeys.detail(conversationId));
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(conversationKeys.detail(conversationId));
+
   return useQuery({
     queryKey: conversationKeys.detail(conversationId),
     queryFn: async (): Promise<Conversation> => {
       return await invoke('get_conversation', { conversationId });
     },
     enabled: !!conversationId,
+    initialData,
+    initialDataUpdatedAt,
   });
 }
 
 // Fetch messages for a conversation
 export function useMessages(conversationId: string) {
+  const initialData = getCachedData<Message[]>(conversationKeys.messages(conversationId));
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(conversationKeys.messages(conversationId));
+
   return useQuery({
     queryKey: conversationKeys.messages(conversationId),
     queryFn: async (): Promise<Message[]> => {
       return await invoke('get_conversation_messages', { conversationId });
     },
     enabled: !!conversationId,
+    initialData,
+    initialDataUpdatedAt,
   });
 }
 
