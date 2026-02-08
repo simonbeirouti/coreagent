@@ -29,7 +29,7 @@ export function NavAgents() {
   const { data: agents, isLoading } = useAgents(userId)
 
   return (
-    <SidebarGroup className="-mt-4">
+    <SidebarGroup className="-mt-4 group-data-[collapsible=icon]:mt-0">
       <SidebarGroupLabel>Agents</SidebarGroupLabel>
       <SidebarMenu>
         {isLoading ? (
