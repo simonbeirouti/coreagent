@@ -14,7 +14,9 @@
       {
         "title": "coreagent",
         "width": 1620,
+        "minWidth": 810,
         "height": 1080,
+        "minHeight": 1080,
         "hiddenTitle": true,
         "titleBarStyle": "Visible"
       }

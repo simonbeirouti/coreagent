@@ -22,7 +22,7 @@ function Dashboard() {
   }
 
   return (
-    <div>
+    <div className="px-4">
       <Card>
         <CardHeader>
           <CardTitle className="text-xl font-bold">Welcome to CoreAgent</CardTitle>
