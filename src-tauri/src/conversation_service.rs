@@ -262,4 +262,83 @@ impl ConversationService {
         println!("[CONVERSATION] Updated conversation title: {}", conversation_id);
         Ok(conversation.into())
     }
+
+    /// Delete a conversation and all its messages
+    pub async fn delete_conversation(
+        db: &DatabaseConnection,
+        conversation_id: String,
+    ) -> Result<(), String> {
+        let conversation_id = Uuid::parse_str(&conversation_id)
+            .map_err(|e| format!("Invalid conversation ID: {}", e))?;
+
+        // Delete the conversation (messages will be cascade deleted due to foreign key)
+        let result = conversations::Entity::delete_by_id(conversation_id)
+            .exec(db)
+            .await
+            .map_err(|e| format!("Failed to delete conversation: {}", e))?;
+
+        if result.rows_affected == 0 {
+            return Err(format!("Conversation not found: {}", conversation_id));
+        }
+
+        println!("[CONVERSATION] Deleted conversation: {}", conversation_id);
+        Ok(())
+    }
+
+    /// Save voice transcript entries to conversation
+    /// This saves multiple transcript entries (user and assistant) as messages
+    pub async fn save_voice_transcript(
+        db: &DatabaseConnection,
+        conversation_id: String,
+        entries: Vec<TranscriptEntry>,
+    ) -> Result<Vec<MessageData>, String> {
+        let conversation_id = Uuid::parse_str(&conversation_id)
+            .map_err(|e| format!("Invalid conversation ID: {}", e))?;
+
+        // Verify the conversation exists
+        let conversation = conversations::Entity::find_by_id(conversation_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find conversation: {}", e))?
+            .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
+
+        let mut saved_messages: Vec<MessageData> = Vec::new();
+
+        for entry in entries {
+            let message = messages::ActiveModel {
+                id: ActiveValue::Set(Uuid::new_v4()),
+                conversation_id: ActiveValue::Set(conversation_id),
+                role: ActiveValue::Set(entry.role),
+                content: ActiveValue::Set(entry.text),
+                message_type: ActiveValue::Set("audio".to_string()), // Mark as audio message
+                metadata: ActiveValue::Set(serde_json::json!({
+                    "source": "voice_chat",
+                    "timestamp": entry.timestamp
+                })),
+                created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            };
+
+            let saved = message.insert(db).await
+                .map_err(|e| format!("Failed to save transcript entry: {}", e))?;
+            
+            saved_messages.push(saved.into());
+        }
+
+        // Update conversation timestamp
+        let mut conversation_model: conversations::ActiveModel = conversation.into();
+        conversation_model.updated_at = Set(chrono::Utc::now().into());
+        conversation_model.update(db).await
+            .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
+
+        println!("[CONVERSATION] Saved {} voice transcript entries to conversation: {}", saved_messages.len(), conversation_id);
+        Ok(saved_messages)
+    }
+}
+
+/// Voice transcript entry from the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptEntry {
+    pub role: String,
+    pub text: String,
+    pub timestamp: String,
 }

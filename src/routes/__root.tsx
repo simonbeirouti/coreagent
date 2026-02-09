@@ -3,6 +3,7 @@ import { useMemo, useState, useEffect } from 'react'
 import { AppSidebar } from '@/components/dashboard/app-sidebar'
 import { QueryProvider } from '@/providers/query-provider'
 import { ensureCacheLoaded } from '@/lib/tauri-store'
+import { Toaster } from '@/components/ui/sonner'
 
 // Module-level: start loading cache immediately
 const cachePromise = ensureCacheLoaded()
@@ -62,6 +63,7 @@ function RootLayout() {
   return (
     <QueryProvider>
       <LayoutContent user={sidebarUser} onSignOut={signOut} />
+      <Toaster />
     </QueryProvider>
   )
 }

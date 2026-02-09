@@ -1,7 +1,8 @@
+import { useState, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest } from '../types';
-import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
+import { getCachedData, getCachedDataUpdatedAt, removeCachedQueriesMatching, persistMemoryCache } from '../lib/tauri-store';
 
 // Query keys
 export const conversationKeys = {
@@ -70,11 +71,133 @@ export function useCreateConversation() {
       return await invoke('create_conversation', { request });
     },
     onSuccess: (data) => {
-      // Invalidate conversations list for this agent
-      queryClient.invalidateQueries({ queryKey: conversationKeys.list(data.agent_id) });
+      // Add the new conversation to the cache
+      queryClient.setQueryData<Conversation[]>(
+        conversationKeys.list(data.agent_id),
+        (old = []) => {
+          // Check if it already exists (avoid duplicates)
+          if (old.some(conv => conv.id === data.id)) {
+            return old;
+          }
+          return [data, ...old];
+        }
+      );
+
+      // Set up the conversation's cache entries
+      queryClient.setQueryData<Conversation>(
+        conversationKeys.detail(data.id),
+        data
+      );
+
+      // Pre-populate empty messages for the conversation
+      queryClient.setQueryData<Message[]>(
+        conversationKeys.messages(data.id),
+        []
+      );
     },
   });
 }
+
+// Create a conversation instantly with optimistic update
+// Returns the temporary ID immediately, then updates to real ID via callback
+export function useCreateConversationInstant() {
+  const queryClient = useQueryClient();
+  const [pendingCreates, setPendingCreates] = useState<Map<string, string>>(new Map());
+
+  const createInstant = useCallback((
+    request: CreateConversationRequest,
+    onRealIdReady?: (realId: string) => void
+  ): string => {
+    const tempId = `temp-${Date.now()}`;
+    
+    // Create optimistic conversation
+    const optimisticConversation: Conversation = {
+      id: tempId,
+      agent_id: request.agent_id,
+      user_id: request.user_id,
+      title: request.title || 'New Conversation',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Add to list immediately
+    queryClient.setQueryData<Conversation[]>(
+      conversationKeys.list(request.agent_id),
+      (old = []) => [optimisticConversation, ...old]
+    );
+
+    // Pre-populate empty messages
+    queryClient.setQueryData<Message[]>(
+      conversationKeys.messages(tempId),
+      []
+    );
+
+    // Track this pending create
+    setPendingCreates(prev => new Map(prev).set(tempId, 'pending'));
+
+    // Create in background
+    invoke<Conversation>('create_conversation', { request })
+      .then((realConversation) => {
+        // Replace optimistic with real in the list
+        queryClient.setQueryData<Conversation[]>(
+          conversationKeys.list(request.agent_id),
+          (old = []) => old.map(conv => 
+            conv.id === tempId ? realConversation : conv
+          )
+        );
+
+        // Set up real conversation cache
+        queryClient.setQueryData<Conversation>(
+          conversationKeys.detail(realConversation.id),
+          realConversation
+        );
+
+        // Move messages from temp to real ID
+        const tempMessages = queryClient.getQueryData<Message[]>(
+          conversationKeys.messages(tempId)
+        ) || [];
+        queryClient.setQueryData<Message[]>(
+          conversationKeys.messages(realConversation.id),
+          tempMessages
+        );
+        queryClient.removeQueries({ queryKey: conversationKeys.messages(tempId) });
+
+        // Update pending status
+        setPendingCreates(prev => {
+          const next = new Map(prev);
+          next.delete(tempId);
+          return next;
+        });
+
+        // Notify caller of real ID
+        onRealIdReady?.(realConversation.id);
+      })
+      .catch((error) => {
+        console.error('Failed to create conversation:', error);
+        
+        // Remove the optimistic conversation
+        queryClient.setQueryData<Conversation[]>(
+          conversationKeys.list(request.agent_id),
+          (old = []) => old.filter(conv => conv.id !== tempId)
+        );
+        queryClient.removeQueries({ queryKey: conversationKeys.messages(tempId) });
+
+        setPendingCreates(prev => {
+          const next = new Map(prev);
+          next.delete(tempId);
+          return next;
+        });
+      });
+
+    return tempId;
+  }, [queryClient]);
+
+  const isTemp = useCallback((id: string) => id.startsWith('temp-'), []);
+  const isPending = useCallback((id: string) => pendingCreates.has(id), [pendingCreates]);
+
+  return { createInstant, isTemp, isPending };
+}
+
 
 // Send a message to a conversation
 export function useSendMessage() {
@@ -145,6 +268,67 @@ export function useSendMessage() {
       queryClient.invalidateQueries({ 
         queryKey: conversationKeys.lists() 
       });
+    },
+  });
+}
+
+// Delete a conversation
+export function useDeleteConversation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ conversationId }: { conversationId: string; agentId: string }): Promise<void> => {
+      return await invoke('delete_conversation', { conversationId });
+    },
+    onMutate: async ({ conversationId, agentId }) => {
+      // Cancel any outgoing refetches to prevent overwriting our optimistic update
+      await queryClient.cancelQueries({ queryKey: conversationKeys.list(agentId) });
+
+      // Snapshot the previous conversations
+      const previousConversations = queryClient.getQueryData<Conversation[]>(
+        conversationKeys.list(agentId)
+      );
+
+      // Optimistically remove the conversation from the list
+      queryClient.setQueryData<Conversation[]>(
+        conversationKeys.list(agentId),
+        (old = []) => old.filter(conv => conv.id !== conversationId)
+      );
+
+      // Remove the conversation detail and messages immediately
+      queryClient.removeQueries({ queryKey: conversationKeys.detail(conversationId) });
+      queryClient.removeQueries({ queryKey: conversationKeys.messages(conversationId) });
+
+      // Return context for potential rollback
+      return { previousConversations };
+    },
+    onError: (err, { agentId }, context) => {
+      console.error('Failed to delete conversation:', err);
+      
+      // Rollback to previous state on error
+      if (context?.previousConversations) {
+        queryClient.setQueryData(
+          conversationKeys.list(agentId),
+          context.previousConversations
+        );
+      }
+    },
+    onSuccess: async (_data, { agentId, conversationId }) => {
+      // Invalidate to ensure we're in sync with server
+      queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+      
+      // Also remove from the persisted Tauri store cache
+      removeCachedQueriesMatching((queryKey: unknown) => {
+        if (!Array.isArray(queryKey)) return false;
+        // Remove conversation detail, messages, and list entries containing this conversation
+        return (
+          (queryKey[0] === 'conversations' && queryKey[1] === 'detail' && queryKey[2] === conversationId) ||
+          (queryKey[0] === 'conversations' && queryKey[1] === 'messages' && queryKey[2] === conversationId)
+        );
+      });
+      
+      // Persist the updated cache to disk
+      await persistMemoryCache();
     },
   });
 }

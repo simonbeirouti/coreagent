@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useAgent } from '@/hooks/useAgents';
-import { useConversations, useCreateConversation, useMessages, useSendMessage } from '@/hooks/useConversations';
+import { useConversations, useCreateConversation, useMessages, useSendMessage, useDeleteConversation } from '@/hooks/useConversations';
 import { useAuth } from '@/hooks/use-auth';
 import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
@@ -8,9 +8,141 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { MessageSquare, Send, Plus } from 'lucide-react';
+import { MessageSquare, Send, Plus, X, Image as ImageIcon, Loader2, MoreHorizontal, Pencil, Trash2 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { MicrophoneButton } from '@/components/perception/microphone-button';
+import { ScreenshotButton } from '@/components/perception/screenshot-button';
+import { getScreenshotSignedUrl } from '@/lib/storage';
+import { useVision } from '@/hooks/usePerception';
+
+// Helper to extract storage path from message content (new format)
+function extractStoragePath(content: string): string | null {
+  const match = content.match(/\[Screenshot:path:([^\]]+)\]/);
+  return match ? match[1] : null;
+}
+
+// Helper to extract legacy image URL from message content (old format - for backwards compatibility)
+function extractLegacyImageUrl(content: string): string | null {
+  const match = content.match(/\[Screenshot: (https?:\/\/[^\]]+)\]/);
+  return match ? match[1] : null;
+}
+
+// Helper to get text content without the screenshot/image markers (handles both formats)
+function getTextContent(content: string): string {
+  return content
+    .replace(/\[Screenshot:path:[^\]]+\]\n?/g, '') // New path format
+    .replace(/\[Screenshot: https?:\/\/[^\]]+\]\n?/g, '') // Legacy URL format
+    .replace(/\[Image Description: [\s\S]*?\]\n?/g, '') // Image description (for AI, not display)
+    .trim();
+}
+
+// Cache for signed URLs to avoid regenerating on every render
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+
+// Component that resolves storage paths to signed URLs
+function MessageImage({ content }: { content: string }) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  const storagePath = extractStoragePath(content);
+  const legacyUrl = extractLegacyImageUrl(content);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resolveUrl() {
+      // Legacy format: use URL directly (may not work for private buckets)
+      if (legacyUrl) {
+        setImageUrl(legacyUrl);
+        setIsLoading(false);
+        return;
+      }
+
+      // New path format: get signed URL
+      if (storagePath) {
+        // Remove "screenshots/" prefix if present since getScreenshotSignedUrl expects just the path
+        const pathWithoutBucket = storagePath.replace(/^screenshots\//, '');
+        
+        // Check cache first
+        const cached = signedUrlCache.get(pathWithoutBucket);
+        const now = Date.now();
+        
+        if (cached && cached.expiresAt > now + 60000) { // Still valid for at least 1 minute
+          setImageUrl(cached.url);
+          setIsLoading(false);
+          return;
+        }
+
+        try {
+          // Generate new signed URL (1 hour expiry)
+          const signedUrl = await getScreenshotSignedUrl(pathWithoutBucket, 3600);
+          
+          if (cancelled) return;
+          
+          if (signedUrl) {
+            // Cache with 50 minute expiry (leave buffer before actual 1 hour expiry)
+            signedUrlCache.set(pathWithoutBucket, {
+              url: signedUrl,
+              expiresAt: now + 50 * 60 * 1000,
+            });
+            setImageUrl(signedUrl);
+          } else {
+            setError(true);
+          }
+        } catch (err) {
+          console.error('Failed to get signed URL:', err);
+          if (!cancelled) setError(true);
+        }
+      }
+
+      if (!cancelled) setIsLoading(false);
+    }
+
+    resolveUrl();
+    return () => { cancelled = true; };
+  }, [storagePath, legacyUrl]);
+
+  if (!storagePath && !legacyUrl) {
+    return null;
+  }
+
+  if (isLoading) {
+    return (
+      <div className="mb-2 flex items-center justify-center h-32 bg-muted rounded-md">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (error || !imageUrl) {
+    return (
+      <div className="mb-2 flex items-center justify-center h-32 bg-muted rounded-md text-muted-foreground text-sm">
+        <ImageIcon className="h-4 w-4 mr-2" />
+        Image unavailable
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-2">
+      <img
+        src={imageUrl}
+        alt="Screenshot"
+        className="max-w-full rounded-md border cursor-pointer hover:opacity-90 transition-opacity"
+        onClick={() => window.open(imageUrl, '_blank')}
+        onError={() => setError(true)}
+      />
+    </div>
+  );
+}
 
 export const Route = createFileRoute('/agents/$agentId/chat')({
   component: AgentChatPage,
@@ -25,9 +157,20 @@ function AgentChatPage() {
   const { data: conversations, isLoading: conversationsLoading } = useConversations(agentId);
   const createConversation = useCreateConversation();
   const sendMessage = useSendMessage();
+  const deleteConversation = useDeleteConversation();
+  const { analyzeImage } = useVision(agentId);
 
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isComposingNewConversation, setIsComposingNewConversation] = useState(false);
   const [messageInput, setMessageInput] = useState('');
+  const [pendingScreenshot, setPendingScreenshot] = useState<{
+    base64: string;
+    storagePath?: string; // Path in Supabase storage
+    signedUrl?: string; // Temporary signed URL for immediate display
+    analysis?: string;
+  } | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isAnalyzingScreenshot, setIsAnalyzingScreenshot] = useState(false);
 
   const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -36,6 +179,7 @@ function AgentChatPage() {
   // Reset local state when switching agents
   useEffect(() => {
     setActiveConversationId(null);
+    setIsComposingNewConversation(false);
     setMessageInput('');
   }, [agentId]);
 
@@ -67,23 +211,59 @@ function AgentChatPage() {
   }, [activeConversationId, messages]);
 
 
-  const handleStartNewConversation = async () => {
-    try {
-      const newConversation = await createConversation.mutateAsync({
-        agent_id: agentId,
-        user_id: userId,
-        title: `Chat with ${agent?.name || 'Agent'}`,
-      });
-      setActiveConversationId(newConversation.id);
-      toast.success('New conversation started');
-    } catch (error) {
-      toast.error('Failed to start conversation');
-      console.error('Create conversation error:', error);
-    }
+  const handleStartNewConversation = () => {
+    // If we already have an active conversation or are composing, do nothing
+    if (activeConversationId || isComposingNewConversation) return;
+
+    // Just enable composing mode - don't create conversation yet
+    setIsComposingNewConversation(true);
   };
 
   const handleSendMessage = async () => {
-    if (!messageInput.trim()) return;
+    if (!messageInput.trim() && !pendingScreenshot) return;
+    
+    let finalContent = messageInput;
+    
+    // Add screenshot to message if pending (already uploaded)
+    if (pendingScreenshot) {
+      if (pendingScreenshot.storagePath) {
+        // Auto-analyze screenshot if not already analyzed
+        let imageDescription = pendingScreenshot.analysis;
+        
+        if (!imageDescription && pendingScreenshot.base64) {
+          try {
+            setIsAnalyzingScreenshot(true);
+            toast.info('Analyzing screenshot...');
+            
+            // Get AI description of the image so the agent can understand it
+            imageDescription = await analyzeImage.mutateAsync({
+              imageBase64: pendingScreenshot.base64,
+              prompt: 'Describe what you see in this screenshot in detail. Include any text, UI elements, and context that would help understand what the user is looking at.',
+            });
+          } catch (analysisError) {
+            console.error('Screenshot analysis failed:', analysisError);
+            // Continue without analysis - the image will still be shown visually
+            imageDescription = '[Image analysis unavailable]';
+          } finally {
+            setIsAnalyzingScreenshot(false);
+          }
+        }
+        
+        // Include both the image path (for display) and the analysis (for AI understanding)
+        // Format: [Screenshot:path:...]\n[Image Description: ...]\nUser message
+        finalContent = `[Screenshot:path:${pendingScreenshot.storagePath}]\n`;
+        if (imageDescription) {
+          finalContent += `[Image Description: ${imageDescription}]\n`;
+        }
+        finalContent += messageInput;
+      } else {
+        // Fallback: screenshot wasn't uploaded (user not authenticated?)
+        console.warn('Screenshot was captured but not uploaded to storage');
+      }
+      setPendingScreenshot(null);
+    }
+    
+    if (!finalContent.trim()) return;
     
     if (!activeConversationId) {
       // Create a new conversation if none exists
@@ -94,22 +274,25 @@ function AgentChatPage() {
           title: `Chat with ${agent?.name || 'Agent'}`,
         });
         setActiveConversationId(newConversation.id);
-        
+        setIsComposingNewConversation(false); // Exit composing mode now that we have a real conversation
+
         // Send the message to the new conversation
         await sendMessage.mutateAsync({
           conversation_id: newConversation.id,
-          content: messageInput,
+          content: finalContent,
         });
         setMessageInput('');
       } catch (error) {
         toast.error('Failed to send message');
         console.error('Send message error:', error);
+        // Reset composing state on error so user can try again
+        setIsComposingNewConversation(false);
       }
     } else {
       try {
         await sendMessage.mutateAsync({
           conversation_id: activeConversationId,
-          content: messageInput,
+          content: finalContent,
         });
         setMessageInput('');
       } catch (error) {
@@ -123,6 +306,57 @@ function AgentChatPage() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
+    }
+  };
+
+  const handleTranscription = (text: string, options?: { streaming?: boolean; isTranscribing?: boolean }) => {
+    // Update transcribing state for loading indicator
+    setIsTranscribing(options?.isTranscribing ?? false);
+    
+    if (options?.streaming) {
+      // For streaming updates, replace the entire input with the current transcript
+      setMessageInput(text);
+    } else {
+      // For final/appended transcription, add to existing input
+      setMessageInput(prev => prev + (prev ? ' ' : '') + text);
+      toast.success('Transcription added to message');
+    }
+  };
+
+  const handleScreenshot = (imageBase64: string, storagePath?: string, signedUrl?: string, analysis?: string) => {
+    // Store the screenshot with its storage path and temporary signed URL
+    setPendingScreenshot({ base64: imageBase64, storagePath, signedUrl, analysis });
+    
+    // Add analysis to message input if provided
+    if (analysis) {
+      setMessageInput(prev => prev + (prev ? '\n\n' : '') + analysis);
+    }
+    
+    if (storagePath) {
+      toast.success('Screenshot ready - send your message to include it');
+    } else {
+      toast.warning('Screenshot captured but not saved to storage');
+    }
+  };
+
+  const clearPendingScreenshot = () => {
+    setPendingScreenshot(null);
+  };
+
+  const handleDeleteConversation = async (conversationId: string) => {
+    try {
+      await deleteConversation.mutateAsync({ conversationId, agentId });
+      
+      // If we deleted the active conversation, clear it
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(null);
+        setIsComposingNewConversation(false);
+      }
+      
+      toast.success('Conversation deleted');
+    } catch (error) {
+      toast.error('Failed to delete conversation');
+      console.error('Delete conversation error:', error);
     }
   };
 
@@ -174,9 +408,10 @@ function AgentChatPage() {
       {/* History Sidebar - Always visible */}
       <div className="w-64 border-r bg-background flex flex-col h-full">
         <div className="p-2 border-b shrink-0">
-          <Button 
-            onClick={handleStartNewConversation} 
-            className="w-full"
+          <Button
+            onClick={handleStartNewConversation}
+            disabled={activeConversationId !== null || isComposingNewConversation}
+            className="cursor-pointer w-full"
             variant="outline"
           >
             <Plus className="mr-2 h-4 w-4" />
@@ -185,29 +420,62 @@ function AgentChatPage() {
         </div>
         <div className="p-2 flex flex-col flex-1 min-h-0">
           <ScrollArea className="flex-1">
-            <div className="space-y-2">
+            <div className="space-y-1">
               {conversations && conversations.length > 0 ? (
                 conversations.map((conv) => (
-                  <button
-                    key={conv.id}
-                    onClick={() => setActiveConversationId(conv.id)}
-                    className={cn(
-                      "w-full text-left px-3 py-2 rounded-md text-sm transition-colors",
-                      activeConversationId === conv.id
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/50"
-                    )}
-                  >
-                    <div className="font-medium truncate">
-                      {conv.title || 'Untitled'}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {new Date(conv.updated_at).toLocaleDateString()}
-                    </div>
-                  </button>
+                  <div key={conv.id} className="w-60 group relative">
+                    <button
+                      onClick={() => {
+                        setActiveConversationId(conv.id);
+                        setIsComposingNewConversation(false); // Exit composing mode when selecting existing conversation
+                      }}
+                      className={cn(
+                        "cursor-pointer w-full text-left px-3 py-2 rounded-md text-sm transition-colors pr-8",
+                        activeConversationId === conv.id
+                          ? "bg-accent text-accent-foreground"
+                          : "hover:bg-accent/50"
+                      )}
+                    >
+                      <div className="font-medium truncate">
+                        {conv.title || 'Untitled'}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {new Date(conv.updated_at).toLocaleDateString()}
+                      </div>
+                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="cursor-pointer absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-32" side="right">
+                        <DropdownMenuItem
+                          onClick={() => {
+                            // TODO: Implement edit functionality
+                            toast.info('Edit coming soon');
+                          }}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={() => handleDeleteConversation(conv.id)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                 ))
               ) : (
-                <div className="text-sm text-muted-foreground">
+                <div className="text-sm text-muted-foreground px-3 py-2">
                   No conversations yet
                 </div>
               )}
@@ -251,9 +519,14 @@ function AgentChatPage() {
                       )}
                     >
                       <CardContent className="p-3">
-                        <div className="text-sm whitespace-pre-wrap">
-                          {message.content}
-                        </div>
+                        {/* Render screenshot if present (handles both new path format and legacy URL format) */}
+                        <MessageImage content={message.content} />
+                        {/* Render text content */}
+                        {getTextContent(message.content) && (
+                          <div className="text-sm whitespace-pre-wrap">
+                            {getTextContent(message.content)}
+                          </div>
+                        )}
                         <div className="text-xs opacity-70 mt-2">
                           {new Date(message.created_at).toLocaleTimeString()}
                         </div>
@@ -273,24 +546,74 @@ function AgentChatPage() {
           )}
         </div>
 
-        {/* Message Input - Only show when we have an active conversation */}
-        {activeConversationId && (
+        {/* Message Input - Show when we have an active conversation or are composing a new one */}
+        {(activeConversationId || isComposingNewConversation) && (
           <div className="border-t p-4 shrink-0 bg-background">
+            {/* Pending Screenshot Preview */}
+            {pendingScreenshot && (
+              <div className="mx-auto mb-3 flex items-center gap-2 p-2 bg-muted rounded-md">
+                <div className="relative">
+                  <img 
+                    src={`data:image/png;base64,${pendingScreenshot.base64}`}
+                    alt="Pending screenshot"
+                    className="h-16 w-auto rounded border"
+                  />
+                  <Button
+                    size="icon"
+                    variant="destructive"
+                    className="absolute -top-2 -right-2 h-5 w-5"
+                    onClick={clearPendingScreenshot}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+                <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                  <ImageIcon className="h-4 w-4" />
+                  <span>Screenshot attached</span>
+                </div>
+              </div>
+            )}
+
+            {/* Message Input Row */}
             <div className="mx-auto flex gap-2">
-              <Input
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder={`Message ${agent.name}...`}
+              <MicrophoneButton
+                agentId={agentId}
+                userId={userId}
+                onTranscription={handleTranscription}
                 disabled={sendMessage.isPending}
-                className="flex-1"
+                conversationId={activeConversationId || undefined}
               />
+              <ScreenshotButton
+                agentId={agentId}
+                conversationId={activeConversationId || undefined}
+                onScreenshot={handleScreenshot}
+                disabled={sendMessage.isPending}
+              />
+              <div className="relative flex-1">
+                {isTranscribing && (
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10">
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  </div>
+                )}
+                <Input
+                  value={messageInput}
+                  onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
+                  disabled={sendMessage.isPending}
+                  className={cn("w-full", isTranscribing && "pl-9")}
+                />
+              </div>
               <Button
                 onClick={handleSendMessage}
-                disabled={!messageInput.trim() || sendMessage.isPending}
+                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || isAnalyzingScreenshot}
                 size="icon"
               >
-                <Send className="h-4 w-4" />
+                {isAnalyzingScreenshot ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
               </Button>
             </div>
           </div>

@@ -5,13 +5,19 @@ mod agent_service;
 mod conversation_service;
 mod ai_client;
 mod user_profile_service;
+mod perception_tracker;
+mod audio_service;
+mod vision_service;
 
 use tauri::Manager;
 use auth::{AuthState, SessionData};
 use sea_orm::DatabaseConnection;
 use agent_service::{AgentService, CreateAgentRequest, UpdateAgentRequest};
-use conversation_service::{ConversationService, CreateConversationRequest};
+use conversation_service::{ConversationService, CreateConversationRequest, TranscriptEntry};
 use ai_client::AiClient;
+use perception_tracker::{PerceptionTracker, PerceptionStat};
+use audio_service::{AudioService, RecordingResult};
+use vision_service::{VisionService, ScreenshotResult};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -139,6 +145,278 @@ async fn send_message(
     ConversationService::send_message(&db, conversation_id, content, &ai_client).await
 }
 
+#[tauri::command]
+async fn save_voice_transcript(
+    conversation_id: String,
+    entries: Vec<TranscriptEntry>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<conversation_service::MessageData>, String> {
+    ConversationService::save_voice_transcript(&db, conversation_id, entries).await
+}
+
+#[tauri::command]
+async fn delete_conversation(
+    conversation_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<(), String> {
+    ConversationService::delete_conversation(&db, conversation_id).await
+}
+
+// Vision commands
+#[tauri::command]
+async fn capture_screenshot(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>,
+    _app: tauri::AppHandle
+) -> Result<ScreenshotResult, String> {
+    let vision_service = VisionService::new(&ai_client);
+    let result = vision_service.capture_screenshot().await?;
+
+    // Track usage
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "vision",
+        "screenshot",
+        None
+    ).await?;
+
+    // Note: Perception logging is done separately via log_screenshot_perception
+    // after the frontend uploads the file to Supabase Storage
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn log_screenshot_perception(
+    agent_id: String,
+    storage_path: String,
+    conversation_id: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<(), String> {
+    // Log perception data with the actual uploaded storage path
+    PerceptionTracker::log_perception(
+        &db,
+        &agent_id,
+        conversation_id.as_deref(),
+        "screenshot",
+        &storage_path,
+        None, // No analysis result yet
+        None  // No duration for screenshots
+    ).await?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn analyze_image(
+    agent_id: String,
+    image_base64: String,
+    prompt: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<String, String> {
+    let vision_service = VisionService::new(&ai_client);
+    let analysis = vision_service.analyze_image_base64(&image_base64, prompt).await?;
+
+    // Track usage
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "vision",
+        "analyze",
+        None
+    ).await?;
+
+    Ok(analysis)
+}
+
+// Audio commands
+#[tauri::command]
+async fn start_recording(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<(), String> {
+    // Track usage when starting recording
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "audio",
+        "start_recording",
+        None
+    ).await?;
+
+    // The actual recording start is handled by the frontend plugin
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_recording(
+    _agent_id: String,
+    _db: tauri::State<'_, DatabaseConnection>,
+    _ai_client: tauri::State<'_, AiClient>,
+    _app: tauri::AppHandle
+) -> Result<RecordingResult, String> {
+    // This would get audio data from the mic recorder plugin
+    // For now, return a placeholder - actual implementation needs frontend integration
+    Err("Audio recording stop not yet implemented - requires frontend plugin integration".to_string())
+}
+
+#[tauri::command]
+async fn transcribe_audio(
+    agent_id: String,
+    audio_base64: String,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<String, String> {
+    let audio_service = AudioService::new(&ai_client);
+    
+    // Simple transcription - audio upload/logging is handled by frontend
+    let transcription = audio_service.transcribe_base64(&audio_base64, None).await?;
+
+    // Track usage
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "audio",
+        "transcribe",
+        None
+    ).await?;
+
+    Ok(transcription)
+}
+
+#[tauri::command]
+async fn log_audio_perception(
+    agent_id: String,
+    storage_path: String,
+    transcription: Option<String>,
+    duration_ms: Option<i32>,
+    conversation_id: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<(), String> {
+    // Track usage
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "audio",
+        "upload",
+        None
+    ).await?;
+    
+    // Build analysis result with transcription if provided
+    let analysis_result = transcription.map(|text| serde_json::json!({ "text": text }));
+    
+    // Log perception data with the storage path from frontend upload
+    PerceptionTracker::log_perception(
+        &db,
+        &agent_id,
+        conversation_id.as_deref(),
+        "transcription",
+        &storage_path,
+        analysis_result,
+        duration_ms
+    ).await?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn text_to_speech(
+    agent_id: String,
+    text: String,
+    voice: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<String, String> {
+    let audio_service = AudioService::new(&ai_client);
+    let audio_base64 = audio_service.text_to_speech_base64(&text, voice).await?;
+
+    // Track usage
+    PerceptionTracker::track_usage(
+        &db,
+        &agent_id,
+        "audio",
+        "tts",
+        None
+    ).await?;
+
+    Ok(audio_base64)
+}
+
+// File reading command for audio files
+#[tauri::command]
+async fn read_audio_file(file_path: String) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+    
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    
+    Ok(general_purpose::STANDARD.encode(&bytes))
+}
+
+// OpenAI Realtime API token generation for Voice Chat feature (GA version)
+#[tauri::command]
+async fn get_realtime_session_token(voice: Option<String>) -> Result<String, String> {
+    use serde_json::json;
+    
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
+    
+    let voice_setting = voice.unwrap_or_else(|| "alloy".to_string());
+    
+    let client = reqwest::Client::new();
+    
+    // Use the GA endpoint: /v1/realtime/client_secrets
+    let response = client
+        .post("https://api.openai.com/v1/realtime/client_secrets")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "session": {
+                "type": "realtime",
+                "model": "gpt-realtime",
+                "audio": {
+                    "output": {
+                        "voice": voice_setting
+                    }
+                }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request realtime session: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("Realtime session request failed with status {}: {}", status, error_text));
+    }
+    
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse realtime session response: {}", e))?;
+    
+    // The GA response has the token directly in "value" field
+    let token = body
+        .get("value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("No value in response: {:?}", body))?;
+    
+    Ok(token.to_string())
+}
+
+// Stats command
+#[tauri::command]
+async fn get_perception_stats(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<PerceptionStat>, String> {
+    PerceptionTracker::get_stats(&db, &agent_id).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -176,6 +454,7 @@ pub fn run() {
         .manage(AuthState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_mic_recorder::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             set_session,
@@ -191,7 +470,22 @@ pub fn run() {
             list_conversations,
             get_conversation,
             get_conversation_messages,
-            send_message
+            send_message,
+            save_voice_transcript,
+            delete_conversation,
+            // Perception commands
+            capture_screenshot,
+            log_screenshot_perception,
+            analyze_image,
+            start_recording,
+            stop_recording,
+            transcribe_audio,
+            log_audio_perception,
+            text_to_speech,
+            read_audio_file,
+            get_perception_stats,
+            // Realtime voice chat
+            get_realtime_session_token
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
