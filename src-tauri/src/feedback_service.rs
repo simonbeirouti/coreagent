@@ -2,7 +2,9 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
     QueryOrder, Set,
 };
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::entities::{agents, message_feedback, personality_adjustments};
@@ -24,6 +26,13 @@ pub struct FeedbackStats {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FeedbackMonthlyData {
+    pub month: String,
+    pub positive: i64,
+    pub negative: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PersonalityAdjustmentData {
     pub id: Uuid,
     pub agent_id: Uuid,
@@ -37,6 +46,13 @@ pub struct PersonalityAdjustmentData {
 pub struct FeedbackService;
 
 impl FeedbackService {
+    fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
+        let total_months = year * 12 + month as i32 - 1 + delta;
+        let new_year = total_months.div_euclid(12);
+        let new_month = (total_months.rem_euclid(12) + 1) as u32;
+        (new_year, new_month)
+    }
+
     fn negative_ratio(stats: &FeedbackStats) -> f32 {
         let total = stats.positive + stats.negative + stats.neutral;
         if total <= 0 {
@@ -134,6 +150,101 @@ impl FeedbackService {
         }
 
         Ok(stats)
+    }
+
+    pub async fn get_conversation_feedback(
+        db: &DatabaseConnection,
+        conversation_id: String,
+        user_id: String,
+    ) -> Result<HashMap<String, String>, String> {
+        let conversation_id = Uuid::parse_str(&conversation_id)
+            .map_err(|e| format!("Invalid conversation_id: {e}"))?;
+        let user_id = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user_id: {e}"))?;
+
+        let rows = message_feedback::Entity::find()
+            .filter(message_feedback::Column::UserId.eq(user_id))
+            .find_also_related(crate::entities::messages::Entity)
+            .all(db)
+            .await
+            .map_err(|e| format!("Failed to load conversation feedback: {e}"))?;
+
+        let mut feedback_map = HashMap::new();
+        for (feedback, maybe_message) in rows {
+            let Some(message) = maybe_message else { continue };
+            if message.conversation_id == conversation_id {
+                feedback_map.insert(message.id.to_string(), feedback.feedback_type);
+            }
+        }
+
+        Ok(feedback_map)
+    }
+
+    pub async fn get_feedback_monthly(
+        db: &DatabaseConnection,
+        agent_id: String,
+    ) -> Result<Vec<FeedbackMonthlyData>, String> {
+        let agent_id = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent_id: {e}"))?;
+        let now = chrono::Utc::now();
+        let base_year = now.year();
+        let base_month = now.month();
+
+        let all = message_feedback::Entity::find()
+            .find_also_related(crate::entities::messages::Entity)
+            .all(db)
+            .await
+            .map_err(|e| format!("Failed to load monthly feedback data: {e}"))?;
+
+        let mut conversation_belongs_to_agent: HashMap<Uuid, bool> = HashMap::new();
+        let mut month_counts: HashMap<(i32, u32), (i64, i64)> = HashMap::new();
+
+        for (feedback, maybe_message) in all {
+            let Some(message) = maybe_message else { continue };
+
+            let conversation_matches = if let Some(cached) = conversation_belongs_to_agent.get(&message.conversation_id) {
+                *cached
+            } else {
+                let conversation = crate::entities::conversations::Entity::find_by_id(message.conversation_id)
+                    .one(db)
+                    .await
+                    .map_err(|e| format!("Failed loading conversation for monthly feedback: {e}"))?;
+                let matches = conversation
+                    .map(|conv| conv.agent_id == agent_id)
+                    .unwrap_or(false);
+                conversation_belongs_to_agent.insert(message.conversation_id, matches);
+                matches
+            };
+
+            if !conversation_matches {
+                continue;
+            }
+
+            let timestamp = feedback.created_at.with_timezone(&chrono::Utc);
+            let key = (timestamp.year(), timestamp.month());
+            let entry = month_counts.entry(key).or_insert((0, 0));
+
+            match feedback.feedback_type.as_str() {
+                "positive" => entry.0 += 1,
+                "negative" => entry.1 += 1,
+                _ => {}
+            }
+        }
+
+        let mut result = Vec::new();
+        for i in 0_i32..6_i32 {
+            let delta = i - 5;
+            let (year, month) = Self::shift_month(base_year, base_month, delta);
+            let point = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+                .ok_or_else(|| format!("Invalid generated month: {year}-{month}"))?;
+            let (positive, negative) = month_counts.get(&(year, month)).copied().unwrap_or((0, 0));
+
+            result.push(FeedbackMonthlyData {
+                month: point.format("%b %y").to_string(),
+                positive,
+                negative,
+            });
+        }
+
+        Ok(result)
     }
 
     pub async fn analyze_feedback_patterns(

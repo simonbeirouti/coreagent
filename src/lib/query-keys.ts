@@ -29,8 +29,11 @@ export const abilityKeys = {
 export const feedbackKeys = {
   all: ['feedback'] as const,
   stats: (agentId: string) => [...feedbackKeys.all, 'stats', agentId] as const,
+  monthly: (agentId: string) => [...feedbackKeys.all, 'monthly', agentId] as const,
   adjustments: (agentId: string) =>
     [...feedbackKeys.all, 'adjustments', agentId] as const,
+  conversation: (conversationId: string, userId: string) =>
+    [...feedbackKeys.all, 'conversation', conversationId, userId] as const,
 };
 
 export const memoryKeys = {

@@ -1,12 +1,19 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { useAuth } from '@/hooks/use-auth';
-import { useAgents, useDeleteAgent } from '@/hooks/useAgents';
+import { useAgents } from '@/hooks/useAgents';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
-import { Plus, Bot, Trash2, Edit, MessageSquare } from 'lucide-react';
-import { toast } from 'sonner';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Plus, Bot, MessageSquare, MoreHorizontal, Brain, Mic, Settings, BarChart3 } from 'lucide-react';
 import { Header } from '@/components/header';
 
 export const Route = createFileRoute('/agents/')({
@@ -16,17 +23,6 @@ export const Route = createFileRoute('/agents/')({
 function AgentsPage() {
   const { user } = useAuth();
   const { data: agents, isLoading, error } = useAgents(user?.id || '');
-  const deleteAgentMutation = useDeleteAgent();
-
-  const handleDeleteAgent = async (agentId: string) => {
-    try {
-      await deleteAgentMutation.mutateAsync(agentId);
-      toast.success('Agent deleted successfully');
-    } catch (error) {
-      toast.error('Failed to delete agent');
-      console.error('Delete agent error:', error);
-    }
-  };
 
   if (isLoading) {
     return (
@@ -77,23 +73,20 @@ function AgentsPage() {
       ) : (
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
           {agents?.map((agent) => (
-            <Card key={agent.id} className="relative">
+            <Card key={agent.id} className="relative flex h-full flex-col">
               <CardHeader>
-                <div className="flex items-start justify-between">
+                <div className="flex items-start gap-2">
                   <div className="flex items-center space-x-2">
                     <Bot className="h-5 w-5" />
                     <CardTitle className="text-lg">{agent.name}</CardTitle>
                   </div>
-                  <Badge variant={agent.state === 'active' ? 'default' : 'secondary'}>
-                    {agent.state}
-                  </Badge>
                 </div>
                 <CardDescription className="line-clamp-2">
                   {agent.persona}
                 </CardDescription>
               </CardHeader>
-              <CardContent>
-                <div className="space-y-3">
+              <CardContent className="flex flex-1 flex-col">
+                <div className="space-y-4">
                   <div className="flex items-center justify-between text-sm text-muted-foreground">
                     <span>Provider:</span>
                     <Badge variant="outline">{agent.provider_type}</Badge>
@@ -102,44 +95,57 @@ function AgentsPage() {
                     <span>Model:</span>
                     <span className="font-mono">{agent.model_id}</span>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" asChild>
-                      <Link to="/agents/$agentId/settings" params={{ agentId: agent.id }}>
-                        <Edit className="mr-1 h-3 w-3" />
-                        Settings
-                      </Link>
-                    </Button>
-                    <Button variant="outline" size="sm" asChild>
-                      <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
-                        <MessageSquare className="mr-1 h-3 w-3" />
-                        Chat
-                      </Link>
-                    </Button>
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button variant="outline" size="sm">
-                          <Trash2 className="h-3 w-3" />
+                  <div className="flex w-full items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" size="icon" asChild>
+                        <Link to="/agents/$agentId/dashboard" params={{ agentId: agent.id }}>
+                          <BarChart3 className="h-4 w-4" />
+                          <span className="sr-only">Dashboard</span>
+                        </Link>
+                      </Button>
+                      <Button variant="outline" size="icon" asChild>
+                        <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
+                          <MessageSquare className="h-4 w-4" />
+                          <span className="sr-only">Chat</span>
+                        </Link>
+                      </Button>
+                      <Button variant="outline" size="icon" asChild>
+                        <Link to="/agents/$agentId/memory" params={{ agentId: agent.id }}>
+                          <Brain className="h-4 w-4" />
+                          <span className="sr-only">Brain</span>
+                        </Link>
+                      </Button>
+                      <Button variant="outline" size="icon" asChild>
+                        <Link to="/agents/$agentId/voice" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
+                          <Mic className="h-4 w-4" />
+                          <span className="sr-only">Mic</span>
+                        </Link>
+                      </Button>
+                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="icon" className="ml-auto">
+                          <MoreHorizontal className="h-4 w-4" />
+                          <span className="sr-only">Open card menu</span>
                         </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Delete Agent</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Are you sure you want to delete "{agent.name}"? This action cannot be undone.
-                            All conversations with this agent will also be deleted.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => handleDeleteAgent(agent.id)}
-                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                          >
-                            Delete
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem asChild>
+                          <Link to="/agents/$agentId/settings" params={{ agentId: agent.id }}>
+                            <Settings className="h-4 w-4" />
+                            Settings
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>Status</DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent>
+                            <DropdownMenuItem>Active</DropdownMenuItem>
+                            <DropdownMenuItem>Ideal</DropdownMenuItem>
+                            <DropdownMenuItem>Stop</DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </div>
               </CardContent>

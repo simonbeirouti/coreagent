@@ -52,7 +52,7 @@ export function NavAgents() {
               >
                 <Link 
                   className="group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:items-center" 
-                  to="/agents/$agentId/chat" 
+                  to="/agents/$agentId/dashboard" 
                   params={{ agentId: agent.id }}
                   search={{ conversationId: undefined }}
                 >

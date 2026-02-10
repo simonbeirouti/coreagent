@@ -15,7 +15,7 @@ export const Route = createFileRoute('/agents/$agentId')({
 function AgentLayout() {
   const { agentId } = Route.useParams();
   const matchRoute = useMatchRoute();
-  
+
   const { isLoading, error } = useAgent(agentId);
 
   // Check which route is currently active
@@ -42,8 +42,18 @@ function AgentLayout() {
   return (
     <div className="h-full flex flex-col">
       {/* Menubar */}
-      <div className="p-4 bg-background shrink-0 -mt-4 -mx-2">
+      <div className="p-4 bg-background shrink-0 -mt-4">
+
         <Menubar className="border-b border-border">
+          <MenubarMenu>
+            <Link to="/agents/$agentId/dashboard" params={{ agentId }}>
+              <MenubarTrigger className={cn(isDashboardRoute && "bg-accent")}>
+                <BarChart3 className="mr-2 h-4 w-4" />
+                Dashboard
+              </MenubarTrigger>
+            </Link>
+          </MenubarMenu>
+
           <MenubarMenu>
             <Link to="/agents/$agentId/chat" params={{ agentId }} search={{ conversationId: undefined }}>
               <MenubarTrigger className={cn(isChatRoute && "bg-accent")}>
@@ -71,15 +81,6 @@ function AgentLayout() {
             </Link>
           </MenubarMenu>
 
-          <MenubarMenu>
-            <Link to="/agents/$agentId/dashboard" params={{ agentId }}>
-              <MenubarTrigger className={cn(isDashboardRoute && "bg-accent")}>
-                <BarChart3 className="mr-2 h-4 w-4" />
-                Dashboard
-              </MenubarTrigger>
-            </Link>
-          </MenubarMenu>
-          
           <MenubarMenu>
             <Link to="/agents/$agentId/settings" params={{ agentId }}>
               <MenubarTrigger className={cn(isSettingsRoute && "bg-accent")}>

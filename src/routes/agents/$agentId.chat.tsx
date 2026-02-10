@@ -32,6 +32,7 @@ import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
 import { MessageFeedback } from '@/components/feedback/message-feedback';
+import { useConversationFeedback } from '@/hooks/useFeedback';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
@@ -218,6 +219,7 @@ function AgentChatPage() {
   const [deleteConfirmMessageId, setDeleteConfirmMessageId] = useState<string | null>(null);
 
   const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
+  const { data: feedbackByMessage = {} } = useConversationFeedback(activeConversationId || '', userId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
@@ -745,8 +747,10 @@ function AgentChatPage() {
                                   {message.role === 'assistant' && userId ? (
                                     <MessageFeedback
                                       agentId={agentId}
+                                      conversationId={activeConversationId || ''}
                                       messageId={message.id}
                                       userId={userId}
+                                      selected={feedbackByMessage[message.id] ?? null}
                                     />
                                   ) : null}
                                 </>

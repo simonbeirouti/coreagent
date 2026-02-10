@@ -593,6 +593,23 @@ async fn get_agent_feedback_stats(
 }
 
 #[tauri::command]
+async fn get_agent_feedback_monthly(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<feedback_service::FeedbackMonthlyData>, String> {
+    FeedbackService::get_feedback_monthly(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn get_conversation_feedback(
+    conversation_id: String,
+    user_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<std::collections::HashMap<String, String>, String> {
+    FeedbackService::get_conversation_feedback(&db, conversation_id, user_id).await
+}
+
+#[tauri::command]
 async fn analyze_agent_feedback_patterns(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>
@@ -692,6 +709,8 @@ pub fn run() {
             get_relevant_memories,
             submit_message_feedback,
             get_agent_feedback_stats,
+            get_agent_feedback_monthly,
+            get_conversation_feedback,
             analyze_agent_feedback_patterns,
             list_personality_adjustments,
             // Realtime voice chat

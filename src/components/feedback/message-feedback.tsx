@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ThumbsDown, ThumbsUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useSubmitFeedback, type FeedbackType } from '@/hooks/useFeedback';
@@ -6,12 +5,19 @@ import { toast } from 'sonner';
 
 interface MessageFeedbackProps {
   agentId: string;
+  conversationId: string;
   messageId: string;
   userId: string;
+  selected: FeedbackType | null;
 }
 
-export function MessageFeedback({ agentId, messageId, userId }: MessageFeedbackProps) {
-  const [selected, setSelected] = useState<FeedbackType | null>(null);
+export function MessageFeedback({
+  agentId,
+  conversationId,
+  messageId,
+  userId,
+  selected,
+}: MessageFeedbackProps) {
   const submitFeedback = useSubmitFeedback(agentId);
 
   const handleFeedback = async (feedbackType: FeedbackType) => {
@@ -20,8 +26,8 @@ export function MessageFeedback({ agentId, messageId, userId }: MessageFeedbackP
         message_id: messageId,
         user_id: userId,
         feedback_type: feedbackType,
+        conversation_id: conversationId,
       });
-      setSelected(feedbackType);
       toast.success('Feedback saved');
     } catch (error) {
       console.error('Failed to submit feedback:', error);
@@ -36,6 +42,7 @@ export function MessageFeedback({ agentId, messageId, userId }: MessageFeedbackP
         variant={selected === 'positive' ? 'default' : 'ghost'}
         className="h-6 w-6"
         onClick={() => handleFeedback('positive')}
+        disabled={submitFeedback.isPending}
         title="Helpful response"
       >
         <ThumbsUp className="h-3 w-3" />
@@ -45,6 +52,7 @@ export function MessageFeedback({ agentId, messageId, userId }: MessageFeedbackP
         variant={selected === 'negative' ? 'destructive' : 'ghost'}
         className="h-6 w-6"
         onClick={() => handleFeedback('negative')}
+        disabled={submitFeedback.isPending}
         title="Not helpful"
       >
         <ThumbsDown className="h-3 w-3" />
