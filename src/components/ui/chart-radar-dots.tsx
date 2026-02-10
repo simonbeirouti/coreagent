@@ -1,7 +1,7 @@
 "use client"
 
-import { PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart } from "recharts"
-import type { AgentAbility } from "@/hooks/useAbilities"
+import { LabelList, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart } from "recharts"
+import type { SkillPerformanceRating } from "@/hooks/useAbilities"
 
 import {
     Card,
@@ -18,57 +18,61 @@ import {
 } from "@/components/ui/chart"
 
 interface ChartRadarDotsProps {
-    abilities: AgentAbility[]
+    ratings: SkillPerformanceRating[]
     isLoading?: boolean
+    errorMessage?: string
 }
 
 const chartConfig = {
-    proficiency: {
-        label: "Proficiency",
-        color: "hsl(var(--chart-1))",
+    rating: {
+        label: "Score",
+        color: "hsl(var(--chart-2))",
     },
 } satisfies ChartConfig
 
-export function ChartRadarDots({ abilities, isLoading = false }: ChartRadarDotsProps) {
-    const abilityData = abilities
+export function ChartRadarDots({
+    ratings,
+    isLoading = false,
+    errorMessage,
+}: ChartRadarDotsProps) {
+    const ratingData = ratings
         .slice()
-        .sort((a, b) => b.proficiency - a.proficiency)
-        .slice(0, 6)
-        .map((ability) => ({
-            skill: ability.ability_name,
-            proficiency: Math.round(ability.proficiency * 100),
+        .sort((a, b) => b.rating - a.rating)
+        .map((entry) => ({
+            skill: entry.skill_name,
+            rating: Math.round(entry.rating),
+            confidence: Math.round(entry.confidence_score * 100),
         }))
 
-    // TODO: Replace fallback values with dedicated skill-domain metrics when available.
     const fallbackData = [
-        { skill: "Conversation", proficiency: 0 },
-        { skill: "Memory", proficiency: 0 },
-        { skill: "Reasoning", proficiency: 0 },
-        { skill: "Voice", proficiency: 0 },
-        { skill: "Vision", proficiency: 0 },
+        { skill: "Chat", rating: 0, confidence: 0 },
+        { skill: "Voice", rating: 0, confidence: 0 },
+        { skill: "Screenshot", rating: 0, confidence: 0 },
     ]
 
-    const chartData = abilityData.length > 0 ? abilityData : fallbackData
+    const chartData = ratingData.length > 0 ? ratingData : fallbackData
 
     return (
         <Card className="h-full flex flex-col">
             <CardHeader className="flex items-center justify-between">
                 <div className="space-y-2">
-                    <CardTitle>Skill Proficiency</CardTitle>
-                    <CardDescription>Top tracked abilities by proficiency</CardDescription>
+                    <CardTitle>Core Skill Performance</CardTitle>
+                    <CardDescription>Balanced rating for chat, voice, and screenshot</CardDescription>
                 </div>
                 <div className="text-sm text-muted-foreground whitespace-nowrap">
                     {isLoading
-                        ? "Loading skill proficiency..."
-                        : abilities.length > 0
-                            ? `${abilities.length} tracked abilities`
-                            : "No tracked abilities yet"}
+                        ? "Loading skill ratings..."
+                        : errorMessage
+                            ? "Skill ratings unavailable"
+                        : ratings.length > 0
+                            ? `${ratings.length} rated skills`
+                            : "No rating data yet"}
                 </div>
             </CardHeader>
-            <CardContent className="pb-0 flex-1">
+            <CardContent className="flex-1 -mb-28">
                 <ChartContainer
                     config={chartConfig}
-                    className="mx-auto h-[320px] w-full aspect-auto"
+                    className="mx-auto h-full w-full aspect-auto"
                 >
                     <RadarChart data={chartData}>
                         <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
@@ -76,26 +80,23 @@ export function ChartRadarDots({ abilities, isLoading = false }: ChartRadarDotsP
                         <PolarRadiusAxis angle={90} domain={[0, 100]} tickCount={6} />
                         <PolarGrid />
                         <Radar
-                            dataKey="proficiency"
-                            fill="var(--color-proficiency)"
+                            dataKey="rating"
+                            fill="var(--color-rating)"
                             fillOpacity={0.6}
                             dot={{
                                 r: 4,
                                 fillOpacity: 1,
                             }}
-                        />
+                        >
+                            <LabelList
+                                dataKey="rating"
+                                position="outside"
+                                formatter={(value: number) => `${value}%`}
+                                className="fill-foreground text-xs font-medium"
+                            />
+                        </Radar>
                     </RadarChart>
                 </ChartContainer>
-                {abilities.length > 0 ? (
-                    <div className="mt-4 space-y-1 text-sm">
-                        {abilityData.map((ability) => (
-                            <div key={ability.skill} className="flex items-center justify-between">
-                                <span className="text-muted-foreground">{ability.skill}</span>
-                                <span className="font-medium">{ability.proficiency}%</span>
-                            </div>
-                        ))}
-                    </div>
-                ) : null}
             </CardContent>
         </Card>
     )

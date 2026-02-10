@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { compressImage } from '@/lib/storage';
+import { abilityKeys, perceptionKeys } from '@/lib/query-keys';
 
 export interface ScreenshotResult {
   image_base64: string;
@@ -49,6 +51,7 @@ export function useBackgroundPerception(options: BackgroundPerceptionOptions) {
     onScreenshot,
     sendImage,
   } = options;
+  const queryClient = useQueryClient();
 
   const [state, setState] = useState<BackgroundPerceptionState>({
     isRunning: false,
@@ -108,6 +111,11 @@ export function useBackgroundPerception(options: BackgroundPerceptionOptions) {
         }
       }
 
+      // Refresh related cached metrics for dashboard skill ratings.
+      queryClient.invalidateQueries({ queryKey: perceptionKeys.stats(agentId) });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+
       return {
         ...result,
         image_base64: imageToSend,
@@ -120,7 +128,7 @@ export function useBackgroundPerception(options: BackgroundPerceptionOptions) {
     } finally {
       isCapturingRef.current = false;
     }
-  }, [agentId, compress, quality, maxWidth, onScreenshot, sendImage]);
+  }, [agentId, compress, quality, maxWidth, onScreenshot, queryClient, sendImage]);
 
   /**
    * Start background screenshot capture

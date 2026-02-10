@@ -4,6 +4,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, Co
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
+use crate::ability_service::AbilityService;
 use crate::input_sanitizer::sanitize_message;
 use crate::memory_service::MemoryService;
 
@@ -862,6 +863,7 @@ impl ConversationService {
             .await
             .map_err(|e| format!("Failed to find conversation: {}", e))?
             .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
+        let conversation_agent_id = conversation.agent_id;
 
         // Find the last message to chain parent_ids
         let mut last_message_id = messages::Entity::find()
@@ -873,8 +875,16 @@ impl ConversationService {
             .map(|m| m.id);
 
         let mut saved_messages: Vec<MessageData> = Vec::new();
+        let mut user_entry_count = 0_i32;
+        let mut assistant_entry_count = 0_i32;
 
         for entry in entries {
+            if entry.role == "user" {
+                user_entry_count += 1;
+            } else if entry.role == "assistant" {
+                assistant_entry_count += 1;
+            }
+
             // Sanitize the transcript text
             let sanitized_text = sanitize_message(&entry.text)
                 .map_err(|e| format!("Input validation failed for transcript: {}", e))?;
@@ -909,6 +919,26 @@ impl ConversationService {
         conversation_model.updated_at = Set(chrono::Utc::now().into());
         conversation_model.update(db).await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
+
+        // Track core voice abilities based on transcript roles (best-effort).
+        for _ in 0..user_entry_count {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation_agent_id,
+                "audio_transcription",
+                true,
+            )
+            .await;
+        }
+        for _ in 0..assistant_entry_count {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation_agent_id,
+                "voice_synthesis",
+                true,
+            )
+            .await;
+        }
 
         println!("[CONVERSATION] Saved {} voice transcript entries to conversation: {}", saved_messages.len(), conversation_id);
         Ok(saved_messages)

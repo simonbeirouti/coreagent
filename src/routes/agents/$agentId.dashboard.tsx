@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { BarChart3, ThumbsDown, ThumbsUp } from 'lucide-react';
-import { useAgentAbilities } from '@/hooks/useAbilities';
+import { useAgentSkillRatings } from '@/hooks/useAbilities';
 import { useFeedbackMonthly, useFeedbackStats } from '@/hooks/useFeedback';
 import { ChatBarStacked } from '@/components/ui/chat-bar-stacked';
 import { ChartRadarDots } from '@/components/ui/chart-radar-dots';
@@ -12,9 +12,22 @@ export const Route = createFileRoute('/agents/$agentId/dashboard')({
 
 function AgentDashboardPage() {
   const { agentId } = Route.useParams();
-  const { data: abilities = [], isLoading: isAbilitiesLoading } = useAgentAbilities(agentId);
+  const {
+    data: skillRatings = [],
+    isLoading: isSkillRatingsLoading,
+    error: skillRatingsError,
+  } = useAgentSkillRatings(agentId);
   const { data: feedbackStats, isLoading: isFeedbackLoading } = useFeedbackStats(agentId);
   const { data: feedbackMonthly = [], isLoading: isFeedbackMonthlyLoading } = useFeedbackMonthly(agentId);
+  const sortedRatings = skillRatings.slice().sort((a, b) => b.rating - a.rating);
+  const topSkill = sortedRatings[0];
+  const lowestSkill = sortedRatings[sortedRatings.length - 1];
+  const overallRating =
+    sortedRatings.length > 0
+      ? Math.round(
+          sortedRatings.reduce((total, entry) => total + entry.rating, 0) / sortedRatings.length
+        )
+      : 0;
 
   return (
     <div className="p-4 space-y-4 overflow-y-auto">
@@ -23,11 +36,19 @@ function AgentDashboardPage() {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
               <BarChart3 className="h-4 w-4" />
-              Tracked Skills
+              Overall Skill Rating
             </CardTitle>
           </CardHeader>
-          <CardContent className="text-2xl font-semibold">
-            {isAbilitiesLoading ? '...' : abilities.length}
+          <CardContent className="space-y-2">
+            <div className="text-2xl font-semibold">
+              {isSkillRatingsLoading ? '...' : `${overallRating}%`}
+            </div>
+            {!isSkillRatingsLoading && topSkill && lowestSkill ? (
+              <div className="text-xs text-muted-foreground">
+                Top: {topSkill.skill_name} ({Math.round(topSkill.rating)}%) | Needs work:{' '}
+                {lowestSkill.skill_name} ({Math.round(lowestSkill.rating)}%)
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -63,7 +84,11 @@ function AgentDashboardPage() {
           negative={feedbackStats?.negative ?? 0}
           isLoading={isFeedbackLoading || isFeedbackMonthlyLoading}
         />
-        <ChartRadarDots abilities={abilities} isLoading={isAbilitiesLoading} />
+        <ChartRadarDots
+          ratings={skillRatings}
+          isLoading={isSkillRatingsLoading}
+          errorMessage={skillRatingsError ? String(skillRatingsError) : undefined}
+        />
       </div>
     </div>
   );

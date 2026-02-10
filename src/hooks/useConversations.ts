@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
-import { conversationKeys } from '@/lib/query-keys';
+import { abilityKeys, conversationKeys } from '@/lib/query-keys';
 
 function getOptimisticParentId(messages: Message[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
@@ -359,6 +359,8 @@ export function useSendMessage() {
       
       if (agentId) {
         queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+        queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+        queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
       } else {
         queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
       }
@@ -690,6 +692,8 @@ export function useSendMessageStreaming() {
           });
           if (agentId) {
             queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+            queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+            queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
           } else {
             queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
           }
@@ -908,6 +912,8 @@ export function useEditMessageStreaming() {
 
           if (agentId) {
             queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+            queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+            queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
           } else {
             queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
           }

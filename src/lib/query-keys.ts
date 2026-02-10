@@ -24,6 +24,7 @@ export const userProfileKeys = {
 export const abilityKeys = {
   all: ['abilities'] as const,
   agent: (agentId: string) => [...abilityKeys.all, 'agent', agentId] as const,
+  skillRatings: (agentId: string) => [...abilityKeys.all, 'skill-ratings', agentId] as const,
 };
 
 export const feedbackKeys = {

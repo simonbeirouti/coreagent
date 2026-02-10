@@ -23,9 +23,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
+import { abilityKeys } from '@/lib/query-keys';
 
 export const Route = createFileRoute('/agents/$agentId/voice')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -48,6 +50,7 @@ function AgentVoicePage() {
   const deleteConversation = useDeleteConversation();
   const generateConversationTitle = useGenerateConversationTitle();
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
   
   const [activeConversationId, setActiveConversationIdState] = useState<string | null>(
     conversationId ?? null
@@ -239,6 +242,10 @@ function AgentVoicePage() {
           entries,
         });
 
+        // Refresh skill metrics now that transcript usage is persisted.
+        queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+        queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+
         console.log('[VOICE] Save successful!');
         toast.success(`Voice chat saved (${transcriptToSave.length} messages)`);
 
@@ -265,7 +272,17 @@ function AgentVoicePage() {
       console.log('[VOICE] No transcript to save');
       toast.info('Disconnected from voice chat');
     }
-  }, [disconnect, transcript, activeConversationId, agentId, userId, agent?.name, createConversation, clearTranscript]);
+  }, [
+    disconnect,
+    transcript,
+    activeConversationId,
+    agentId,
+    userId,
+    agent?.name,
+    createConversation,
+    clearTranscript,
+    queryClient,
+  ]);
 
   if (agentLoading || conversationsLoading) {
     return (

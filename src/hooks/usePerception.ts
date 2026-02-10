@@ -1,10 +1,10 @@
 import React from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { startRecording as pluginStartRecording, stopRecording as pluginStopRecording } from 'tauri-plugin-mic-recorder-api';
 import { uploadScreenshot, compressImage } from '@/lib/storage';
 import { useAuth } from '@/hooks/use-auth';
-import { perceptionKeys } from '@/lib/query-keys';
+import { abilityKeys, perceptionKeys } from '@/lib/query-keys';
 
 export interface ScreenshotResult {
   image_base64: string;
@@ -30,6 +30,7 @@ export interface PerceptionStat {
 
 export function useVision(agentId: string) {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
 
   const captureScreen = useMutation({
     mutationFn: async (options?: { 
@@ -99,6 +100,11 @@ export function useVision(agentId: string) {
     },
     onError: (error) => {
       console.error('Screenshot capture failed:', error);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: perceptionKeys.stats(agentId) });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
     },
   });
 

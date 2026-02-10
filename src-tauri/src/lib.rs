@@ -548,6 +548,14 @@ async fn list_agent_abilities(
 }
 
 #[tauri::command]
+async fn get_agent_skill_ratings(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<ability_service::SkillPerformanceRatingData>, String> {
+    AbilityService::get_agent_skill_ratings(&db, agent_id).await
+}
+
+#[tauri::command]
 async fn get_relevant_memories(
     agent_id: String,
     query: String,
@@ -706,6 +714,7 @@ pub fn run() {
             update_user_profile,
             // Skill tracking + memory + feedback
             list_agent_abilities,
+            get_agent_skill_ratings,
             get_relevant_memories,
             submit_message_feedback,
             get_agent_feedback_stats,
