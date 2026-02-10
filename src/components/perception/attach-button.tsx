@@ -60,7 +60,6 @@ export function AttachButton({ onAttach, disabled }: AttachButtonProps) {
           // Upload to Supabase
           const uploadResult = await uploadScreenshot(base64, user.id, {
             isJpeg: shouldCompress && isJpeg,
-            contentType: file.type,
           });
 
           onAttach(base64, `screenshots/${uploadResult.storagePath}`, uploadResult.signedUrl);

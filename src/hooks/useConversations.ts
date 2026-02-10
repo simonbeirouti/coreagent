@@ -4,6 +4,25 @@ import { invoke, Channel } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
 import { getCachedData, getCachedDataUpdatedAt, removeCachedQueriesMatching, persistMemoryCache } from '../lib/tauri-store';
 
+function getOptimisticParentId(messages: Message[] | undefined): string | null {
+  if (!messages || messages.length === 0) return null;
+
+  const childParentIds = new Set(
+    messages
+      .map((message) => message.parent_id)
+      .filter((parentId): parentId is string => typeof parentId === 'string' && parentId.length > 0)
+  );
+  const leafMessages = messages.filter((message) => !childParentIds.has(message.id));
+
+  if (leafMessages.length === 0) return null;
+
+  return leafMessages.reduce((latest, current) => {
+    return new Date(current.created_at).getTime() > new Date(latest.created_at).getTime()
+      ? current
+      : latest;
+  }).id;
+}
+
 // Query keys
 export const conversationKeys = {
   all: ['conversations'] as const,
@@ -406,6 +425,7 @@ export function useSendMessageStreaming() {
     const previousMessages = queryClient.getQueryData<Message[]>(
       conversationKeys.messages(request.conversation_id)
     );
+    const parentId = getOptimisticParentId(previousMessages);
 
     const userMessage: Message = {
       id: `temp-${Date.now()}`,
@@ -415,6 +435,7 @@ export function useSendMessageStreaming() {
       message_type: 'text',
       metadata: {},
       created_at: new Date().toISOString(),
+      parent_id: parentId ?? undefined,
     };
 
     queryClient.setQueryData<Message[]>(
@@ -445,6 +466,7 @@ export function useSendMessageStreaming() {
               message_type: 'text',
               metadata: {},
               created_at: new Date().toISOString(),
+              parent_id: userMessage.id,
             };
             queryClient.setQueryData<Message[]>(
               conversationKeys.messages(request.conversation_id),

@@ -5,7 +5,7 @@ import {
   MenubarMenu,
   MenubarTrigger,
 } from '@/components/ui/menubar';
-import { MessageSquare, Settings, Phone } from 'lucide-react';
+import { MessageSquare, Settings, Phone, Brain, BarChart3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export const Route = createFileRoute('/agents/$agentId')({
@@ -21,6 +21,8 @@ function AgentLayout() {
   // Check which route is currently active
   const isChatRoute = matchRoute({ to: '/agents/$agentId/chat', params: { agentId } });
   const isVoiceRoute = matchRoute({ to: '/agents/$agentId/voice', params: { agentId } });
+  const isMemoryRoute = matchRoute({ to: '/agents/$agentId/memory', params: { agentId } });
+  const isDashboardRoute = matchRoute({ to: '/agents/$agentId/dashboard', params: { agentId } });
   const isSettingsRoute = matchRoute({ to: '/agents/$agentId/settings', params: { agentId } });
   const isExactAgentRoute = matchRoute({ to: '/agents/$agentId', params: { agentId } });
 
@@ -33,7 +35,7 @@ function AgentLayout() {
   }
 
   // Redirect to chat if on exact agent route (only when not loading)
-  if (!isLoading && isExactAgentRoute && !isChatRoute && !isVoiceRoute && !isSettingsRoute) {
+  if (!isLoading && isExactAgentRoute && !isChatRoute && !isVoiceRoute && !isMemoryRoute && !isDashboardRoute && !isSettingsRoute) {
     return <Navigate to="/agents/$agentId/chat" params={{ agentId }} replace />;
   }
 
@@ -56,6 +58,24 @@ function AgentLayout() {
               <MenubarTrigger className={cn(isVoiceRoute && "bg-accent")}>
                 <Phone className="mr-2 h-4 w-4" />
                 Voice
+              </MenubarTrigger>
+            </Link>
+          </MenubarMenu>
+
+          <MenubarMenu>
+            <Link to="/agents/$agentId/memory" params={{ agentId }}>
+              <MenubarTrigger className={cn(isMemoryRoute && "bg-accent")}>
+                <Brain className="mr-2 h-4 w-4" />
+                Memory
+              </MenubarTrigger>
+            </Link>
+          </MenubarMenu>
+
+          <MenubarMenu>
+            <Link to="/agents/$agentId/dashboard" params={{ agentId }}>
+              <MenubarTrigger className={cn(isDashboardRoute && "bg-accent")}>
+                <BarChart3 className="mr-2 h-4 w-4" />
+                Dashboard
               </MenubarTrigger>
             </Link>
           </MenubarMenu>

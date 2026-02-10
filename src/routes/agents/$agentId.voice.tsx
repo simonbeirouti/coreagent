@@ -329,6 +329,7 @@ function AgentVoicePage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" side="right" className="w-32">
                         <DropdownMenuItem
+                          className="cursor-pointer"
                           onClick={() => {
                             // TODO: Implement edit functionality
                             toast.info('Edit coming soon');
@@ -338,6 +339,7 @@ function AgentVoicePage() {
                           Edit
                         </DropdownMenuItem>
                         <DropdownMenuItem
+                          className="cursor-pointer"
                           variant="destructive"
                           onClick={() => handleDeleteConversation(conv.id)}
                         >
@@ -434,6 +436,7 @@ function AgentVoicePage() {
                     id="screen-awareness"
                     checked={screenAwarenessEnabled}
                     onCheckedChange={setScreenAwarenessEnabled}
+                    className="cursor-pointer"
                   />
                   {isPerceptionRunning && (
                     <span className="text-xs text-muted-foreground ml-1">
@@ -449,7 +452,7 @@ function AgentVoicePage() {
                       <Button
                         variant="outline"
                         size="icon"
-                        className="rounded-full h-10 w-10"
+                        className="rounded-full h-10 w-10 cursor-pointer"
                         onClick={async () => {
                           const result = await captureNow();
                           if (result) {
@@ -473,7 +476,7 @@ function AgentVoicePage() {
                   <Button
                     variant="destructive"
                     size="lg"
-                    className="rounded-full h-16 w-16"
+                    className="rounded-full h-16 w-16 cursor-pointer"
                     onClick={handleDisconnect}
                     title="End call (auto-saves transcript)"
                     disabled={isSaving}
@@ -484,7 +487,7 @@ function AgentVoicePage() {
                   <Button
                     variant="default"
                     size="lg"
-                    className="rounded-full h-16 w-16 bg-green-600 hover:bg-green-700"
+                    className="rounded-full h-16 w-16 cursor-pointer bg-green-600 hover:bg-green-700"
                     onClick={handleConnect}
                     disabled={state === 'connecting' || isSaving}
                     title="Start call"
@@ -511,7 +514,7 @@ function AgentVoicePage() {
             <Mic className="h-12 w-12 mb-4 opacity-50" />
             <p className="text-lg font-medium">Start a voice conversation</p>
             <p className="text-sm mb-4">Select a conversation or start a new one</p>
-            <Button onClick={handleStartNewVoiceChat} variant="outline">
+            <Button onClick={handleStartNewVoiceChat} variant="outline" className="cursor-pointer">
               <Plus className="mr-2 h-4 w-4" />
               New Voice Chat
             </Button>

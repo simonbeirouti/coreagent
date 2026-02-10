@@ -31,6 +31,7 @@ import { cn } from '@/lib/utils';
 import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
+import { MessageFeedback } from '@/components/feedback/message-feedback';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
@@ -253,11 +254,17 @@ function AgentChatPage() {
 
 
   const handleStartNewConversation = () => {
-    // If we already have an active conversation or are composing, do nothing
-    if (activeConversationId || isComposingNewConversation) return;
+    // Prevent switching while a message is actively streaming
+    if (sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) return;
 
-    // Just enable composing mode - don't create conversation yet
+    // If already composing a new conversation, do nothing
+    if (isComposingNewConversation) return;
+
+    // Switch to compose mode for a fresh chat
+    setActiveConversationId(null);
     setIsComposingNewConversation(true);
+    setMessageInput('');
+    setPendingScreenshot(null);
   };
 
   const handleSendMessage = async () => {
@@ -516,7 +523,7 @@ function AgentChatPage() {
         <div className="p-2 border-b shrink-0">
           <Button
             onClick={handleStartNewConversation}
-            disabled={activeConversationId !== null || isComposingNewConversation}
+            disabled={isComposingNewConversation || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming}
             className="cursor-pointer w-full"
             variant="outline"
           >
@@ -561,6 +568,7 @@ function AgentChatPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-32" side="right">
                         <DropdownMenuItem
+                            className="cursor-pointer"
                           onClick={() => {
                             // TODO: Implement edit functionality
                             toast.info('Edit coming soon');
@@ -570,6 +578,7 @@ function AgentChatPage() {
                           Edit
                         </DropdownMenuItem>
                         <DropdownMenuItem
+                          className="cursor-pointer"
                           variant="destructive"
                           onClick={() => handleDeleteConversation(conv.id)}
                         >
@@ -629,18 +638,19 @@ function AgentChatPage() {
                           )}>
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-6 w-6">
+                                <Button variant="ghost" size="icon" className="h-6 w-6 cursor-pointer">
                                   <MoreHorizontal className="h-3 w-3" />
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align={isUserMessage ? "end" : "start"}>
                                 {isUserMessage && (
-                                  <DropdownMenuItem onClick={() => handleStartEdit(message)}>
+                                  <DropdownMenuItem className="cursor-pointer" onClick={() => handleStartEdit(message)}>
                                     <Pencil className="h-4 w-4 mr-2" />
                                     Edit
                                   </DropdownMenuItem>
                                 )}
                                 <DropdownMenuItem
+                                  className="cursor-pointer"
                                   variant="destructive"
                                   onClick={() => setDeleteConfirmMessageId(message.id)}
                                 >
@@ -682,7 +692,7 @@ function AgentChatPage() {
                                       size="sm"
                                       variant="ghost"
                                       onClick={handleCancelEdit}
-                                      className="h-7 text-xs"
+                                      className="h-7 text-xs cursor-pointer"
                                     >
                                       <X className="h-3 w-3 mr-1" />
                                       Cancel
@@ -691,7 +701,7 @@ function AgentChatPage() {
                                       size="sm"
                                       onClick={handleConfirmEdit}
                                       disabled={!editContent.trim() || editMessageStreaming.isStreaming}
-                                      className="h-7 text-xs"
+                                      className="h-7 text-xs cursor-pointer"
                                     >
                                       {editMessageStreaming.isStreaming ? (
                                         <Loader2 className="h-3 w-3 mr-1 animate-spin" />
@@ -715,6 +725,13 @@ function AgentChatPage() {
                                   <div className="text-xs opacity-70 mt-2">
                                     {new Date(message.created_at).toLocaleTimeString()}
                                   </div>
+                                  {message.role === 'assistant' && userId ? (
+                                    <MessageFeedback
+                                      agentId={agentId}
+                                      messageId={message.id}
+                                      userId={userId}
+                                    />
+                                  ) : null}
                                 </>
                               )}
                             </CardContent>
@@ -729,7 +746,7 @@ function AgentChatPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-5 w-5"
+                                className="h-5 w-5 cursor-pointer"
                                 disabled={branchInfo.currentIndex === 0}
                                 onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex - 1)}
                               >
@@ -741,7 +758,7 @@ function AgentChatPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-5 w-5"
+                                className="h-5 w-5 cursor-pointer"
                                 disabled={branchInfo.currentIndex === branchInfo.siblingCount - 1}
                                 onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex + 1)}
                               >
@@ -822,7 +839,7 @@ function AgentChatPage() {
                   <Button
                     size="icon"
                     variant="destructive"
-                    className="absolute -top-2 -right-2 h-5 w-5"
+                    className="absolute -top-2 -right-2 h-5 w-5 cursor-pointer"
                     onClick={clearPendingScreenshot}
                   >
                     <X className="h-3 w-3" />
@@ -887,6 +904,7 @@ function AgentChatPage() {
               <Button
                 onClick={handleSendMessage}
                 disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || sendMessageStreaming.isStreaming}
+                className="cursor-pointer"
                 size="icon"
               >
                 <Send className="h-4 w-4" />
@@ -906,10 +924,10 @@ function AgentChatPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDeleteMessage}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="cursor-pointer bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
             </AlertDialogAction>

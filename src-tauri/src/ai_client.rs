@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use rig::completion::{Chat, Message};
 use rig::agent::AgentBuilder;
 use rig::client::CompletionClient;
@@ -13,7 +15,6 @@ use crate::input_sanitizer::escape_for_prompt;
 use async_openai::{
     types::chat::{CreateChatCompletionRequestArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart, ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage, ImageUrl, ImageDetail},
     Client as OpenAIClient,
-    config::OpenAIConfig,
 };
 
 // Anthropic streaming imports

@@ -51,7 +51,7 @@ function TagInput({ value, onChange, placeholder }: { value: string[], onChange:
               {val}
               <button
                 onClick={() => removeValue(val)}
-                className="ml-1 hover:bg-destructive/20 rounded-full p-0.5"
+                className="ml-1 cursor-pointer hover:bg-destructive/20 rounded-full p-0.5"
               >
                 <X className="h-3 w-3" />
               </button>
@@ -272,7 +272,7 @@ function Settings() {
 
           <Header title="Application Settings" description="Configure your CoreAgent preferences">
             {hasChanges && (
-              <Button onClick={handleSaveSettings} disabled={updateProfileMutation.isPending}>
+              <Button onClick={handleSaveSettings} disabled={updateProfileMutation.isPending} className="cursor-pointer">
                 {updateProfileMutation.isPending ? <Spinner className="h-4 w-4 mr-2" /> : <Save className="mr-2 h-4 w-4" />}
                 {updateProfileMutation.isPending ? 'Saving...' : 'Save Settings'}
               </Button>
@@ -293,7 +293,7 @@ function Settings() {
                     <div>
                       <Label htmlFor="communication-style">Communication Style</Label>
                       <Select value={communicationStyle} onValueChange={(v) => setCommunicationStyle(v as typeof communicationStyle)}>
-                        <SelectTrigger id="communication-style" className="w-full mt-1">
+                        <SelectTrigger id="communication-style" className="w-full mt-1 cursor-pointer">
                           <SelectValue placeholder="Select style" />
                         </SelectTrigger>
                         <SelectContent>
@@ -306,7 +306,7 @@ function Settings() {
                     <div>
                       <Label htmlFor="timezone">Timezone</Label>
                       <Select value={timezone} onValueChange={setTimezone}>
-                        <SelectTrigger id="timezone" className="w-full mt-1">
+                        <SelectTrigger id="timezone" className="w-full mt-1 cursor-pointer">
                           <SelectValue placeholder="Select timezone" />
                         </SelectTrigger>
                         <SelectContent>
@@ -341,7 +341,7 @@ function Settings() {
                     <div>
                       <Label htmlFor="session-length">Typical Session Length</Label>
                       <Select value={sessionLength} onValueChange={(v) => setSessionLength(v as typeof sessionLength)}>
-                        <SelectTrigger id="session-length" className="w-full mt-1">
+                        <SelectTrigger id="session-length" className="w-full mt-1 cursor-pointer">
                           <SelectValue placeholder="Select length" />
                         </SelectTrigger>
                         <SelectContent>
@@ -357,7 +357,7 @@ function Settings() {
                     <Label htmlFor="feedback-style">Feedback Style</Label>
                     <p className="text-sm text-muted-foreground mb-1">How you prefer to receive feedback from AI agents</p>
                     <Select value={feedbackStyle} onValueChange={(v) => setFeedbackStyle(v as typeof feedbackStyle)}>
-                      <SelectTrigger id="feedback-style" className="w-full">
+                      <SelectTrigger id="feedback-style" className="w-full cursor-pointer">
                         <SelectValue placeholder="Select style" />
                       </SelectTrigger>
                       <SelectContent>
@@ -428,7 +428,7 @@ function Settings() {
                   <div>
                     <Label htmlFor="theme">Theme</Label>
                     <Select value={theme} onValueChange={handleThemeChange}>
-                      <SelectTrigger className="w-full mt-1">
+                      <SelectTrigger className="w-full mt-1 cursor-pointer">
                         <SelectValue placeholder="Select theme" />
                       </SelectTrigger>
                       <SelectContent>
@@ -443,7 +443,7 @@ function Settings() {
                     <div>
                       <Label htmlFor="language">UI Language</Label>
                       <Select value={language} onValueChange={(v) => setLanguage(v as LanguageCode)}>
-                        <SelectTrigger id="language" className="w-full mt-1">
+                        <SelectTrigger id="language" className="w-full mt-1 cursor-pointer">
                           <SelectValue placeholder="Select" />
                         </SelectTrigger>
                         <SelectContent>
@@ -456,7 +456,7 @@ function Settings() {
                     <div>
                       <Label htmlFor="ai-language">AI Language</Label>
                       <Select value={aiResponseLanguage} onValueChange={(v) => setAiResponseLanguage(v as LanguageCode)}>
-                        <SelectTrigger id="ai-language" className="w-full mt-1">
+                        <SelectTrigger id="ai-language" className="w-full mt-1 cursor-pointer">
                           <SelectValue placeholder="Select" />
                         </SelectTrigger>
                         <SelectContent>
@@ -477,6 +477,7 @@ function Settings() {
                       id="notifications"
                       checked={notifications}
                       onCheckedChange={setNotifications}
+                      className="cursor-pointer"
                     />
                   </div>
 
@@ -489,6 +490,7 @@ function Settings() {
                       id="analytics"
                       checked={analytics}
                       onCheckedChange={setAnalytics}
+                      className="cursor-pointer"
                     />
                   </div>
                 </CardContent>
@@ -503,7 +505,7 @@ function Settings() {
                 <CardContent>
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
-                      <Button variant="destructive" className="w-full" disabled={deleting}>
+                      <Button variant="destructive" className="w-full cursor-pointer" disabled={deleting}>
                         {deleting ? <Spinner className="h-4 w-4 mr-2" /> : <Trash2 className="mr-2 h-4 w-4" />}
                         Delete Account
                       </Button>
@@ -517,10 +519,10 @@ function Settings() {
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
                         <AlertDialogAction
                           onClick={handleDeleteAccount}
-                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                          className="cursor-pointer bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                           Delete Account
                         </AlertDialogAction>

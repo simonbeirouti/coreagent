@@ -1,9 +1,19 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::single_component_path_imports)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::redundant_closure)]
+
 mod auth;
 mod db;
 mod entities;
 mod agent_service;
+mod ability_service;
 mod conversation_service;
 mod ai_client;
+mod feedback_service;
+mod memory_service;
 mod user_profile_service;
 mod perception_tracker;
 mod audio_service;
@@ -14,8 +24,11 @@ use tauri::{Manager, ipc::Channel};
 use auth::{AuthState, SessionData};
 use sea_orm::DatabaseConnection;
 use agent_service::{AgentService, CreateAgentRequest, UpdateAgentRequest};
+use ability_service::AbilityService;
 use conversation_service::{ConversationService, CreateConversationRequest, TranscriptEntry};
 use ai_client::AiClient;
+use feedback_service::{FeedbackService, SubmitFeedbackRequest};
+use memory_service::{MemoryService, SimilarMessage};
 use perception_tracker::{PerceptionTracker, PerceptionStat};
 use audio_service::{AudioService, RecordingResult};
 use vision_service::{VisionService, ScreenshotResult};
@@ -144,7 +157,12 @@ async fn send_message(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<conversation_service::MessageData, String> {
-    ConversationService::send_message(&db, conversation_id, content, image_base64, &ai_client).await
+    let response = ConversationService::send_message(&db, conversation_id, content, image_base64, &ai_client).await?;
+    // Track as a core conversation skill usage (best-effort).
+    if let Ok(conversation) = ConversationService::get_conversation(&db, response.conversation_id.to_string()).await {
+        let _ = AbilityService::track_ability_usage(&db, conversation.agent_id, "conversation", true).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -156,7 +174,11 @@ async fn send_message_streaming(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<conversation_service::MessageData, String> {
-    ConversationService::send_message_streaming(&db, conversation_id, content, image_base64, on_event, &ai_client).await
+    let response = ConversationService::send_message_streaming(&db, conversation_id, content, image_base64, on_event, &ai_client).await?;
+    if let Ok(conversation) = ConversationService::get_conversation(&db, response.conversation_id.to_string()).await {
+        let _ = AbilityService::track_ability_usage(&db, conversation.agent_id, "conversation", true).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -213,7 +235,11 @@ async fn edit_message(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<(conversation_service::MessageData, conversation_service::MessageData), String> {
-    ConversationService::edit_message(&db, message_id, new_content, image_base64, &ai_client).await
+    let result = ConversationService::edit_message(&db, message_id, new_content, image_base64, &ai_client).await?;
+    if let Ok(conversation) = ConversationService::get_conversation(&db, result.0.conversation_id.to_string()).await {
+        let _ = AbilityService::track_ability_usage(&db, conversation.agent_id, "conversation", true).await;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -225,7 +251,11 @@ async fn edit_message_streaming(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<(conversation_service::MessageData, conversation_service::MessageData), String> {
-    ConversationService::edit_message_streaming(&db, message_id, new_content, image_base64, on_event, &ai_client).await
+    let result = ConversationService::edit_message_streaming(&db, message_id, new_content, image_base64, on_event, &ai_client).await?;
+    if let Ok(conversation) = ConversationService::get_conversation(&db, result.0.conversation_id.to_string()).await {
+        let _ = AbilityService::track_ability_usage(&db, conversation.agent_id, "conversation", true).await;
+    }
+    Ok(result)
 }
 
 // Vision commands
@@ -247,6 +277,8 @@ async fn capture_screenshot(
         "screenshot",
         None
     ).await?;
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let _ = AbilityService::track_ability_usage(&db, agent_uuid, "vision_screenshot", true).await;
 
     // Note: Perception logging is done separately via log_screenshot_perception
     // after the frontend uploads the file to Supabase Storage
@@ -294,6 +326,8 @@ async fn analyze_image(
         "analyze",
         None
     ).await?;
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let _ = AbilityService::track_ability_usage(&db, agent_uuid, "vision_analysis", true).await;
 
     Ok(analysis)
 }
@@ -349,6 +383,8 @@ async fn transcribe_audio(
         "transcribe",
         None
     ).await?;
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let _ = AbilityService::track_ability_usage(&db, agent_uuid, "audio_transcription", true).await;
 
     Ok(transcription)
 }
@@ -407,6 +443,8 @@ async fn text_to_speech(
         "tts",
         None
     ).await?;
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let _ = AbilityService::track_ability_usage(&db, agent_uuid, "voice_synthesis", true).await;
 
     Ok(audio_base64)
 }
@@ -501,6 +539,75 @@ async fn update_user_profile(
     user_profile_service::UserProfileService::update_profile(&db, user_id, updates).await
 }
 
+#[tauri::command]
+async fn list_agent_abilities(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<ability_service::AgentAbilityData>, String> {
+    AbilityService::list_agent_abilities(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn get_relevant_memories(
+    agent_id: String,
+    query: String,
+    conversation_id: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<SimilarMessage>, String> {
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let conversation_uuid = conversation_id
+        .map(|id| uuid::Uuid::parse_str(&id))
+        .transpose()
+        .map_err(|e| format!("Invalid conversation ID: {}", e))?;
+    println!(
+        "[MEMORY] Search request for agent={} conversation={:?} query='{}'",
+        agent_uuid, conversation_uuid, query
+    );
+
+    let memories = MemoryService::search_similar_messages(&db, &query, agent_uuid, conversation_uuid, 10)
+        .await
+        .map_err(|e| {
+            eprintln!("[MEMORY] Search failed: {}", e);
+            e
+        })?;
+
+    println!("[MEMORY] Search returned {} matches", memories.len());
+    let _ = AbilityService::track_ability_usage(&db, agent_uuid, "memory_retrieval", true).await;
+    Ok(memories)
+}
+
+#[tauri::command]
+async fn submit_message_feedback(
+    request: SubmitFeedbackRequest,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<(), String> {
+    FeedbackService::submit_feedback(&db, request).await
+}
+
+#[tauri::command]
+async fn get_agent_feedback_stats(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<feedback_service::FeedbackStats, String> {
+    FeedbackService::get_feedback_stats(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn analyze_agent_feedback_patterns(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<feedback_service::PersonalityAdjustmentData>, String> {
+    FeedbackService::analyze_feedback_patterns(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn list_personality_adjustments(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<feedback_service::PersonalityAdjustmentData>, String> {
+    FeedbackService::list_personality_adjustments(&db, agent_id).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -509,6 +616,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 match db::init_db().await {
                     Ok(db_conn) => {
+                        if let Err(err) = AbilityService::initialize_core_abilities(&db_conn).await {
+                            eprintln!("[APP] Failed to initialize core abilities: {}", err);
+                        }
                         app.manage(db_conn);
                         println!("[APP] Database connection initialized successfully");
                     }
@@ -577,6 +687,13 @@ pub fn run() {
             // User profile commands
             get_user_profile,
             update_user_profile,
+            // Skill tracking + memory + feedback
+            list_agent_abilities,
+            get_relevant_memories,
+            submit_message_feedback,
+            get_agent_feedback_stats,
+            analyze_agent_feedback_patterns,
+            list_personality_adjustments,
             // Realtime voice chat
             get_realtime_session_token
         ])

@@ -1,12 +1,11 @@
-use crate::entities::conversations::{self, Entity as Conversations, ActiveModel, Model as ConversationModel};
-use crate::entities::messages::{self, Entity as Messages, ActiveModel as MessageActiveModel, Model as MessageModel};
+use crate::entities::conversations::{self};
+use crate::entities::messages::{self};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
-use tauri::ipc::Channel;
-use crate::ai_client::StreamEvent;
 use crate::input_sanitizer::sanitize_message;
+use crate::memory_service::MemoryService;
 
 // Conversation data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,11 +226,30 @@ impl ConversationService {
 
         println!("[CONVERSATION] Processing message with {} history items", history.len());
 
+        // Add semantic memory context if available (best-effort).
+        let mut final_prompt = content.clone();
+        if let Ok(memories) = MemoryService::get_relevant_context(
+            db,
+            &sanitized_content.content,
+            conversation.agent_id,
+            Some(conversation_id),
+        )
+        .await
+        {
+            if !memories.is_empty() {
+                final_prompt = format!(
+                    "{}\n\nRelevant prior context:\n{}",
+                    content,
+                    memories.join("\n")
+                );
+            }
+        }
+
         // Get AI response with conversation history
         let ai_response = crate::agent_service::AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
-            content,
+            final_prompt,
             history,
             image_base64,
             ai_client,
@@ -251,6 +269,10 @@ impl ConversationService {
 
         let saved_message = assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Embed user + assistant messages (best-effort, non-fatal).
+        let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
+        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content).await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -334,11 +356,30 @@ impl ConversationService {
 
         println!("[CONVERSATION] Processing streaming message with {} history items", history.len());
 
+        // Add semantic memory context if available (best-effort).
+        let mut final_prompt = content.clone();
+        if let Ok(memories) = MemoryService::get_relevant_context(
+            db,
+            &sanitized_content.content,
+            conversation.agent_id,
+            Some(conversation_id),
+        )
+        .await
+        {
+            if !memories.is_empty() {
+                final_prompt = format!(
+                    "{}\n\nRelevant prior context:\n{}",
+                    content,
+                    memories.join("\n")
+                );
+            }
+        }
+
         // Get AI response with conversation history (streaming)
         let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
-            content,
+            final_prompt,
             history,
             image_base64,
             on_event,
@@ -359,6 +400,10 @@ impl ConversationService {
 
         let saved_message = assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Embed user + assistant messages (best-effort, non-fatal).
+        let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
+        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content).await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -435,7 +480,7 @@ impl ConversationService {
 
         // Ensure title is reasonable length (2-5 words)
         let word_count = title.split_whitespace().count();
-        if word_count < 2 || word_count > 5 {
+        if !(2..=5).contains(&word_count) {
             println!("[CONVERSATION] Generated title '{}' has {} words, using default", title, word_count);
             // Fallback to a generic title if AI generated something too long/short
             let fallback_title = if first_message.len() > 50 {
@@ -605,11 +650,30 @@ impl ConversationService {
 
         println!("[CONVERSATION] Edit message: built {} history items for branch", history.len());
 
+        // Add semantic memory context if available (best-effort).
+        let mut final_prompt = new_content.clone();
+        if let Ok(memories) = MemoryService::get_relevant_context(
+            db,
+            &sanitized_content.content,
+            conversation.agent_id,
+            Some(original_message.conversation_id),
+        )
+        .await
+        {
+            if !memories.is_empty() {
+                final_prompt = format!(
+                    "{}\n\nRelevant prior context:\n{}",
+                    new_content,
+                    memories.join("\n")
+                );
+            }
+        }
+
         // Get AI response with the history up to the branch point
         let ai_response = crate::agent_service::AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
-            new_content,
+            final_prompt,
             history,
             image_base64,
             ai_client,
@@ -629,6 +693,10 @@ impl ConversationService {
 
         let saved_assistant_message = new_assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Embed branch user + assistant messages (best-effort).
+        let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
+        let _ = MemoryService::embed_message_content(db, saved_assistant_message.id, &saved_assistant_message.content).await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -719,11 +787,30 @@ impl ConversationService {
 
         println!("[CONVERSATION] Edit message streaming: built {} history items for branch", history.len());
 
+        // Add semantic memory context if available (best-effort).
+        let mut final_prompt = new_content.clone();
+        if let Ok(memories) = MemoryService::get_relevant_context(
+            db,
+            &sanitized_content.content,
+            conversation.agent_id,
+            Some(original_message.conversation_id),
+        )
+        .await
+        {
+            if !memories.is_empty() {
+                final_prompt = format!(
+                    "{}\n\nRelevant prior context:\n{}",
+                    new_content,
+                    memories.join("\n")
+                );
+            }
+        }
+
         // Get AI response with streaming
         let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
-            new_content,
+            final_prompt,
             history,
             image_base64,
             on_event,
@@ -744,6 +831,10 @@ impl ConversationService {
 
         let saved_assistant_message = new_assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Embed branch user + assistant messages (best-effort).
+        let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
+        let _ = MemoryService::embed_message_content(db, saved_assistant_message.id, &saved_assistant_message.content).await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -787,13 +878,14 @@ impl ConversationService {
             // Sanitize the transcript text
             let sanitized_text = sanitize_message(&entry.text)
                 .map_err(|e| format!("Input validation failed for transcript: {}", e))?;
+            let sanitized_text_content = sanitized_text.content.clone();
 
             let new_message_id = Uuid::new_v4();
             let message = messages::ActiveModel {
                 id: ActiveValue::Set(new_message_id),
                 conversation_id: ActiveValue::Set(conversation_id),
                 role: ActiveValue::Set(entry.role),
-                content: ActiveValue::Set(sanitized_text.content),
+                content: ActiveValue::Set(sanitized_text_content.clone()),
                 message_type: ActiveValue::Set("audio".to_string()), // Mark as audio message
                 metadata: ActiveValue::Set(serde_json::json!({
                     "source": "voice_chat",
@@ -807,6 +899,7 @@ impl ConversationService {
                 .map_err(|e| format!("Failed to save transcript entry: {}", e))?;
             
             saved_messages.push(saved.into());
+            let _ = MemoryService::embed_message_content(db, new_message_id, &sanitized_text_content).await;
             // Chain: next message's parent is this message
             last_message_id = Some(new_message_id);
         }

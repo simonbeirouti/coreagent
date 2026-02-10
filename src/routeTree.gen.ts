@@ -17,6 +17,8 @@ import { Route as AgentsCreateRouteImport } from './routes/agents/create'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as AgentsAgentIdVoiceRouteImport } from './routes/agents/$agentId.voice'
 import { Route as AgentsAgentIdSettingsRouteImport } from './routes/agents/$agentId.settings'
+import { Route as AgentsAgentIdMemoryRouteImport } from './routes/agents/$agentId.memory'
+import { Route as AgentsAgentIdDashboardRouteImport } from './routes/agents/$agentId.dashboard'
 import { Route as AgentsAgentIdChatRouteImport } from './routes/agents/$agentId.chat'
 
 const SettingsRoute = SettingsRouteImport.update({
@@ -59,6 +61,16 @@ const AgentsAgentIdSettingsRoute = AgentsAgentIdSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AgentsAgentIdRoute,
 } as any)
+const AgentsAgentIdMemoryRoute = AgentsAgentIdMemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
+const AgentsAgentIdDashboardRoute = AgentsAgentIdDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
 const AgentsAgentIdChatRoute = AgentsAgentIdChatRouteImport.update({
   id: '/chat',
   path: '/chat',
@@ -73,6 +85,8 @@ export interface FileRoutesByFullPath {
   '/agents/create': typeof AgentsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -84,6 +98,8 @@ export interface FileRoutesByTo {
   '/agents/create': typeof AgentsCreateRoute
   '/agents': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -96,6 +112,8 @@ export interface FileRoutesById {
   '/agents/create': typeof AgentsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -109,6 +127,8 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents/'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
     | '/agents/$agentId/voice'
   fileRoutesByTo: FileRoutesByTo
@@ -120,6 +140,8 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
     | '/agents/$agentId/voice'
   id:
@@ -131,6 +153,8 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents/'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
     | '/agents/$agentId/voice'
   fileRoutesById: FileRoutesById
@@ -202,6 +226,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdSettingsRouteImport
       parentRoute: typeof AgentsAgentIdRoute
     }
+    '/agents/$agentId/memory': {
+      id: '/agents/$agentId/memory'
+      path: '/memory'
+      fullPath: '/agents/$agentId/memory'
+      preLoaderRoute: typeof AgentsAgentIdMemoryRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
+    '/agents/$agentId/dashboard': {
+      id: '/agents/$agentId/dashboard'
+      path: '/dashboard'
+      fullPath: '/agents/$agentId/dashboard'
+      preLoaderRoute: typeof AgentsAgentIdDashboardRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
     '/agents/$agentId/chat': {
       id: '/agents/$agentId/chat'
       path: '/chat'
@@ -214,12 +252,16 @@ declare module '@tanstack/react-router' {
 
 interface AgentsAgentIdRouteChildren {
   AgentsAgentIdChatRoute: typeof AgentsAgentIdChatRoute
+  AgentsAgentIdDashboardRoute: typeof AgentsAgentIdDashboardRoute
+  AgentsAgentIdMemoryRoute: typeof AgentsAgentIdMemoryRoute
   AgentsAgentIdSettingsRoute: typeof AgentsAgentIdSettingsRoute
   AgentsAgentIdVoiceRoute: typeof AgentsAgentIdVoiceRoute
 }
 
 const AgentsAgentIdRouteChildren: AgentsAgentIdRouteChildren = {
   AgentsAgentIdChatRoute: AgentsAgentIdChatRoute,
+  AgentsAgentIdDashboardRoute: AgentsAgentIdDashboardRoute,
+  AgentsAgentIdMemoryRoute: AgentsAgentIdMemoryRoute,
   AgentsAgentIdSettingsRoute: AgentsAgentIdSettingsRoute,
   AgentsAgentIdVoiceRoute: AgentsAgentIdVoiceRoute,
 }

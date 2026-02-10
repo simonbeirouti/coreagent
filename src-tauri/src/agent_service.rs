@@ -1,5 +1,5 @@
-use crate::entities::agents::{self, Entity as Agents, ActiveModel, Model};
-use crate::user_profile_service::{UserProfileService, UserProfileData};
+use crate::entities::agents::{self};
+use crate::user_profile_service::UserProfileService;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

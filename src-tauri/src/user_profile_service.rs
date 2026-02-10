@@ -1,4 +1,4 @@
-use crate::entities::user_profiles::{self, Entity as UserProfiles, ActiveModel, Model};
+use crate::entities::user_profiles::{self, Entity as UserProfiles};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
