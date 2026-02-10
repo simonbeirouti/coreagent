@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
+import { abilityKeys } from '@/lib/query-keys';
 
 export interface AgentAbility {
   id: string;
@@ -16,11 +17,16 @@ export interface AgentAbility {
 
 export function useAgentAbilities(agentId: string) {
   return useQuery({
-    queryKey: ['abilities', 'agent', agentId],
+    queryKey: abilityKeys.agent(agentId),
     queryFn: async (): Promise<AgentAbility[]> => {
       return invoke('list_agent_abilities', { agentId });
     },
     enabled: !!agentId,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

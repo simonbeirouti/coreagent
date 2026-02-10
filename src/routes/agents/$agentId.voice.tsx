@@ -28,11 +28,17 @@ import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
 
 export const Route = createFileRoute('/agents/$agentId/voice')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    conversationId:
+      typeof search.conversationId === 'string' ? search.conversationId : undefined,
+  }),
   component: AgentVoicePage,
 });
 
 function AgentVoicePage() {
   const { agentId } = Route.useParams();
+  const { conversationId } = Route.useSearch();
+  const navigate = Route.useNavigate();
   const { user } = useAuth();
   const userId = user?.id || '';
   const { data: agent, isLoading: agentLoading } = useAgent(agentId);
@@ -43,7 +49,29 @@ function AgentVoicePage() {
   const generateConversationTitle = useGenerateConversationTitle();
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationIdState] = useState<string | null>(
+    conversationId ?? null
+  );
+  const setActiveConversationId = useCallback(
+    (nextConversationId: string | null) => {
+      setActiveConversationIdState(nextConversationId);
+      navigate({
+        to: '/agents/$agentId/voice',
+        params: { agentId },
+        search: (prev) => ({
+          ...prev,
+          conversationId: nextConversationId ?? undefined,
+        }),
+        replace: true,
+      });
+    },
+    [agentId, navigate]
+  );
+
+  useEffect(() => {
+    setActiveConversationIdState(conversationId ?? null);
+  }, [conversationId]);
+
   const [isSaving, setIsSaving] = useState(false);
   const [screenAwarenessEnabled, setScreenAwarenessEnabled] = useState(false);
 
@@ -284,7 +312,7 @@ function AgentVoicePage() {
         <div className="p-2 border-b shrink-0">
           <Button 
             onClick={handleStartNewVoiceChat} 
-            className="cursor-pointer w-full"
+            className="w-full"
             variant="outline"
           >
             <Plus className="mr-2 h-4 w-4" />
@@ -322,14 +350,13 @@ function AgentVoicePage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="cursor-pointer absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
                         >
                           <MoreHorizontal className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" side="right" className="w-32">
                         <DropdownMenuItem
-                          className="cursor-pointer"
                           onClick={() => {
                             // TODO: Implement edit functionality
                             toast.info('Edit coming soon');
@@ -339,7 +366,6 @@ function AgentVoicePage() {
                           Edit
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          className="cursor-pointer"
                           variant="destructive"
                           onClick={() => handleDeleteConversation(conv.id)}
                         >
@@ -421,7 +447,7 @@ function AgentVoicePage() {
             </div>
 
             {/* Bottom controls */}
-            <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-background via-background to-transparent z-30">
+            <div className="absolute bottom-0 left-0 right-0 p-6 bg-linear-to-t from-background via-background to-transparent z-30">
               {/* Screen Awareness Controls */}
               <div className="mx-auto max-w-md flex items-center justify-center gap-4 mb-4">
                 <div className="flex items-center gap-2 bg-background/80 rounded-full px-4 py-2 border">
@@ -429,14 +455,13 @@ function AgentVoicePage() {
                     "h-4 w-4 transition-colors",
                     isPerceptionRunning ? "text-green-500" : "text-muted-foreground"
                   )} />
-                  <Label htmlFor="screen-awareness" className="text-sm cursor-pointer">
+                  <Label htmlFor="screen-awareness" className="text-sm">
                     Screen Awareness
                   </Label>
                   <Switch
                     id="screen-awareness"
                     checked={screenAwarenessEnabled}
                     onCheckedChange={setScreenAwarenessEnabled}
-                    className="cursor-pointer"
                   />
                   {isPerceptionRunning && (
                     <span className="text-xs text-muted-foreground ml-1">
@@ -452,7 +477,7 @@ function AgentVoicePage() {
                       <Button
                         variant="outline"
                         size="icon"
-                        className="rounded-full h-10 w-10 cursor-pointer"
+                        className="rounded-full h-10 w-10"
                         onClick={async () => {
                           const result = await captureNow();
                           if (result) {
@@ -476,7 +501,7 @@ function AgentVoicePage() {
                   <Button
                     variant="destructive"
                     size="lg"
-                    className="rounded-full h-16 w-16 cursor-pointer"
+                    className="rounded-full h-16 w-16"
                     onClick={handleDisconnect}
                     title="End call (auto-saves transcript)"
                     disabled={isSaving}
@@ -487,7 +512,7 @@ function AgentVoicePage() {
                   <Button
                     variant="default"
                     size="lg"
-                    className="rounded-full h-16 w-16 cursor-pointer bg-green-600 hover:bg-green-700"
+                    className="rounded-full h-16 w-16 bg-green-600 hover:bg-green-700"
                     onClick={handleConnect}
                     disabled={state === 'connecting' || isSaving}
                     title="Start call"
@@ -514,7 +539,7 @@ function AgentVoicePage() {
             <Mic className="h-12 w-12 mb-4 opacity-50" />
             <p className="text-lg font-medium">Start a voice conversation</p>
             <p className="text-sm mb-4">Select a conversation or start a new one</p>
-            <Button onClick={handleStartNewVoiceChat} variant="outline" className="cursor-pointer">
+            <Button onClick={handleStartNewVoiceChat} variant="outline">
               <Plus className="mr-2 h-4 w-4" />
               New Voice Chat
             </Button>

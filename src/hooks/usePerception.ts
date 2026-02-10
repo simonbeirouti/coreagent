@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { startRecording as pluginStartRecording, stopRecording as pluginStopRecording } from 'tauri-plugin-mic-recorder-api';
 import { uploadScreenshot, compressImage } from '@/lib/storage';
 import { useAuth } from '@/hooks/use-auth';
+import { perceptionKeys } from '@/lib/query-keys';
 
 export interface ScreenshotResult {
   image_base64: string;
@@ -185,12 +186,16 @@ export function useAudio(agentId: string) {
 
 export function usePerceptionStats(agentId: string) {
   return useQuery({
-    queryKey: ['perception-stats', agentId],
+    queryKey: perceptionKeys.stats(agentId),
     queryFn: async (): Promise<PerceptionStat[]> => {
       return invoke('get_perception_stats', { agentId });
     },
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    enabled: !!agentId,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: false,
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

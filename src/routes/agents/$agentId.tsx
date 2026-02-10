@@ -36,7 +36,7 @@ function AgentLayout() {
 
   // Redirect to chat if on exact agent route (only when not loading)
   if (!isLoading && isExactAgentRoute && !isChatRoute && !isVoiceRoute && !isMemoryRoute && !isDashboardRoute && !isSettingsRoute) {
-    return <Navigate to="/agents/$agentId/chat" params={{ agentId }} replace />;
+    return <Navigate to="/agents/$agentId/chat" params={{ agentId }} search={{ conversationId: undefined }} replace />;
   }
 
   return (
@@ -45,7 +45,7 @@ function AgentLayout() {
       <div className="p-4 bg-background shrink-0 -mt-4 -mx-2">
         <Menubar className="border-b border-border">
           <MenubarMenu>
-            <Link to="/agents/$agentId/chat" params={{ agentId }}>
+            <Link to="/agents/$agentId/chat" params={{ agentId }} search={{ conversationId: undefined }}>
               <MenubarTrigger className={cn(isChatRoute && "bg-accent")}>
                 <MessageSquare className="mr-2 h-4 w-4" />
                 Chat
@@ -54,7 +54,7 @@ function AgentLayout() {
           </MenubarMenu>
 
           <MenubarMenu>
-            <Link to="/agents/$agentId/voice" params={{ agentId }}>
+            <Link to="/agents/$agentId/voice" params={{ agentId }} search={{ conversationId: undefined }}>
               <MenubarTrigger className={cn(isVoiceRoute && "bg-accent")}>
                 <Phone className="mr-2 h-4 w-4" />
                 Voice

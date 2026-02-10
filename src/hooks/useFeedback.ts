@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
+import { feedbackKeys } from '@/lib/query-keys';
 
 export type FeedbackType = 'positive' | 'negative' | 'neutral';
 export type FeedbackCategory = 'helpfulness' | 'accuracy' | 'tone' | 'verbosity';
@@ -36,8 +37,8 @@ export function useSubmitFeedback(agentId?: string) {
     },
     onSuccess: () => {
       if (agentId) {
-        queryClient.invalidateQueries({ queryKey: ['feedback', 'stats', agentId] });
-        queryClient.invalidateQueries({ queryKey: ['feedback', 'adjustments', agentId] });
+        queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
+        queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
       }
     },
   });
@@ -45,21 +46,31 @@ export function useSubmitFeedback(agentId?: string) {
 
 export function useFeedbackStats(agentId: string) {
   return useQuery({
-    queryKey: ['feedback', 'stats', agentId],
+    queryKey: feedbackKeys.stats(agentId),
     queryFn: async (): Promise<FeedbackStats> => {
       return invoke('get_agent_feedback_stats', { agentId });
     },
     enabled: !!agentId,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 
 export function usePersonalityAdjustments(agentId: string) {
   return useQuery({
-    queryKey: ['feedback', 'adjustments', agentId],
+    queryKey: feedbackKeys.adjustments(agentId),
     queryFn: async (): Promise<PersonalityAdjustment[]> => {
       return invoke('list_personality_adjustments', { agentId });
     },
     enabled: !!agentId,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 
@@ -70,8 +81,8 @@ export function useAnalyzeFeedbackPatterns(agentId: string) {
       return invoke('analyze_agent_feedback_patterns', { agentId });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['feedback', 'adjustments', agentId] });
-      queryClient.invalidateQueries({ queryKey: ['feedback', 'stats', agentId] });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
     },
   });
 }

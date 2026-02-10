@@ -110,7 +110,7 @@ function AgentsPage() {
                       </Link>
                     </Button>
                     <Button variant="outline" size="sm" asChild>
-                      <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }}>
+                      <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
                         <MessageSquare className="mr-1 h-3 w-3" />
                         Chat
                       </Link>

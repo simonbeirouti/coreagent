@@ -1,19 +1,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
-import { saveCache } from '@/lib/tauri-store';
-import { useEffect, useRef } from 'react';
+import { hydrateCache, saveCache } from '@/lib/tauri-store';
+import { useEffect, useRef, useState } from 'react';
 
 // Create a client
 function makeQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        // With SSR, we usually want to set some default staleTime
-        // above 0 to avoid refetching immediately on the client
-        staleTime: 60 * 1000, // 1 minute
-        gcTime: 5 * 60 * 1000, // Keep unused data for 5 minutes
-        refetchOnWindowFocus: true, // Refresh when user returns to tab
-        refetchOnReconnect: true, // Refresh on network reconnect
+        // Desktop cache-first UX:
+        // - show hydrated data immediately
+        // - do not auto-refetch on remount/focus/reconnect
+        // - refresh only via explicit refetch/invalidation from active views
+        staleTime: Infinity,
+        gcTime: 24 * 60 * 60 * 1000, // Keep unused data for 24 hours
+        refetchOnMount: false,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
         retry: (failureCount: number, error: unknown) => {
           // Don't retry on 4xx errors
           if (error instanceof Error && error.message.includes('4')) {
@@ -52,9 +55,33 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
   // it suspends and there is no boundary
   const queryClient = getQueryClient();
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [isHydrated, setIsHydrated] = useState(false);
+  const hydrationStartedRef = useRef(false);
+
+  // Hydrate persisted cache before mounting query consumers.
+  useEffect(() => {
+    if (hydrationStartedRef.current) return;
+    hydrationStartedRef.current = true;
+
+    hydrateCache(queryClient)
+      .catch((error) => {
+        console.warn('[QueryProvider] Failed to hydrate cache:', error);
+      })
+      .finally(() => {
+        setIsHydrated(true);
+      });
+  }, [queryClient]);
 
   // Subscribe to cache changes and persist them
   useEffect(() => {
+    const flushCacheSave = () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+      void saveCache(queryClient);
+    };
+
     const unsubscribe = queryClient.getQueryCache().subscribe((event: any) => {
       // Only save on successful mutations or query updates
       if (event.type === 'added' || event.type === 'updated') {
@@ -73,13 +100,21 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
+    window.addEventListener('beforeunload', flushCacheSave);
+
     return () => {
       unsubscribe();
+      window.removeEventListener('beforeunload', flushCacheSave);
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
       }
+      flushCacheSave();
     };
   }, [queryClient]);
+
+  if (!isHydrated) {
+    return null;
+  }
 
   return (
     <QueryClientProvider client={queryClient}>

@@ -58,7 +58,6 @@ export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
         <Button
           onClick={() => void handleSearch()}
           disabled={query.trim().length < 3}
-          className="cursor-pointer"
           size="icon"
         >
           <Search className="h-4 w-4" />
@@ -78,7 +77,7 @@ export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
               <Accordion type="multiple" className="px-2">
                 {sortedMemories.map((memory) => (
                   <AccordionItem key={memory.message_id} value={memory.message_id}>
-                    <AccordionTrigger className="cursor-pointer py-3">
+                    <AccordionTrigger className="py-3">
                       <div className="flex w-full items-center justify-between pr-2 text-left">
                         <span className="text-xs capitalize text-muted-foreground">{memory.role}</span>
                         <span className="text-xs text-muted-foreground">

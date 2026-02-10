@@ -42,7 +42,7 @@ function Documentation() {
         <CardContent>
           <div className="grid gap-4 md:grid-cols-2">
             {docs.map((doc) => (
-              <Card key={doc.title} className="hover:shadow-md transition-shadow cursor-pointer">
+              <Card key={doc.title} className="hover:shadow-md transition-shadow">
                 <CardHeader>
                   <CardTitle className="text-lg">{doc.title}</CardTitle>
                   <CardDescription>{doc.description}</CardDescription>

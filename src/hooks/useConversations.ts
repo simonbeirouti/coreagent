@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
-import { getCachedData, getCachedDataUpdatedAt, removeCachedQueriesMatching, persistMemoryCache } from '../lib/tauri-store';
+import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
+import { conversationKeys } from '@/lib/query-keys';
 
 function getOptimisticParentId(messages: Message[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
@@ -23,15 +24,26 @@ function getOptimisticParentId(messages: Message[] | undefined): string | null {
   }).id;
 }
 
-// Query keys
-export const conversationKeys = {
-  all: ['conversations'] as const,
-  lists: () => [...conversationKeys.all, 'list'] as const,
-  list: (agentId: string) => [...conversationKeys.lists(), agentId] as const,
-  details: () => [...conversationKeys.all, 'detail'] as const,
-  detail: (id: string) => [...conversationKeys.details(), id] as const,
-  messages: (conversationId: string) => [...conversationKeys.all, 'messages', conversationId] as const,
-};
+export { conversationKeys };
+
+function getAgentIdForConversation(
+  queryClient: ReturnType<typeof useQueryClient>,
+  conversationId: string
+): string | null {
+  const conversation = queryClient.getQueryData<Conversation>(
+    conversationKeys.detail(conversationId)
+  );
+  if (conversation?.agent_id) return conversation.agent_id;
+
+  const listEntries = queryClient.getQueriesData<Conversation[]>({
+    queryKey: conversationKeys.lists(),
+  });
+  for (const [, list] of listEntries) {
+    const match = list?.find((item) => item.id === conversationId);
+    if (match?.agent_id) return match.agent_id;
+  }
+  return null;
+}
 
 // Fetch conversations for an agent
 export function useConversations(agentId: string) {
@@ -89,30 +101,71 @@ export function useCreateConversation() {
     mutationFn: async (request: CreateConversationRequest): Promise<Conversation> => {
       return await invoke('create_conversation', { request });
     },
-    onSuccess: (data) => {
-      // Add the new conversation to the cache
+    onMutate: async (request) => {
+      await queryClient.cancelQueries({ queryKey: conversationKeys.list(request.agent_id) });
+
+      const previousConversations = queryClient.getQueryData<Conversation[]>(
+        conversationKeys.list(request.agent_id)
+      );
+
+      const tempId = `temp-conversation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const optimisticConversation: Conversation = {
+        id: tempId,
+        agent_id: request.agent_id,
+        user_id: request.user_id,
+        title: request.title || 'New Conversation',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      queryClient.setQueryData<Conversation[]>(
+        conversationKeys.list(request.agent_id),
+        (old = []) => [optimisticConversation, ...old]
+      );
+      queryClient.setQueryData<Conversation>(conversationKeys.detail(tempId), optimisticConversation);
+      queryClient.setQueryData<Message[]>(conversationKeys.messages(tempId), []);
+
+      return { previousConversations, tempId, agentId: request.agent_id };
+    },
+    onError: (_error, _request, context) => {
+      if (!context) return;
+      queryClient.setQueryData(
+        conversationKeys.list(context.agentId),
+        context.previousConversations ?? []
+      );
+      queryClient.removeQueries({ queryKey: conversationKeys.detail(context.tempId) });
+      queryClient.removeQueries({ queryKey: conversationKeys.messages(context.tempId) });
+    },
+    onSuccess: (data, _request, context) => {
+      const tempId = context?.tempId;
+
+      // Reconcile optimistic temp ID with server ID
       queryClient.setQueryData<Conversation[]>(
         conversationKeys.list(data.agent_id),
         (old = []) => {
-          // Check if it already exists (avoid duplicates)
-          if (old.some(conv => conv.id === data.id)) {
-            return old;
+          const replaced = old.map((conv) => (conv.id === tempId ? data : conv));
+          if (replaced.some((conv) => conv.id === data.id)) {
+            return replaced;
           }
-          return [data, ...old];
+          return [data, ...replaced];
         }
       );
 
-      // Set up the conversation's cache entries
-      queryClient.setQueryData<Conversation>(
-        conversationKeys.detail(data.id),
-        data
-      );
+      const tempMessages = tempId
+        ? queryClient.getQueryData<Message[]>(conversationKeys.messages(tempId))
+        : [];
 
-      // Pre-populate empty messages for the conversation
-      queryClient.setQueryData<Message[]>(
-        conversationKeys.messages(data.id),
-        []
-      );
+      queryClient.setQueryData<Conversation>(conversationKeys.detail(data.id), data);
+      queryClient.setQueryData<Message[]>(conversationKeys.messages(data.id), tempMessages ?? []);
+
+      if (tempId) {
+        queryClient.removeQueries({ queryKey: conversationKeys.detail(tempId) });
+        queryClient.removeQueries({ queryKey: conversationKeys.messages(tempId) });
+      }
+    },
+    onSettled: (_data, _error, _request, context) => {
+      if (!context?.agentId) return;
+      queryClient.invalidateQueries({ queryKey: conversationKeys.list(context.agentId) });
     },
   });
 }
@@ -122,12 +175,21 @@ export function useCreateConversation() {
 export function useCreateConversationInstant() {
   const queryClient = useQueryClient();
   const [pendingCreates, setPendingCreates] = useState<Map<string, string>>(new Map());
+  const isMountedRef = useRef(true);
+  const activeTempIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const createInstant = useCallback((
     request: CreateConversationRequest,
     onRealIdReady?: (realId: string) => void
   ): string => {
-    const tempId = `temp-${Date.now()}`;
+    const tempId = `temp-conversation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    activeTempIdsRef.current.add(tempId);
     
     // Create optimistic conversation
     const optimisticConversation: Conversation = {
@@ -152,7 +214,9 @@ export function useCreateConversationInstant() {
     );
 
     // Track this pending create
-    setPendingCreates(prev => new Map(prev).set(tempId, 'pending'));
+    if (isMountedRef.current) {
+      setPendingCreates(prev => new Map(prev).set(tempId, 'pending'));
+    }
 
     // Create in background
     invoke<Conversation>('create_conversation', { request })
@@ -182,14 +246,19 @@ export function useCreateConversationInstant() {
         queryClient.removeQueries({ queryKey: conversationKeys.messages(tempId) });
 
         // Update pending status
-        setPendingCreates(prev => {
-          const next = new Map(prev);
-          next.delete(tempId);
-          return next;
-        });
+        activeTempIdsRef.current.delete(tempId);
+        if (isMountedRef.current) {
+          setPendingCreates(prev => {
+            const next = new Map(prev);
+            next.delete(tempId);
+            return next;
+          });
+        }
 
-        // Notify caller of real ID
-        onRealIdReady?.(realConversation.id);
+        // Notify caller of real ID when still mounted
+        if (isMountedRef.current) {
+          onRealIdReady?.(realConversation.id);
+        }
       })
       .catch((error) => {
         console.error('Failed to create conversation:', error);
@@ -201,11 +270,14 @@ export function useCreateConversationInstant() {
         );
         queryClient.removeQueries({ queryKey: conversationKeys.messages(tempId) });
 
-        setPendingCreates(prev => {
-          const next = new Map(prev);
-          next.delete(tempId);
-          return next;
-        });
+        activeTempIdsRef.current.delete(tempId);
+        if (isMountedRef.current) {
+          setPendingCreates(prev => {
+            const next = new Map(prev);
+            next.delete(tempId);
+            return next;
+          });
+        }
       });
 
     return tempId;
@@ -273,8 +345,9 @@ export function useSendMessage() {
       }
     },
     onSuccess: (_data, request) => {
-      // Replace the entire messages list with fresh data from server
-      // The server returns the AI response, so we need to refetch to get both messages
+      const agentId = getAgentIdForConversation(queryClient, request.conversation_id);
+
+      // Reconcile with server IDs/content
       queryClient.invalidateQueries({ 
         queryKey: conversationKeys.messages(request.conversation_id) 
       });
@@ -284,10 +357,11 @@ export function useSendMessage() {
         queryKey: conversationKeys.detail(request.conversation_id) 
       });
       
-      // Invalidate conversation list to update "last message" previews
-      queryClient.invalidateQueries({ 
-        queryKey: conversationKeys.lists() 
-      });
+      if (agentId) {
+        queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+      } else {
+        queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+      }
     },
   });
 }
@@ -299,6 +373,52 @@ export function useUpdateConversationTitle() {
   return useMutation({
     mutationFn: async ({ conversationId, title }: { conversationId: string; title: string | null }): Promise<Conversation> => {
       return await invoke('update_conversation_title', { conversationId, title });
+    },
+    onMutate: async ({ conversationId, title }) => {
+      const previousConversation = queryClient.getQueryData<Conversation>(
+        conversationKeys.detail(conversationId)
+      );
+      const agentId =
+        previousConversation?.agent_id ?? getAgentIdForConversation(queryClient, conversationId);
+      const previousList = agentId
+        ? queryClient.getQueryData<Conversation[]>(conversationKeys.list(agentId))
+        : undefined;
+
+      if (previousConversation) {
+        queryClient.setQueryData<Conversation>(conversationKeys.detail(conversationId), {
+          ...previousConversation,
+          title: title || previousConversation.title,
+          updated_at: new Date().toISOString(),
+        });
+      }
+      if (agentId) {
+        queryClient.setQueryData<Conversation[]>(
+          conversationKeys.list(agentId),
+          (old = []) =>
+            old.map((conv) =>
+              conv.id === conversationId
+                ? { ...conv, title: title || conv.title, updated_at: new Date().toISOString() }
+                : conv
+            )
+        );
+      }
+
+      return { previousConversation, previousList, conversationId, agentId };
+    },
+    onError: (_error, _variables, context) => {
+      if (!context) return;
+      if (context.previousConversation) {
+        queryClient.setQueryData(
+          conversationKeys.detail(context.conversationId),
+          context.previousConversation
+        );
+      }
+      if (context.agentId) {
+        queryClient.setQueryData(
+          conversationKeys.list(context.agentId),
+          context.previousList ?? []
+        );
+      }
     },
     onSuccess: (data) => {
       // Update the conversation in the list cache
@@ -324,6 +444,54 @@ export function useGenerateConversationTitle() {
     mutationFn: async ({ conversationId, firstMessage }: { conversationId: string; firstMessage: string }): Promise<Conversation> => {
       return await invoke('generate_conversation_title', { conversationId, firstMessage });
     },
+    onMutate: async ({ conversationId, firstMessage }) => {
+      const previousConversation = queryClient.getQueryData<Conversation>(
+        conversationKeys.detail(conversationId)
+      );
+      const agentId =
+        previousConversation?.agent_id ?? getAgentIdForConversation(queryClient, conversationId);
+      const previousList = agentId
+        ? queryClient.getQueryData<Conversation[]>(conversationKeys.list(agentId))
+        : undefined;
+      const optimisticTitle = firstMessage.slice(0, 80).trim() || 'New Conversation';
+
+      if (previousConversation) {
+        queryClient.setQueryData<Conversation>(conversationKeys.detail(conversationId), {
+          ...previousConversation,
+          title: optimisticTitle,
+          updated_at: new Date().toISOString(),
+        });
+      }
+      if (agentId) {
+        queryClient.setQueryData<Conversation[]>(
+          conversationKeys.list(agentId),
+          (old = []) =>
+            old.map((conv) =>
+              conv.id === conversationId
+                ? { ...conv, title: optimisticTitle, updated_at: new Date().toISOString() }
+                : conv
+            )
+        );
+      }
+
+      return { previousConversation, previousList, conversationId, agentId };
+    },
+    onError: (error, _variables, context) => {
+      if (context?.previousConversation) {
+        queryClient.setQueryData(
+          conversationKeys.detail(context.conversationId),
+          context.previousConversation
+        );
+      }
+      if (context?.agentId) {
+        queryClient.setQueryData(
+          conversationKeys.list(context.agentId),
+          context.previousList ?? []
+        );
+      }
+      // Silently log title generation errors - don't show to user since this is background operation
+      console.warn('Failed to generate conversation title:', error);
+    },
     onSuccess: (data) => {
       // Update the conversation in the list cache
       queryClient.setQueryData<Conversation[]>(
@@ -336,10 +504,6 @@ export function useGenerateConversationTitle() {
         conversationKeys.detail(data.id),
         data
       );
-    },
-    onError: (error) => {
-      // Silently log title generation errors - don't show to user since this is background operation
-      console.warn('Failed to generate conversation title:', error);
     },
   });
 }
@@ -355,10 +519,18 @@ export function useDeleteConversation() {
     onMutate: async ({ conversationId, agentId }) => {
       // Cancel any outgoing refetches to prevent overwriting our optimistic update
       await queryClient.cancelQueries({ queryKey: conversationKeys.list(agentId) });
+      await queryClient.cancelQueries({ queryKey: conversationKeys.detail(conversationId) });
+      await queryClient.cancelQueries({ queryKey: conversationKeys.messages(conversationId) });
 
       // Snapshot the previous conversations
       const previousConversations = queryClient.getQueryData<Conversation[]>(
         conversationKeys.list(agentId)
+      );
+      const previousConversationDetail = queryClient.getQueryData<Conversation>(
+        conversationKeys.detail(conversationId)
+      );
+      const previousMessages = queryClient.getQueryData<Message[]>(
+        conversationKeys.messages(conversationId)
       );
 
       // Optimistically remove the conversation from the list
@@ -372,7 +544,7 @@ export function useDeleteConversation() {
       queryClient.removeQueries({ queryKey: conversationKeys.messages(conversationId) });
 
       // Return context for potential rollback
-      return { previousConversations };
+      return { previousConversations, previousConversationDetail, previousMessages, conversationId };
     },
     onError: (err, { agentId }, context) => {
       console.error('Failed to delete conversation:', err);
@@ -384,23 +556,22 @@ export function useDeleteConversation() {
           context.previousConversations
         );
       }
+      if (context?.previousConversationDetail) {
+        queryClient.setQueryData(
+          conversationKeys.detail(context.conversationId),
+          context.previousConversationDetail
+        );
+      }
+      if (context?.previousMessages) {
+        queryClient.setQueryData(
+          conversationKeys.messages(context.conversationId),
+          context.previousMessages
+        );
+      }
     },
-    onSuccess: async (_data, { agentId, conversationId }) => {
+    onSuccess: async (_data, { agentId }) => {
       // Invalidate to ensure we're in sync with server
       queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
-
-      // Also remove from the persisted Tauri store cache
-      removeCachedQueriesMatching((queryKey: unknown) => {
-        if (!Array.isArray(queryKey)) return false;
-        // Remove conversation detail, messages, and list entries containing this conversation
-        return (
-          (queryKey[0] === 'conversations' && queryKey[1] === 'detail' && queryKey[2] === conversationId) ||
-          (queryKey[0] === 'conversations' && queryKey[1] === 'messages' && queryKey[2] === conversationId)
-        );
-      });
-
-      // Persist the updated cache to disk
-      await persistMemoryCache();
     },
   });
 }
@@ -506,8 +677,9 @@ export function useSendMessageStreaming() {
           hasResolved = true;
           setIsStreaming(false);
 
-          // Invalidate messages to refetch both user and assistant messages from DB
-          // This ensures we get both messages with correct IDs
+          const agentId = getAgentIdForConversation(queryClient, request.conversation_id);
+
+          // Refetch messages to reconcile temp IDs with server IDs.
           queryClient.invalidateQueries({
             queryKey: conversationKeys.messages(request.conversation_id)
           });
@@ -516,9 +688,11 @@ export function useSendMessageStreaming() {
           queryClient.invalidateQueries({
             queryKey: conversationKeys.detail(request.conversation_id)
           });
-          queryClient.invalidateQueries({
-            queryKey: conversationKeys.lists()
-          });
+          if (agentId) {
+            queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+          } else {
+            queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+          }
 
           resolve(message);
         })
@@ -725,15 +899,18 @@ export function useEditMessageStreaming() {
             }
           );
 
-          // Invalidate messages to refetch all messages with correct IDs
+          const agentId = getAgentIdForConversation(queryClient, request.conversation_id);
+
+          // Invalidate messages to reconcile branch/message IDs
           queryClient.invalidateQueries({
             queryKey: conversationKeys.messages(request.conversation_id)
           });
 
-          // Update conversation timestamp
-          queryClient.invalidateQueries({
-            queryKey: conversationKeys.lists()
-          });
+          if (agentId) {
+            queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+          } else {
+            queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+          }
 
           resolve(result);
         })

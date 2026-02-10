@@ -102,6 +102,7 @@ export async function saveCache(queryClient: QueryClient): Promise<void> {
       queries: serializedQueries,
       timestamp: Date.now(),
     };
+    memoryCache = serializedCache;
 
     const store = await getCacheStore();
     await store.set('cache', serializedCache);
@@ -260,7 +261,7 @@ export async function persistMemoryCache(): Promise<void> {
  * Hydrate React Query cache with persisted data
  */
 export async function hydrateCache(queryClient: QueryClient): Promise<void> {
-  const cached = await loadCache();
+  const cached = memoryCache ?? await loadCache();
   if (!cached) return;
 
   const cache = queryClient.getQueryCache();
@@ -275,8 +276,10 @@ export async function hydrateCache(queryClient: QueryClient): Promise<void> {
         continue; // Skip hydration, we have fresher data
       }
 
-      // Set the cached data
-      queryClient.setQueryData(queryKey, entry.data);
+      // Preserve original freshness timestamp when hydrating.
+      queryClient.setQueryData(queryKey, entry.data, {
+        updatedAt: entry.dataUpdatedAt,
+      });
 
       console.log(`[Cache] Hydrated query: ${queryKeyString}`);
     } catch (error) {

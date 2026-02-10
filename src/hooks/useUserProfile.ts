@@ -2,12 +2,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 import type { UserProfile, UpdateUserProfileRequest } from '../types/user-profile';
+import { userProfileKeys } from '@/lib/query-keys';
 
-// Query keys
-export const userProfileKeys = {
-  all: ['userProfile'] as const,
-  profile: (userId: string) => [...userProfileKeys.all, userId] as const,
-};
+export { userProfileKeys };
 
 // Fetch user profile
 export function useUserProfile(userId: string) {
@@ -20,8 +17,8 @@ export function useUserProfile(userId: string) {
       return await invoke('get_user_profile', { userId });
     },
     enabled: !!userId,
-    staleTime: Infinity, // User profile rarely changes
-    gcTime: Infinity, // Keep in cache indefinitely
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
     initialData,
     initialDataUpdatedAt,
   });

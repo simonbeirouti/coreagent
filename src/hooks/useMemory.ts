@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
+import { memoryKeys } from '@/lib/query-keys';
 
 export interface SimilarMemory {
   message_id: string;
@@ -17,7 +18,7 @@ export function useRelevantMemories(
   enabled = true
 ) {
   return useQuery({
-    queryKey: ['memory', 'search', agentId, query, conversationId],
+    queryKey: memoryKeys.search(agentId, query, conversationId),
     queryFn: async (): Promise<SimilarMemory[]> => {
       return invoke('get_relevant_memories', {
         agentId,
@@ -26,6 +27,11 @@ export function useRelevantMemories(
       });
     },
     enabled: enabled && !!agentId && query.trim().length > 2,
+    staleTime: Infinity,
+    gcTime: 24 * 60 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

@@ -73,7 +73,6 @@ function AgentDashboardPage() {
             variant="outline"
             onClick={() => analyzeFeedback.mutate()}
             disabled={analyzeFeedback.isPending}
-            className="cursor-pointer"
           >
             {analyzeFeedback.isPending ? 'Analyzing...' : 'Analyze Feedback'}
           </Button>

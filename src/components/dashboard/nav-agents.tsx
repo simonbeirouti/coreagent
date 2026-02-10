@@ -54,6 +54,7 @@ export function NavAgents() {
                   className="group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:items-center" 
                   to="/agents/$agentId/chat" 
                   params={{ agentId: agent.id }}
+                  search={{ conversationId: undefined }}
                 >
                   <span className="relative text-lg">
                     {DEFAULT_EMOJI}
