@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { invoke } from '@tauri-apps/api/core';
-import { Conversation, Message, CreateConversationRequest, SendMessageRequest } from '../types';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
 import { getCachedData, getCachedDataUpdatedAt, removeCachedQueriesMatching, persistMemoryCache } from '../lib/tauri-store';
 
 // Query keys
@@ -208,6 +208,7 @@ export function useSendMessage() {
       return await invoke('send_message', {
         conversationId: request.conversation_id,
         content: request.content,
+        imageBase64: request.image_base64,
       });
     },
     onMutate: async (request) => {
@@ -272,6 +273,58 @@ export function useSendMessage() {
   });
 }
 
+// Update conversation title
+export function useUpdateConversationTitle() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ conversationId, title }: { conversationId: string; title: string | null }): Promise<Conversation> => {
+      return await invoke('update_conversation_title', { conversationId, title });
+    },
+    onSuccess: (data) => {
+      // Update the conversation in the list cache
+      queryClient.setQueryData<Conversation[]>(
+        conversationKeys.list(data.agent_id),
+        (old = []) => old.map(conv => conv.id === data.id ? data : conv)
+      );
+
+      // Update the conversation detail cache
+      queryClient.setQueryData<Conversation>(
+        conversationKeys.detail(data.id),
+        data
+      );
+    },
+  });
+}
+
+// Generate and update conversation title based on first message
+export function useGenerateConversationTitle() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ conversationId, firstMessage }: { conversationId: string; firstMessage: string }): Promise<Conversation> => {
+      return await invoke('generate_conversation_title', { conversationId, firstMessage });
+    },
+    onSuccess: (data) => {
+      // Update the conversation in the list cache
+      queryClient.setQueryData<Conversation[]>(
+        conversationKeys.list(data.agent_id),
+        (old = []) => old.map(conv => conv.id === data.id ? data : conv)
+      );
+
+      // Update the conversation detail cache
+      queryClient.setQueryData<Conversation>(
+        conversationKeys.detail(data.id),
+        data
+      );
+    },
+    onError: (error) => {
+      // Silently log title generation errors - don't show to user since this is background operation
+      console.warn('Failed to generate conversation title:', error);
+    },
+  });
+}
+
 // Delete a conversation
 export function useDeleteConversation() {
   const queryClient = useQueryClient();
@@ -304,7 +357,7 @@ export function useDeleteConversation() {
     },
     onError: (err, { agentId }, context) => {
       console.error('Failed to delete conversation:', err);
-      
+
       // Rollback to previous state on error
       if (context?.previousConversations) {
         queryClient.setQueryData(
@@ -316,7 +369,7 @@ export function useDeleteConversation() {
     onSuccess: async (_data, { agentId, conversationId }) => {
       // Invalidate to ensure we're in sync with server
       queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
-      
+
       // Also remove from the persisted Tauri store cache
       removeCachedQueriesMatching((queryKey: unknown) => {
         if (!Array.isArray(queryKey)) return false;
@@ -326,9 +379,151 @@ export function useDeleteConversation() {
           (queryKey[0] === 'conversations' && queryKey[1] === 'messages' && queryKey[2] === conversationId)
         );
       });
-      
+
       // Persist the updated cache to disk
       await persistMemoryCache();
     },
   });
+}
+
+// Send a message with streaming response
+export function useSendMessageStreaming() {
+  const queryClient = useQueryClient();
+  const [streamingContent, setStreamingContent] = useState<string>('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const sendMessage = useCallback(async (request: SendMessageRequest): Promise<Message> => {
+    setIsStreaming(true);
+    setStreamingContent('');
+    setError(null);
+
+    // Optimistically add user message to cache (like useSendMessage does)
+    await queryClient.cancelQueries({
+      queryKey: conversationKeys.messages(request.conversation_id)
+    });
+
+    const previousMessages = queryClient.getQueryData<Message[]>(
+      conversationKeys.messages(request.conversation_id)
+    );
+
+    const userMessage: Message = {
+      id: `temp-${Date.now()}`,
+      conversation_id: request.conversation_id,
+      role: 'user',
+      content: request.content,
+      message_type: 'text',
+      metadata: {},
+      created_at: new Date().toISOString(),
+    };
+
+    queryClient.setQueryData<Message[]>(
+      conversationKeys.messages(request.conversation_id),
+      (old = []) => [...old, userMessage]
+    );
+
+    const channel = new Channel<StreamEvent>();
+
+    return new Promise((resolve, reject) => {
+      let hasResolved = false;
+
+      channel.onmessage = (event: StreamEvent) => {
+        switch (event.type) {
+          case 'Started':
+            console.log('Streaming started');
+            break;
+          case 'Delta':
+            setStreamingContent(prev => prev + event.data.content);
+            break;
+          case 'Done':
+            // Add assistant message to cache immediately (optimistic)
+            const assistantMessage: Message = {
+              id: `temp-assistant-${Date.now()}`,
+              conversation_id: request.conversation_id,
+              role: 'assistant',
+              content: event.data.full_content,
+              message_type: 'text',
+              metadata: {},
+              created_at: new Date().toISOString(),
+            };
+            queryClient.setQueryData<Message[]>(
+              conversationKeys.messages(request.conversation_id),
+              (old = []) => [...old, assistantMessage]
+            );
+            // Now safe to end streaming display
+            setStreamingContent('');
+            setIsStreaming(false);
+            console.log('Streaming completed');
+            break;
+          case 'Error':
+            setIsStreaming(false);
+            setError(event.data.message);
+            if (!hasResolved) {
+              hasResolved = true;
+              // Rollback to previous messages on error
+              if (previousMessages !== undefined) {
+                queryClient.setQueryData(
+                  conversationKeys.messages(request.conversation_id),
+                  previousMessages
+                );
+              }
+              reject(new Error(event.data.message));
+            }
+            break;
+        }
+      };
+
+      invoke<Message>('send_message_streaming', {
+        conversationId: request.conversation_id,
+        content: request.content,
+        imageBase64: request.image_base64,
+        onEvent: channel,
+      })
+        .then((message) => {
+          if (hasResolved) return; // Already handled error
+          hasResolved = true;
+          setIsStreaming(false);
+
+          // Invalidate messages to refetch both user and assistant messages from DB
+          // This ensures we get both messages with correct IDs
+          queryClient.invalidateQueries({
+            queryKey: conversationKeys.messages(request.conversation_id)
+          });
+
+          // Update conversation timestamp
+          queryClient.invalidateQueries({
+            queryKey: conversationKeys.detail(request.conversation_id)
+          });
+          queryClient.invalidateQueries({
+            queryKey: conversationKeys.lists()
+          });
+
+          resolve(message);
+        })
+        .catch((error) => {
+          if (hasResolved) return; // Already handled error
+          hasResolved = true;
+          setIsStreaming(false);
+          setError(error.message || 'Failed to send message');
+
+          // Rollback to previous messages on error
+          if (previousMessages !== undefined) {
+            queryClient.setQueryData(
+              conversationKeys.messages(request.conversation_id),
+              previousMessages
+            );
+          }
+
+          reject(error);
+        });
+    });
+  }, [queryClient]);
+
+  return {
+    sendMessage,
+    streamingContent,
+    isStreaming,
+    error,
+    clearError: useCallback(() => setError(null), [])
+  };
 }

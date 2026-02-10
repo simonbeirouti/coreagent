@@ -22,19 +22,38 @@ interface RealtimeVoiceChatState {
 
 const SAMPLE_RATE = 24000; // OpenAI Realtime API uses 24kHz
 
+export type VadMode = 'server_vad' | 'semantic_vad';
+export type VadEagerness = 'low' | 'medium' | 'high' | 'auto';
+
 interface RealtimeVoiceChatOptions {
   agentInstructions?: string;
   /**
+   * VAD mode: 'server_vad' uses silence detection, 'semantic_vad' uses AI to detect speech completion.
+   * Semantic VAD is better at ignoring background noise and music.
+   * Default: 'semantic_vad'.
+   */
+  vadMode?: VadMode;
+  /**
    * Duration of silence (in ms) before the model considers the user done speaking.
+   * Only used when vadMode is 'server_vad'.
    * Higher values give more time between responses, making conversations feel less rushed.
    * Default: 800ms. Range: 200-2000ms recommended.
    */
   silenceDurationMs?: number;
   /**
    * VAD threshold for speech detection. Higher values require louder speech.
-   * Default: 0.5. Range: 0.0-1.0.
+   * Only used when vadMode is 'server_vad'.
+   * Increase this in noisy environments (0.6-0.8 recommended).
+   * Default: 0.6. Range: 0.0-1.0.
    */
   vadThreshold?: number;
+  /**
+   * How eagerly the semantic VAD should detect turn completion.
+   * Only used when vadMode is 'semantic_vad'.
+   * 'low' = less likely to interrupt, better for noisy environments
+   * Default: 'low'.
+   */
+  vadEagerness?: VadEagerness;
 }
 
 /**
@@ -44,8 +63,10 @@ interface RealtimeVoiceChatOptions {
 export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
   const {
     agentInstructions,
+    vadMode = 'semantic_vad',
     silenceDurationMs = 800,
-    vadThreshold = 0.5,
+    vadThreshold = 0.6, // Higher default for better noise rejection
+    vadEagerness = 'low', // Less likely to interrupt in noisy environments
   } = options;
   const [state, setState] = useState<RealtimeVoiceChatState>({
     state: 'idle',
@@ -318,8 +339,28 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
       ws.onopen = async () => {
         console.log('WebSocket connected to OpenAI Realtime API (GA)');
 
+        // Build turn detection config based on VAD mode
+        // Semantic VAD uses AI to understand when user is done speaking (better noise rejection)
+        // Server VAD uses silence detection (more configurable timing)
+        const turnDetection = vadMode === 'semantic_vad'
+          ? {
+              type: 'semantic_vad' as const,
+              eagerness: vadEagerness,
+              create_response: true,
+              interrupt_response: true,
+            }
+          : {
+              type: 'server_vad' as const,
+              threshold: vadThreshold,
+              prefix_padding_ms: 300,
+              silence_duration_ms: silenceDurationMs,
+              create_response: true,
+              interrupt_response: true,
+            };
+
+        console.log(`Using ${vadMode} for voice activity detection`);
+
         // Configure session with GA format
-        // Using server_vad for configurable turn detection timing
         ws.send(JSON.stringify({
           type: 'session.update',
           session: {
@@ -332,12 +373,7 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
                   type: 'audio/pcm',
                   rate: SAMPLE_RATE,
                 },
-                turn_detection: {
-                  type: 'server_vad',
-                  threshold: vadThreshold,
-                  prefix_padding_ms: 300,
-                  silence_duration_ms: silenceDurationMs,
-                },
+                turn_detection: turnDetection,
                 transcription: {
                   model: 'gpt-4o-transcribe',
                 },
@@ -353,7 +389,7 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
           },
         }));
 
-        // Start audio capture
+        // Start audio capture with enhanced noise suppression
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -361,6 +397,7 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
               channelCount: 1,
               echoCancellation: true,
               noiseSuppression: true,
+              autoGainControl: true, // Normalize volume levels for consistent input
             },
           });
 
@@ -436,7 +473,7 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
         state: 'idle',
       }));
     }
-  }, [agentInstructions, silenceDurationMs, vadThreshold, floatTo16BitPCMBase64, handleMessage, updateInputAudioLevel]);
+  }, [agentInstructions, vadMode, silenceDurationMs, vadThreshold, vadEagerness, floatTo16BitPCMBase64, handleMessage, updateInputAudioLevel]);
 
   /**
    * Disconnect from the voice chat session
@@ -500,6 +537,72 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
     }));
   }, []);
 
+  /**
+   * Send an image to the realtime session for visual context
+   * The agent will be able to see and discuss the image
+   * @param imageBase64 - Base64 encoded image (PNG or JPEG)
+   * @param prompt - Optional text prompt to accompany the image
+   * @param triggerResponse - Whether to immediately request a response (default: false)
+   */
+  const sendImage = useCallback((
+    imageBase64: string, 
+    prompt?: string,
+    triggerResponse: boolean = false
+  ) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn('Cannot send image: WebSocket not connected');
+      return false;
+    }
+
+    // Remove data URL prefix if present
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+
+    // Determine media type from the prefix or default to PNG
+    const mediaType = imageBase64.startsWith('data:image/jpeg') 
+      ? 'image/jpeg' 
+      : 'image/png';
+
+    // Build the content array
+    const content: Array<{ type: string; image?: { type: string; media_type: string; data: string }; text?: string }> = [
+      {
+        type: 'input_image',
+        image: {
+          type: 'base64',
+          media_type: mediaType,
+          data: base64Data,
+        },
+      },
+    ];
+
+    // Add text prompt if provided
+    if (prompt) {
+      content.push({
+        type: 'input_text',
+        text: prompt,
+      });
+    }
+
+    // Send the image as a conversation item
+    ws.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content,
+      },
+    }));
+
+    console.log('Image sent to realtime session', { hasPrompt: !!prompt, mediaType });
+
+    // Optionally trigger an immediate response
+    if (triggerResponse) {
+      ws.send(JSON.stringify({ type: 'response.create' }));
+    }
+
+    return true;
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -519,5 +622,7 @@ export function useRealtimeVoiceChat(options: RealtimeVoiceChatOptions = {}) {
     connect,
     disconnect,
     clearTranscript,
+    /** Send an image to the realtime session for visual context */
+    sendImage,
   };
 }

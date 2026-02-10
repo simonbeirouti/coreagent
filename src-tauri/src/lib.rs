@@ -9,7 +9,7 @@ mod perception_tracker;
 mod audio_service;
 mod vision_service;
 
-use tauri::Manager;
+use tauri::{Manager, ipc::Channel};
 use auth::{AuthState, SessionData};
 use sea_orm::DatabaseConnection;
 use agent_service::{AgentService, CreateAgentRequest, UpdateAgentRequest};
@@ -99,7 +99,7 @@ async fn send_message_to_agent(
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<String, String> {
     // Simple one-shot message without conversation history
-    AgentService::send_message_to_agent(&db, agent_id, message, vec![], &ai_client).await
+    AgentService::send_message_to_agent(&db, agent_id, message, vec![], None, &ai_client).await
 }
 
 // Conversation commands
@@ -139,10 +139,42 @@ async fn get_conversation_messages(
 async fn send_message(
     conversation_id: String,
     content: String,
+    image_base64: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<conversation_service::MessageData, String> {
-    ConversationService::send_message(&db, conversation_id, content, &ai_client).await
+    ConversationService::send_message(&db, conversation_id, content, image_base64, &ai_client).await
+}
+
+#[tauri::command]
+async fn send_message_streaming(
+    conversation_id: String,
+    content: String,
+    image_base64: Option<String>,
+    on_event: Channel<ai_client::StreamEvent>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<conversation_service::MessageData, String> {
+    ConversationService::send_message_streaming(&db, conversation_id, content, image_base64, on_event, &ai_client).await
+}
+
+#[tauri::command]
+async fn update_conversation_title(
+    conversation_id: String,
+    title: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<conversation_service::ConversationData, String> {
+    ConversationService::update_conversation_title(&db, conversation_id, title).await
+}
+
+#[tauri::command]
+async fn generate_conversation_title(
+    conversation_id: String,
+    first_message: String,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<conversation_service::ConversationData, String> {
+    ConversationService::generate_and_update_conversation_title(&db, conversation_id, first_message, &ai_client).await
 }
 
 #[tauri::command]
@@ -471,6 +503,9 @@ pub fn run() {
             get_conversation,
             get_conversation_messages,
             send_message,
+            send_message_streaming,
+            update_conversation_title,
+            generate_conversation_title,
             save_voice_transcript,
             delete_conversation,
             // Perception commands

@@ -4,6 +4,8 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, Co
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
+use tauri::ipc::Channel;
+use crate::ai_client::StreamEvent;
 
 // Agent data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +230,7 @@ impl AgentService {
         agent_id: String,
         message: String,
         history: Vec<(String, String)>, // (role, content) pairs
+        image_base64: Option<String>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
         // Get agent details from database
@@ -250,7 +253,7 @@ impl AgentService {
 
         // Call AI client with agent's configuration and user profile
         let response = ai_client
-            .get_completion(
+            .get_completion_with_image(
                 &agent.provider_type,
                 &agent.model_id,
                 &agent.name,
@@ -261,10 +264,59 @@ impl AgentService {
                 user_profile.as_ref(),
                 history,
                 &message,
+                image_base64.as_deref(),
             )
             .await?;
 
         println!("[AGENT] Agent {} generated response ({} chars)", agent.name, response.len());
+        Ok(response)
+    }
+
+    /// Send message to agent with streaming response
+    pub async fn send_message_to_agent_streaming(
+        db: &sea_orm::DatabaseConnection,
+        agent_id: String,
+        message: String,
+        history: Vec<(String, String)>,
+        image_base64: Option<String>,
+        on_event: Channel<StreamEvent>,
+        ai_client: &crate::ai_client::AiClient,
+    ) -> Result<String, String> {
+        let agent_id = uuid::Uuid::parse_str(&agent_id)
+            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+
+        // Fetch agent configuration
+        let agent = crate::entities::agents::Entity::find_by_id(agent_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to fetch agent: {}", e))?
+            .ok_or_else(|| format!("Agent not found: {}", agent_id))?;
+
+        println!("[AGENT] Sending streaming message to agent: {}", agent.name);
+
+        // Fetch user profile for personalization (optional)
+        let user_profile = crate::user_profile_service::UserProfileService::get_profile(db, "default_user".to_string())
+            .await.ok().flatten();
+
+        // Call AI client with agent's configuration and user profile (streaming)
+        let response = ai_client
+            .get_completion_with_image_streaming(
+                &agent.provider_type,
+                &agent.model_id,
+                &agent.name,
+                &agent.persona,
+                agent.mission.as_deref(),
+                agent.values.as_deref(),
+                agent.behavioral_constraints.as_ref(),
+                user_profile.as_ref(),
+                history,
+                &message,
+                image_base64.as_deref(),
+                on_event,
+            )
+            .await?;
+
+        println!("[AGENT] Agent {} generated streaming response ({} chars)", agent.name, response.len());
         Ok(response)
     }
 }

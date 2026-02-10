@@ -5,6 +5,31 @@ use rig::providers::openai;
 use rig::providers::anthropic;
 use std::sync::Arc;
 use crate::user_profile_service::UserProfileData;
+pub use tauri::ipc::Channel;
+use futures::StreamExt;
+
+// OpenAI Vision API imports
+use async_openai::{
+    types::chat::{CreateChatCompletionRequestArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart, ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage, ImageUrl, ImageDetail},
+    Client as OpenAIClient,
+    config::OpenAIConfig,
+};
+
+// Anthropic streaming imports
+use async_anthropic::{
+    types::{CreateMessagesRequestBuilder, MessageBuilder, MessageRole, MessagesStreamEvent, ContentBlockDelta},
+    Client as AnthropicStreamingClient,
+};
+
+/// Streaming events for AI responses
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StreamEvent {
+    Started,
+    Delta { content: String },
+    Done { full_content: String },
+    Error { message: String },
+}
 
 /// AI Client manager for handling OpenAI and Anthropic connections
 pub struct AiClientManager {
@@ -219,6 +244,55 @@ impl AiClientManager {
         }
     }
 
+    /// Get a completion response with optional image support from the appropriate AI model
+    pub async fn get_completion_with_image(
+        &self,
+        provider_type: &str,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        messages: Vec<(String, String)>, // (role, content) pairs
+        user_message: &str,
+        image_base64: Option<&str>,
+    ) -> Result<String, String> {
+        // If no image provided, use regular completion
+        if image_base64.is_none() {
+            return self.get_completion(
+                provider_type,
+                model_id,
+                agent_name,
+                persona,
+                mission,
+                values,
+                constraints,
+                user_profile,
+                messages,
+                user_message,
+            ).await;
+        }
+
+        // For images, currently only OpenAI Vision API is supported
+        match provider_type {
+            "openai" => self.get_openai_vision_completion(
+                model_id,
+                agent_name,
+                persona,
+                mission,
+                values,
+                constraints,
+                user_profile,
+                messages,
+                user_message,
+                image_base64.unwrap(),
+            ).await,
+            _ => Err(format!("Vision API not supported for provider type: {}. Only OpenAI vision is currently supported.", provider_type)),
+        }
+    }
+
     /// Get completion from OpenAI with proper persona
     async fn get_openai_completion(
         &self,
@@ -307,6 +381,562 @@ impl AiClientManager {
 
         println!("[AI_CLIENT] Anthropic completion successful");
         Ok(response)
+    }
+
+    /// Get completion from OpenAI Vision API with image support
+    async fn get_openai_vision_completion(
+        &self,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        history: Vec<(String, String)>,
+        user_message: &str,
+        image_base64: &str,
+    ) -> Result<String, String> {
+        // Build identity prompt for system message
+        let identity_prompt = Self::build_identity_prompt(
+            agent_name,
+            persona,
+            mission,
+            values,
+            constraints,
+            user_profile,
+        );
+
+        // Create OpenAI Vision client directly (not using rig library for vision)
+        let openai_client = OpenAIClient::new();
+
+        println!("[AI_CLIENT] OpenAI Vision agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
+        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
+        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+
+        // Convert conversation history to OpenAI message format
+        let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+        // Add system message with identity prompt
+        chat_messages.push(ChatCompletionRequestMessage::System(
+            async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                name: None,
+            }
+        ));
+
+        // Add conversation history
+        for (role, content) in history {
+            let message = match role.as_str() {
+                "user" => ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(content),
+                        name: None,
+                    }
+                ),
+                "assistant" => ChatCompletionRequestMessage::Assistant(
+                    async_openai::types::chat::ChatCompletionRequestAssistantMessage {
+                        content: Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(content)),
+                        name: None,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    }
+                ),
+                _ => continue, // Skip unknown roles
+            };
+            chat_messages.push(message);
+        }
+
+        // Create multimodal user message with text and image
+        let image_url = format!("data:image/png;base64,{}", image_base64);
+        let user_content_parts = vec![
+            ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: user_message.to_string(),
+                }
+            ),
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl {
+                        url: image_url,
+                        detail: Some(ImageDetail::Low), // Use low detail for faster processing
+                    }
+                }
+            ),
+        ];
+
+        let user_message_with_image = ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(user_content_parts),
+            name: None,
+        };
+
+        chat_messages.push(ChatCompletionRequestMessage::User(user_message_with_image));
+
+        // Build the request
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_id)
+            .messages(chat_messages)
+            .max_tokens(1000u32)
+            .temperature(0.7f32)
+            .build()
+            .map_err(|e| format!("Failed to build vision request: {}", e))?;
+
+        // Call OpenAI Vision API
+        let response = openai_client.chat().create(request).await
+            .map_err(|e| format!("OpenAI Vision API error: {}", e))?;
+
+        if let Some(choice) = response.choices.first() {
+            if let Some(ref content) = choice.message.content {
+                println!("[AI_CLIENT] OpenAI Vision completion successful");
+                return Ok(content.clone());
+            }
+        }
+
+        Err("No response content from OpenAI Vision API".to_string())
+    }
+
+    /// Get a completion response with optional image support from the appropriate AI model (streaming)
+    pub async fn get_completion_with_image_streaming(
+        &self,
+        provider_type: &str,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        messages: Vec<(String, String)>, // (role, content) pairs
+        user_message: &str,
+        image_base64: Option<&str>,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        // If no image provided, use regular completion
+        if image_base64.is_none() {
+            return self.get_completion_streaming(
+                provider_type,
+                model_id,
+                agent_name,
+                persona,
+                mission,
+                values,
+                constraints,
+                user_profile,
+                messages,
+                user_message,
+                on_event,
+            ).await;
+        }
+
+        // For images, currently only OpenAI Vision API is supported with streaming
+        match provider_type {
+            "openai" => self.get_openai_vision_completion_streaming(
+                model_id,
+                agent_name,
+                persona,
+                mission,
+                values,
+                constraints,
+                user_profile,
+                messages,
+                user_message,
+                image_base64.unwrap(),
+                on_event,
+            ).await,
+            _ => Err(format!("Vision API streaming not supported for provider type: {}. Only OpenAI vision is currently supported.", provider_type)),
+        }
+    }
+
+    /// Get completion from OpenAI with proper persona (streaming)
+    async fn get_completion_streaming(
+        &self,
+        provider_type: &str,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        messages: Vec<(String, String)>,
+        user_message: &str,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        match provider_type {
+            "openai" => self.get_openai_completion_streaming(model_id, agent_name, persona, mission, values, constraints, user_profile, messages, user_message, on_event).await,
+            "anthropic" => self.get_anthropic_completion_streaming(
+                model_id, agent_name, persona, mission, values, constraints,
+                user_profile, messages, user_message, on_event
+            ).await,
+            _ => Err(format!("Unsupported provider type for streaming: {}", provider_type)),
+        }
+    }
+
+    /// Get completion from OpenAI Vision API with image support (streaming)
+    async fn get_openai_vision_completion_streaming(
+        &self,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        history: Vec<(String, String)>,
+        user_message: &str,
+        image_base64: &str,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        // Build identity prompt for system message
+        let identity_prompt = Self::build_identity_prompt(
+            agent_name,
+            persona,
+            mission,
+            values,
+            constraints,
+            user_profile,
+        );
+
+        // Create OpenAI Vision client directly
+        let openai_client = OpenAIClient::new();
+
+        println!("[AI_CLIENT] OpenAI Vision streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
+        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
+        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+
+        // Convert conversation history to OpenAI message format
+        let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+        // Add system message with identity prompt
+        chat_messages.push(ChatCompletionRequestMessage::System(
+            async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                name: None,
+            }
+        ));
+
+        // Add conversation history
+        for (role, content) in history {
+            let message = match role.as_str() {
+                "user" => ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(content),
+                        name: None,
+                    }
+                ),
+                "assistant" => ChatCompletionRequestMessage::Assistant(
+                    async_openai::types::chat::ChatCompletionRequestAssistantMessage {
+                        content: Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(content)),
+                        name: None,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    }
+                ),
+                _ => continue, // Skip unknown roles
+            };
+            chat_messages.push(message);
+        }
+
+        // Create multimodal user message with text and image
+        let image_url = format!("data:image/png;base64,{}", image_base64);
+        let user_content_parts = vec![
+            ChatCompletionRequestUserMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: user_message.to_string(),
+                }
+            ),
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl {
+                        url: image_url,
+                        detail: Some(ImageDetail::Low), // Use low detail for faster processing
+                    }
+                }
+            ),
+        ];
+
+        let user_message_with_image = ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Array(user_content_parts),
+            name: None,
+        };
+
+        chat_messages.push(ChatCompletionRequestMessage::User(user_message_with_image));
+
+        // Build the request
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_id)
+            .messages(chat_messages)
+            .max_tokens(1000u32)
+            .temperature(0.7f32)
+            .stream(true) // Enable streaming
+            .build()
+            .map_err(|e| format!("Failed to build vision streaming request: {}", e))?;
+
+        // Create streaming response
+        let mut stream = openai_client.chat().create_stream(request).await
+            .map_err(|e| format!("OpenAI Vision streaming API error: {}", e))?;
+
+        let mut full_content = String::new();
+        on_event.send(StreamEvent::Started)
+            .map_err(|e| format!("Failed to send Started event: {}", e))?;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(response) => {
+                    if let Some(choice) = response.choices.first() {
+                        if let Some(delta) = &choice.delta.content {
+                            full_content.push_str(delta);
+                            on_event.send(StreamEvent::Delta {
+                                content: delta.clone()
+                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    on_event.send(StreamEvent::Error {
+                        message: format!("Streaming error: {}", e)
+                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    return Err(format!("OpenAI Vision streaming error: {}", e));
+                }
+            }
+        }
+
+        on_event.send(StreamEvent::Done {
+            full_content: full_content.clone()
+        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+
+        println!("[AI_CLIENT] OpenAI Vision streaming completion successful");
+        Ok(full_content)
+    }
+
+    /// Get completion from OpenAI with proper persona (streaming)
+    async fn get_openai_completion_streaming(
+        &self,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        history: Vec<(String, String)>,
+        user_message: &str,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        // Build identity prompt for system message
+        let identity_prompt = Self::build_identity_prompt(
+            agent_name,
+            persona,
+            mission,
+            values,
+            constraints,
+            user_profile,
+        );
+
+        // Create OpenAI client directly for streaming
+        let openai_client = OpenAIClient::new();
+
+        println!("[AI_CLIENT] OpenAI streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
+        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
+        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+
+        // Convert conversation history to OpenAI message format
+        let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+        // Add system message with identity prompt
+        chat_messages.push(ChatCompletionRequestMessage::System(
+            async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                name: None,
+            }
+        ));
+
+        // Add conversation history
+        for (role, content) in history {
+            let message = match role.as_str() {
+                "user" => ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(content),
+                        name: None,
+                    }
+                ),
+                "assistant" => ChatCompletionRequestMessage::Assistant(
+                    async_openai::types::chat::ChatCompletionRequestAssistantMessage {
+                        content: Some(async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(content)),
+                        name: None,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    }
+                ),
+                _ => continue, // Skip unknown roles
+            };
+            chat_messages.push(message);
+        }
+
+        // Add current user message
+        chat_messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(user_message.to_string()),
+                name: None,
+            }
+        ));
+
+        // Build the streaming request
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_id)
+            .messages(chat_messages)
+            .max_tokens(1000u32)
+            .temperature(0.7f32)
+            .stream(true) // Enable streaming
+            .build()
+            .map_err(|e| format!("Failed to build streaming request: {}", e))?;
+
+        // Create streaming response
+        let mut stream = openai_client.chat().create_stream(request).await
+            .map_err(|e| format!("OpenAI streaming API error: {}", e))?;
+
+        let mut full_content = String::new();
+        on_event.send(StreamEvent::Started)
+            .map_err(|e| format!("Failed to send Started event: {}", e))?;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(response) => {
+                    if let Some(choice) = response.choices.first() {
+                        if let Some(delta) = &choice.delta.content {
+                            full_content.push_str(delta);
+                            on_event.send(StreamEvent::Delta {
+                                content: delta.clone()
+                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    on_event.send(StreamEvent::Error {
+                        message: format!("Streaming error: {}", e)
+                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    return Err(format!("OpenAI streaming error: {}", e));
+                }
+            }
+        }
+
+        on_event.send(StreamEvent::Done {
+            full_content: full_content.clone()
+        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+
+        println!("[AI_CLIENT] OpenAI streaming completion successful");
+        Ok(full_content)
+    }
+
+    /// Get completion from Anthropic with proper persona (streaming)
+    async fn get_anthropic_completion_streaming(
+        &self,
+        model_id: &str,
+        agent_name: &str,
+        persona: &str,
+        mission: Option<&str>,
+        values: Option<&[String]>,
+        constraints: Option<&serde_json::Value>,
+        user_profile: Option<&UserProfileData>,
+        history: Vec<(String, String)>,
+        user_message: &str,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        // Build identity prompt for system message
+        let identity_prompt = Self::build_identity_prompt(
+            agent_name,
+            persona,
+            mission,
+            values,
+            constraints,
+            user_profile,
+        );
+
+        // Create Anthropic streaming client (uses ANTHROPIC_API_KEY env var automatically)
+        let client = AnthropicStreamingClient::default();
+
+        println!("[AI_CLIENT] Anthropic streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
+        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
+        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+
+        // Build messages list from history
+        let mut messages = Vec::new();
+
+        // Add conversation history
+        for (role, content) in history {
+            let message_role = match role.as_str() {
+                "user" => MessageRole::User,
+                "assistant" => MessageRole::Assistant,
+                _ => continue, // Skip unknown roles
+            };
+            messages.push(
+                MessageBuilder::default()
+                    .role(message_role)
+                    .content(content)
+                    .build()
+                    .map_err(|e| format!("Failed to build history message: {}", e))?
+            );
+        }
+
+        // Add current user message
+        messages.push(
+            MessageBuilder::default()
+                .role(MessageRole::User)
+                .content(user_message.to_string())
+                .build()
+                .map_err(|e| format!("Failed to build user message: {}", e))?
+        );
+
+        // Build the streaming request
+        let request = CreateMessagesRequestBuilder::default()
+            .model(model_id)
+            .max_tokens(4096i32)
+            .system(identity_prompt)
+            .messages(messages)
+            .build()
+            .map_err(|e| format!("Failed to build Anthropic streaming request: {}", e))?;
+
+        // Create streaming response
+        let mut stream = client.messages().create_stream(request).await;
+
+        let mut full_content = String::new();
+        on_event.send(StreamEvent::Started)
+            .map_err(|e| format!("Failed to send Started event: {}", e))?;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(event) => {
+                    // Handle the ContentBlockDelta variant which contains text deltas
+                    if let MessagesStreamEvent::ContentBlockDelta { delta, .. } = event {
+                        if let ContentBlockDelta::TextDelta { text } = delta {
+                            full_content.push_str(&text);
+                            on_event.send(StreamEvent::Delta {
+                                content: text
+                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    on_event.send(StreamEvent::Error {
+                        message: format!("Anthropic streaming error: {}", e)
+                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    return Err(format!("Anthropic streaming error: {}", e));
+                }
+            }
+        }
+
+        on_event.send(StreamEvent::Done {
+            full_content: full_content.clone()
+        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+
+        println!("[AI_CLIENT] Anthropic streaming completion successful");
+        Ok(full_content)
     }
 }
 

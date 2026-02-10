@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useAgent } from '@/hooks/useAgents';
-import { useConversations, useCreateConversation, useMessages, useSendMessage, useDeleteConversation } from '@/hooks/useConversations';
+import { useConversations, useCreateConversation, useMessages, useSendMessage, useSendMessageStreaming, useGenerateConversationTitle, useDeleteConversation } from '@/hooks/useConversations';
 import { useAuth } from '@/hooks/use-auth';
 import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
@@ -20,7 +20,6 @@ import { cn } from '@/lib/utils';
 import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { getScreenshotSignedUrl } from '@/lib/storage';
-import { useVision } from '@/hooks/usePerception';
 
 // Helper to extract storage path from message content (new format)
 function extractStoragePath(content: string): string | null {
@@ -157,8 +156,9 @@ function AgentChatPage() {
   const { data: conversations, isLoading: conversationsLoading } = useConversations(agentId);
   const createConversation = useCreateConversation();
   const sendMessage = useSendMessage();
+  const sendMessageStreaming = useSendMessageStreaming();
+  const generateConversationTitle = useGenerateConversationTitle();
   const deleteConversation = useDeleteConversation();
-  const { analyzeImage } = useVision(agentId);
 
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isComposingNewConversation, setIsComposingNewConversation] = useState(false);
@@ -170,7 +170,6 @@ function AgentChatPage() {
     analysis?: string;
   } | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [isAnalyzingScreenshot, setIsAnalyzingScreenshot] = useState(false);
 
   const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -210,6 +209,13 @@ function AgentChatPage() {
     }
   }, [activeConversationId, messages]);
 
+  // Auto-scroll when streaming content updates
+  useEffect(() => {
+    if (sendMessageStreaming.isStreaming && sendMessageStreaming.streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [sendMessageStreaming.streamingContent, sendMessageStreaming.isStreaming]);
+
 
   const handleStartNewConversation = () => {
     // If we already have an active conversation or are composing, do nothing
@@ -227,35 +233,9 @@ function AgentChatPage() {
     // Add screenshot to message if pending (already uploaded)
     if (pendingScreenshot) {
       if (pendingScreenshot.storagePath) {
-        // Auto-analyze screenshot if not already analyzed
-        let imageDescription = pendingScreenshot.analysis;
-        
-        if (!imageDescription && pendingScreenshot.base64) {
-          try {
-            setIsAnalyzingScreenshot(true);
-            toast.info('Analyzing screenshot...');
-            
-            // Get AI description of the image so the agent can understand it
-            imageDescription = await analyzeImage.mutateAsync({
-              imageBase64: pendingScreenshot.base64,
-              prompt: 'Describe what you see in this screenshot in detail. Include any text, UI elements, and context that would help understand what the user is looking at.',
-            });
-          } catch (analysisError) {
-            console.error('Screenshot analysis failed:', analysisError);
-            // Continue without analysis - the image will still be shown visually
-            imageDescription = '[Image analysis unavailable]';
-          } finally {
-            setIsAnalyzingScreenshot(false);
-          }
-        }
-        
-        // Include both the image path (for display) and the analysis (for AI understanding)
-        // Format: [Screenshot:path:...]\n[Image Description: ...]\nUser message
-        finalContent = `[Screenshot:path:${pendingScreenshot.storagePath}]\n`;
-        if (imageDescription) {
-          finalContent += `[Image Description: ${imageDescription}]\n`;
-        }
-        finalContent += messageInput;
+        // Include the image path for display in the conversation
+        // The actual image data will be passed separately for AI processing
+        finalContent = `[Screenshot:path:${pendingScreenshot.storagePath}]\n${messageInput}`;
       } else {
         // Fallback: screenshot wasn't uploaded (user not authenticated?)
         console.warn('Screenshot was captured but not uploaded to storage');
@@ -276,28 +256,38 @@ function AgentChatPage() {
         setActiveConversationId(newConversation.id);
         setIsComposingNewConversation(false); // Exit composing mode now that we have a real conversation
 
-        // Send the message to the new conversation
-        await sendMessage.mutateAsync({
+        // Send the message to the new conversation with streaming
+        await sendMessageStreaming.sendMessage({
           conversation_id: newConversation.id,
           content: finalContent,
+          image_base64: pendingScreenshot?.base64,
         });
         setMessageInput('');
+
+        // Generate a proper title based on the first message (background operation)
+        generateConversationTitle.mutate({
+          conversationId: newConversation.id,
+          firstMessage: finalContent,
+        });
       } catch (error) {
-        toast.error('Failed to send message');
+        toast.error(sendMessageStreaming.error || 'Failed to send message');
         console.error('Send message error:', error);
         // Reset composing state on error so user can try again
         setIsComposingNewConversation(false);
+        sendMessageStreaming.clearError();
       }
     } else {
       try {
-        await sendMessage.mutateAsync({
+        await sendMessageStreaming.sendMessage({
           conversation_id: activeConversationId,
           content: finalContent,
+          image_base64: pendingScreenshot?.base64,
         });
         setMessageInput('');
       } catch (error) {
-        toast.error('Failed to send message');
+        toast.error(sendMessageStreaming.error || 'Failed to send message');
         console.error('Send message error:', error);
+        sendMessageStreaming.clearError();
       }
     }
   };
@@ -499,10 +489,10 @@ function AgentChatPage() {
                 </div>
               ))}
             </div>
-          ) : messages && messages.length > 0 ? (
+          ) : ((messages && messages.length > 0) || sendMessageStreaming.isStreaming) ? (
             <ScrollArea className="h-full">
               <div className="space-y-4 px-4 pt-4">
-                {messages.map((message) => (
+                {messages && messages.map((message) => (
                   <div
                     key={message.id}
                     className={cn(
@@ -534,6 +524,31 @@ function AgentChatPage() {
                     </Card>
                   </div>
                 ))}
+                {/* Streaming message display */}
+                {sendMessageStreaming.isStreaming && (
+                  <div className="flex justify-start">
+                    <Card className="max-w-[80%] p-0 bg-muted">
+                      <CardContent className="p-3">
+                        {sendMessageStreaming.streamingContent ? (
+                          <div className="text-sm whitespace-pre-wrap">
+                            {sendMessageStreaming.streamingContent}
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <span className="text-xs opacity-70">AI is thinking...</span>
+                          </div>
+                        )}
+                        {sendMessageStreaming.streamingContent && (
+                          <div className="flex items-center gap-2 mt-2">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <span className="text-xs opacity-70">AI is typing...</span>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
                 <div ref={messagesEndRef} />
               </div>
             </ScrollArea>
@@ -600,20 +615,16 @@ function AgentChatPage() {
                   onChange={(e) => setMessageInput(e.target.value)}
                   onKeyPress={handleKeyPress}
                   placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
-                  disabled={sendMessage.isPending}
+                  disabled={sendMessage.isPending || sendMessageStreaming.isStreaming}
                   className={cn("w-full", isTranscribing && "pl-9")}
                 />
               </div>
               <Button
                 onClick={handleSendMessage}
-                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || isAnalyzingScreenshot}
+                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || sendMessageStreaming.isStreaming}
                 size="icon"
               >
-                {isAnalyzingScreenshot ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
+                <Send className="h-4 w-4" />
               </Button>
             </div>
           </div>

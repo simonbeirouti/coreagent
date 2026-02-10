@@ -4,6 +4,8 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, Co
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
+use tauri::ipc::Channel;
+use crate::ai_client::StreamEvent;
 
 // Conversation data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +157,7 @@ impl ConversationService {
         db: &DatabaseConnection,
         conversation_id: String,
         content: String,
+        image_base64: Option<String>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<MessageData, String> {
         let conversation_id = Uuid::parse_str(&conversation_id)
@@ -210,6 +213,7 @@ impl ConversationService {
             conversation.agent_id.to_string(),
             content,
             history,
+            image_base64,
             ai_client,
         ).await?;
 
@@ -237,6 +241,97 @@ impl ConversationService {
         Ok(saved_message.into())
     }
 
+    /// Send a message to a conversation (user message + AI response) with streaming
+    pub async fn send_message_streaming(
+        db: &DatabaseConnection,
+        conversation_id: String,
+        content: String,
+        image_base64: Option<String>,
+        on_event: crate::ai_client::Channel<crate::ai_client::StreamEvent>,
+        ai_client: &crate::ai_client::AiClient,
+    ) -> Result<MessageData, String> {
+        let conversation_id = Uuid::parse_str(&conversation_id)
+            .map_err(|e| format!("Invalid conversation ID: {}", e))?;
+
+        // First, verify the conversation exists and get the agent
+        let conversation = conversations::Entity::find_by_id(conversation_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find conversation: {}", e))?
+            .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
+
+        // Create user message
+        let user_message = messages::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            conversation_id: ActiveValue::Set(conversation_id),
+            role: ActiveValue::Set("user".to_string()),
+            content: ActiveValue::Set(content.clone()),
+            message_type: ActiveValue::Set("text".to_string()),
+            metadata: ActiveValue::Set(serde_json::json!({})),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+        };
+
+        user_message.insert(db).await
+            .map_err(|e| format!("Failed to save user message: {}", e))?;
+
+        // Fetch conversation history (last 20 messages for context)
+        let history_messages = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .order_by_desc(messages::Column::CreatedAt)
+            .limit(20)
+            .all(db)
+            .await
+            .map_err(|e| format!("Failed to fetch conversation history: {}", e))?;
+
+        // Build history in chronological order (oldest first)
+        let mut history: Vec<(String, String)> = history_messages
+            .into_iter()
+            .rev()
+            .map(|msg| (msg.role, msg.content))
+            .collect();
+
+        // Remove the user message we just added from history to avoid duplication
+        if !history.is_empty() {
+            history.pop();
+        }
+
+        println!("[CONVERSATION] Processing streaming message with {} history items", history.len());
+
+        // Get AI response with conversation history (streaming)
+        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+            db,
+            conversation.agent_id.to_string(),
+            content,
+            history,
+            image_base64,
+            on_event,
+            ai_client,
+        ).await?;
+
+        // Create assistant message
+        let assistant_message = messages::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            conversation_id: ActiveValue::Set(conversation_id),
+            role: ActiveValue::Set("assistant".to_string()),
+            content: ActiveValue::Set(ai_response),
+            message_type: ActiveValue::Set("text".to_string()),
+            metadata: ActiveValue::Set(serde_json::json!({})),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+        };
+
+        let saved_message = assistant_message.insert(db).await
+            .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Update conversation timestamp
+        let mut conversation_model: conversations::ActiveModel = conversation.into();
+        conversation_model.updated_at = Set(chrono::Utc::now().into());
+        conversation_model.update(db).await
+            .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
+
+        println!("[CONVERSATION] Added streaming message to conversation: {}", conversation_id);
+        Ok(saved_message.into())
+    }
+
     /// Update conversation title
     pub async fn update_conversation_title(
         db: &DatabaseConnection,
@@ -261,6 +356,56 @@ impl ConversationService {
 
         println!("[CONVERSATION] Updated conversation title: {}", conversation_id);
         Ok(conversation.into())
+    }
+
+    /// Generate and update conversation title based on the first message
+    pub async fn generate_and_update_conversation_title(
+        db: &DatabaseConnection,
+        conversation_id: String,
+        first_message: String,
+        ai_client: &crate::ai_client::AiClient,
+    ) -> Result<ConversationData, String> {
+        let conversation_id = Uuid::parse_str(&conversation_id)
+            .map_err(|e| format!("Invalid conversation ID: {}", e))?;
+
+        // Generate title using AI
+        let title_prompt = format!(
+            "Summarize this message in 2-5 words as a conversation title. Respond with only the title, no quotes or punctuation.\n\nMessage: {}",
+            first_message
+        );
+
+        // Use a lightweight model for title generation
+        let title = ai_client.get_completion(
+            "openai", // Default to OpenAI for title generation
+            "gpt-4o-mini", // Use cheaper model for this simple task
+            "Title Generator", // Dummy agent name
+            "You are a helpful assistant that generates concise conversation titles.", // Simple persona
+            None, // No mission
+            None, // No values
+            None, // No constraints
+            None, // No user profile needed
+            vec![], // No conversation history needed
+            &title_prompt,
+        ).await
+        .map_err(|e| format!("Failed to generate title: {}", e))?
+        .trim()
+        .to_string();
+
+        // Ensure title is reasonable length (2-5 words)
+        let word_count = title.split_whitespace().count();
+        if word_count < 2 || word_count > 5 {
+            println!("[CONVERSATION] Generated title '{}' has {} words, using default", title, word_count);
+            // Fallback to a generic title if AI generated something too long/short
+            let fallback_title = if first_message.len() > 50 {
+                format!("{}...", &first_message[..47])
+            } else {
+                first_message.clone()
+            };
+            return Self::update_conversation_title(db, conversation_id.to_string(), Some(fallback_title)).await;
+        }
+
+        println!("[CONVERSATION] Generated title '{}' for conversation {}", title, conversation_id);
+        Self::update_conversation_title(db, conversation_id.to_string(), Some(title)).await
     }
 
     /// Delete a conversation and all its messages

@@ -1,19 +1,27 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useAgent } from '@/hooks/useAgents';
 import { useRealtimeVoiceChat } from '@/hooks/useRealtimeVoiceChat';
+import { useBackgroundPerception } from '@/hooks/useBackgroundPerception';
 import { useConversations, useCreateConversation, useCreateConversationInstant, useDeleteConversation } from '@/hooks/useConversations';
 import { useAuth } from '@/hooks/use-auth';
 import { AudioVisualizer } from '@/components/voice/audio-visualizer';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Phone, PhoneOff, Trash2, Plus, Mic, MoreHorizontal, Pencil } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Phone, PhoneOff, Trash2, Plus, Mic, MoreHorizontal, Pencil, Eye, Camera } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -36,13 +44,15 @@ function AgentVoicePage() {
   
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [screenAwarenessEnabled, setScreenAwarenessEnabled] = useState(false);
 
   // Filter to only show voice conversations
   const voiceConversations = conversations?.filter(c => c.title?.includes('Voice Chat')) || [];
 
   // Build agent instructions from identity
+  // Include vision capability instructions when screen awareness is enabled
   const agentInstructions = agent
-    ? `You are ${agent.name}. ${agent.persona || ''} ${agent.mission ? `Your mission: ${agent.mission}` : ''} ${agent.values ? `Your values: ${agent.values}` : ''} Be conversational and helpful.`
+    ? `You are ${agent.name}. ${agent.persona || ''} ${agent.mission ? `Your mission: ${agent.mission}` : ''} ${agent.values ? `Your values: ${agent.values}` : ''} Be conversational and helpful.${screenAwarenessEnabled ? ' You can see the user\'s screen. When they share screenshots, describe what you see and help them with tasks visible on screen.' : ''}`
     : undefined;
 
   const {
@@ -57,10 +67,33 @@ function AgentVoicePage() {
     connect,
     disconnect,
     clearTranscript,
+    sendImage,
   } = useRealtimeVoiceChat({
     agentInstructions,
-    silenceDurationMs: 1000, // Wait 1 second of silence before responding
-    vadThreshold: 0.5,
+    // Use semantic VAD for better voice isolation in noisy environments
+    vadMode: 'semantic_vad',
+    vadEagerness: 'low', // Less likely to interrupt
+    // Fallback server VAD settings (used if semantic_vad not available)
+    silenceDurationMs: 1000,
+    vadThreshold: 0.6, // Higher threshold for better noise rejection
+  });
+
+  // Background perception for screen awareness
+  const {
+    isRunning: isPerceptionRunning,
+    screenshotCount,
+    captureNow,
+  } = useBackgroundPerception({
+    enabled: screenAwarenessEnabled && isConnected,
+    agentId,
+    intervalMs: 15000, // Capture every 15 seconds when enabled
+    compress: true,
+    quality: 0.2, // 80% quality reduction for minimal bandwidth
+    maxWidth: 1280,
+    sendImage,
+    onScreenshot: () => {
+      // Optional: show subtle indicator when screenshot is taken
+    },
   });
 
   // Auto-scroll transcript
@@ -373,6 +406,53 @@ function AgentVoicePage() {
 
             {/* Bottom controls */}
             <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-background via-background to-transparent z-30">
+              {/* Screen Awareness Controls */}
+              <div className="mx-auto max-w-md flex items-center justify-center gap-4 mb-4">
+                <div className="flex items-center gap-2 bg-background/80 rounded-full px-4 py-2 border">
+                  <Eye className={cn(
+                    "h-4 w-4 transition-colors",
+                    isPerceptionRunning ? "text-green-500" : "text-muted-foreground"
+                  )} />
+                  <Label htmlFor="screen-awareness" className="text-sm cursor-pointer">
+                    Screen Awareness
+                  </Label>
+                  <Switch
+                    id="screen-awareness"
+                    checked={screenAwarenessEnabled}
+                    onCheckedChange={setScreenAwarenessEnabled}
+                  />
+                  {isPerceptionRunning && (
+                    <span className="text-xs text-muted-foreground ml-1">
+                      ({screenshotCount})
+                    </span>
+                  )}
+                </div>
+
+                {/* Manual screenshot button */}
+                {isConnected && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="rounded-full h-10 w-10"
+                        onClick={async () => {
+                          const result = await captureNow();
+                          if (result) {
+                            toast.success('Screenshot sent to agent');
+                          }
+                        }}
+                      >
+                        <Camera className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Capture screen now</p>
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+              </div>
+
               <div className="mx-auto max-w-md flex items-center justify-center gap-4">
                 {/* Main call button */}
                 {isConnected ? (
