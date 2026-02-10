@@ -17,6 +17,8 @@ export interface Message {
   message_type: 'text' | 'image' | 'audio';
   metadata: Record<string, any>;
   created_at: string;
+  /** Parent message ID for branching support. NULL for root messages. */
+  parent_id?: string | null;
 }
 
 export interface CreateConversationRequest {

@@ -527,3 +527,218 @@ export function useSendMessageStreaming() {
     clearError: useCallback(() => setError(null), [])
   };
 }
+
+// Delete a single message (and its assistant response if it's a user message)
+export function useDeleteMessage() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ messageId }: { messageId: string; conversationId: string }): Promise<string[]> => {
+      return await invoke('delete_message', { messageId });
+    },
+    onMutate: async ({ messageId, conversationId }) => {
+      // Cancel outgoing refetches
+      await queryClient.cancelQueries({
+        queryKey: conversationKeys.messages(conversationId)
+      });
+
+      // Snapshot previous messages
+      const previousMessages = queryClient.getQueryData<Message[]>(
+        conversationKeys.messages(conversationId)
+      );
+
+      // Get the message to check if it's a user message
+      const message = previousMessages?.find(m => m.id === messageId);
+      
+      // Optimistically remove the message and its child (if user message)
+      if (previousMessages) {
+        let messageIdsToRemove = [messageId];
+        
+        // If it's a user message, also remove child assistant messages
+        if (message?.role === 'user') {
+          const childMessages = previousMessages.filter(
+            m => m.parent_id === messageId && m.role === 'assistant'
+          );
+          messageIdsToRemove = [...messageIdsToRemove, ...childMessages.map(m => m.id)];
+        }
+        
+        queryClient.setQueryData<Message[]>(
+          conversationKeys.messages(conversationId),
+          previousMessages.filter(m => !messageIdsToRemove.includes(m.id))
+        );
+      }
+
+      return { previousMessages };
+    },
+    onError: (err, { conversationId }, context) => {
+      console.error('Failed to delete message:', err);
+      
+      // Rollback on error
+      if (context?.previousMessages) {
+        queryClient.setQueryData(
+          conversationKeys.messages(conversationId),
+          context.previousMessages
+        );
+      }
+    },
+    onSuccess: (_data, { conversationId }) => {
+      // Invalidate to ensure sync with server
+      queryClient.invalidateQueries({
+        queryKey: conversationKeys.messages(conversationId)
+      });
+    },
+  });
+}
+
+// Edit message request type
+export interface EditMessageRequest {
+  message_id: string;
+  conversation_id: string;
+  new_content: string;
+  image_base64?: string;
+}
+
+// Edit a message (creates a new branch with AI response) - streaming version
+export function useEditMessageStreaming() {
+  const queryClient = useQueryClient();
+  const [streamingContent, setStreamingContent] = useState<string>('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const editMessage = useCallback(async (request: EditMessageRequest): Promise<[Message, Message]> => {
+    setIsStreaming(true);
+    setStreamingContent('');
+    setError(null);
+
+    // Optimistically add user message to cache
+    await queryClient.cancelQueries({
+      queryKey: conversationKeys.messages(request.conversation_id)
+    });
+
+    const previousMessages = queryClient.getQueryData<Message[]>(
+      conversationKeys.messages(request.conversation_id)
+    );
+
+    // Find the original message to get its parent_id for the sibling
+    const originalMessage = previousMessages?.find(m => m.id === request.message_id);
+    const tempUserMessageId = `temp-edit-${Date.now()}`;
+    const tempAssistantMessageId = `temp-assistant-edit-${Date.now()}`;
+
+    const newUserMessage: Message = {
+      id: tempUserMessageId,
+      conversation_id: request.conversation_id,
+      role: 'user',
+      content: request.new_content,
+      message_type: 'text',
+      metadata: { edited_from: request.message_id },
+      created_at: new Date().toISOString(),
+      parent_id: originalMessage?.parent_id,
+    };
+
+    queryClient.setQueryData<Message[]>(
+      conversationKeys.messages(request.conversation_id),
+      (old = []) => [...old, newUserMessage]
+    );
+
+    const channel = new Channel<StreamEvent>();
+
+    return new Promise((resolve, reject) => {
+      let hasResolved = false;
+
+      channel.onmessage = (event: StreamEvent) => {
+        switch (event.type) {
+          case 'Started':
+            console.log('Edit streaming started');
+            break;
+          case 'Delta':
+            setStreamingContent(prev => prev + event.data.content);
+            break;
+          case 'Done':
+            // Keep streaming bubble visible until invoke resolves and we reconcile
+            // temp IDs with real DB IDs.
+            console.log('Edit streaming completed');
+            break;
+          case 'Error':
+            setIsStreaming(false);
+            setError(event.data.message);
+            if (!hasResolved) {
+              hasResolved = true;
+              // Rollback to previous messages on error
+              if (previousMessages !== undefined) {
+                queryClient.setQueryData(
+                  conversationKeys.messages(request.conversation_id),
+                  previousMessages
+                );
+              }
+              reject(new Error(event.data.message));
+            }
+            break;
+        }
+      };
+
+      invoke<[Message, Message]>('edit_message_streaming', {
+        messageId: request.message_id,
+        newContent: request.new_content,
+        imageBase64: request.image_base64,
+        onEvent: channel,
+      })
+        .then((result) => {
+          if (hasResolved) return;
+          hasResolved = true;
+          setIsStreaming(false);
+          setStreamingContent('');
+
+          const [savedUserMessage, savedAssistantMessage] = result;
+
+          // Reconcile optimistic temp messages with real DB messages immediately.
+          queryClient.setQueryData<Message[]>(
+            conversationKeys.messages(request.conversation_id),
+            (old = []) => {
+              const withoutTemps = old.filter(
+                (message) =>
+                  message.id !== tempUserMessageId &&
+                  message.id !== tempAssistantMessageId
+              );
+              return [...withoutTemps, savedUserMessage, savedAssistantMessage];
+            }
+          );
+
+          // Invalidate messages to refetch all messages with correct IDs
+          queryClient.invalidateQueries({
+            queryKey: conversationKeys.messages(request.conversation_id)
+          });
+
+          // Update conversation timestamp
+          queryClient.invalidateQueries({
+            queryKey: conversationKeys.lists()
+          });
+
+          resolve(result);
+        })
+        .catch((error) => {
+          if (hasResolved) return;
+          hasResolved = true;
+          setIsStreaming(false);
+          setError(error.message || 'Failed to edit message');
+
+          // Rollback
+          if (previousMessages !== undefined) {
+            queryClient.setQueryData(
+              conversationKeys.messages(request.conversation_id),
+              previousMessages
+            );
+          }
+
+          reject(error);
+        });
+    });
+  }, [queryClient]);
+
+  return {
+    editMessage,
+    streamingContent,
+    isStreaming,
+    error,
+    clearError: useCallback(() => setError(null), [])
+  };
+}

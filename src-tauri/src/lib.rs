@@ -195,6 +195,39 @@ async fn delete_conversation(
     ConversationService::delete_conversation(&db, conversation_id).await
 }
 
+#[tauri::command]
+async fn delete_message(
+    message_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<String>, String> {
+    let deleted_ids = ConversationService::delete_message(&db, message_id).await?;
+    // Convert UUIDs to strings for frontend
+    Ok(deleted_ids.iter().map(|id| id.to_string()).collect())
+}
+
+#[tauri::command]
+async fn edit_message(
+    message_id: String,
+    new_content: String,
+    image_base64: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<(conversation_service::MessageData, conversation_service::MessageData), String> {
+    ConversationService::edit_message(&db, message_id, new_content, image_base64, &ai_client).await
+}
+
+#[tauri::command]
+async fn edit_message_streaming(
+    message_id: String,
+    new_content: String,
+    image_base64: Option<String>,
+    on_event: Channel<ai_client::StreamEvent>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>
+) -> Result<(conversation_service::MessageData, conversation_service::MessageData), String> {
+    ConversationService::edit_message_streaming(&db, message_id, new_content, image_base64, on_event, &ai_client).await
+}
+
 // Vision commands
 #[tauri::command]
 async fn capture_screenshot(
@@ -527,6 +560,9 @@ pub fn run() {
             generate_conversation_title,
             save_voice_transcript,
             delete_conversation,
+            delete_message,
+            edit_message,
+            edit_message_streaming,
             // Perception commands
             capture_screenshot,
             log_screenshot_perception,

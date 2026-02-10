@@ -15,6 +15,9 @@ pub struct Model {
     pub message_type: String,
     pub metadata: Value,
     pub created_at: DateTimeWithTimeZone,
+    /// Parent message ID for branching support. NULL for root messages.
+    /// Multiple messages with the same parent_id represent branches (edits).
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -27,6 +30,14 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Conversations,
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::ParentId",
+        to = "Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    ParentMessage,
 }
 
 impl Related<super::conversations::Entity> for Entity {

@@ -28,6 +28,8 @@ pub struct MessageData {
     pub message_type: String,
     pub metadata: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Parent message ID for branching support
+    pub parent_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +63,7 @@ impl From<messages::Model> for MessageData {
             message_type: model.message_type,
             metadata: model.metadata,
             created_at: model.created_at.into(),
+            parent_id: model.parent_id,
         }
     }
 }
@@ -175,15 +178,27 @@ impl ConversationService {
             .map_err(|e| format!("Failed to find conversation: {}", e))?
             .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
 
-        // Create user message
+        // Find the last message in the conversation to use as parent_id
+        let last_message = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .order_by_desc(messages::Column::CreatedAt)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find last message: {}", e))?;
+        
+        let parent_id = last_message.map(|m| m.id);
+
+        // Create user message with parent_id
+        let user_message_id = Uuid::new_v4();
         let user_message = messages::ActiveModel {
-            id: ActiveValue::Set(Uuid::new_v4()),
+            id: ActiveValue::Set(user_message_id),
             conversation_id: ActiveValue::Set(conversation_id),
             role: ActiveValue::Set("user".to_string()),
             content: ActiveValue::Set(sanitized_content.content.clone()),
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(parent_id),
         };
 
         user_message.insert(db).await
@@ -222,7 +237,7 @@ impl ConversationService {
             ai_client,
         ).await?;
 
-        // Create assistant message
+        // Create assistant message with parent_id pointing to the user message
         let assistant_message = messages::ActiveModel {
             id: ActiveValue::Set(Uuid::new_v4()),
             conversation_id: ActiveValue::Set(conversation_id),
@@ -231,6 +246,7 @@ impl ConversationService {
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(Some(user_message_id)),
         };
 
         let saved_message = assistant_message.insert(db).await
@@ -269,15 +285,27 @@ impl ConversationService {
             .map_err(|e| format!("Failed to find conversation: {}", e))?
             .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
 
-        // Create user message
+        // Find the last message in the conversation to use as parent_id
+        let last_message = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .order_by_desc(messages::Column::CreatedAt)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find last message: {}", e))?;
+        
+        let parent_id = last_message.map(|m| m.id);
+
+        // Create user message with parent_id
+        let user_message_id = Uuid::new_v4();
         let user_message = messages::ActiveModel {
-            id: ActiveValue::Set(Uuid::new_v4()),
+            id: ActiveValue::Set(user_message_id),
             conversation_id: ActiveValue::Set(conversation_id),
             role: ActiveValue::Set("user".to_string()),
             content: ActiveValue::Set(sanitized_content.content.clone()),
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(parent_id),
         };
 
         user_message.insert(db).await
@@ -317,7 +345,7 @@ impl ConversationService {
             ai_client,
         ).await?;
 
-        // Create assistant message
+        // Create assistant message with parent_id pointing to the user message
         let assistant_message = messages::ActiveModel {
             id: ActiveValue::Set(Uuid::new_v4()),
             conversation_id: ActiveValue::Set(conversation_id),
@@ -326,6 +354,7 @@ impl ConversationService {
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(Some(user_message_id)),
         };
 
         let saved_message = assistant_message.insert(db).await
@@ -443,6 +472,289 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Delete a single message and its direct child (assistant response if deleting a user message)
+    pub async fn delete_message(
+        db: &DatabaseConnection,
+        message_id: String,
+    ) -> Result<Vec<Uuid>, String> {
+        let message_id = Uuid::parse_str(&message_id)
+            .map_err(|e| format!("Invalid message ID: {}", e))?;
+
+        // Find the message to delete
+        let message = messages::Entity::find_by_id(message_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find message: {}", e))?
+            .ok_or_else(|| format!("Message not found: {}", message_id))?;
+
+        let mut deleted_ids = Vec::new();
+
+        // If it's a user message, also delete its direct assistant response (child)
+        if message.role == "user" {
+            let child_messages = messages::Entity::find()
+                .filter(messages::Column::ParentId.eq(Some(message_id)))
+                .filter(messages::Column::Role.eq("assistant"))
+                .all(db)
+                .await
+                .map_err(|e| format!("Failed to find child messages: {}", e))?;
+
+            for child in child_messages {
+                deleted_ids.push(child.id);
+                messages::Entity::delete_by_id(child.id)
+                    .exec(db)
+                    .await
+                    .map_err(|e| format!("Failed to delete child message: {}", e))?;
+            }
+        }
+
+        // Delete the message itself
+        deleted_ids.push(message_id);
+        let result = messages::Entity::delete_by_id(message_id)
+            .exec(db)
+            .await
+            .map_err(|e| format!("Failed to delete message: {}", e))?;
+
+        if result.rows_affected == 0 {
+            return Err(format!("Message not found: {}", message_id));
+        }
+
+        println!("[CONVERSATION] Deleted message(s): {:?}", deleted_ids);
+        Ok(deleted_ids)
+    }
+
+    /// Edit a message by creating a new sibling branch
+    /// This creates a new user message with the same parent_id (sibling to the original)
+    /// and gets a new AI response, creating a branch in the conversation tree
+    pub async fn edit_message(
+        db: &DatabaseConnection,
+        message_id: String,
+        new_content: String,
+        image_base64: Option<String>,
+        ai_client: &crate::ai_client::AiClient,
+    ) -> Result<(MessageData, MessageData), String> {
+        let message_id = Uuid::parse_str(&message_id)
+            .map_err(|e| format!("Invalid message ID: {}", e))?;
+
+        // Sanitize the new content
+        let sanitized_content = sanitize_message(&new_content)
+            .map_err(|e| format!("Input validation failed: {}", e))?;
+
+        // Find the original message
+        let original_message = messages::Entity::find_by_id(message_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find message: {}", e))?
+            .ok_or_else(|| format!("Message not found: {}", message_id))?;
+
+        // Only user messages can be edited
+        if original_message.role != "user" {
+            return Err("Only user messages can be edited".to_string());
+        }
+
+        // Get the conversation for agent info
+        let conversation = conversations::Entity::find_by_id(original_message.conversation_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find conversation: {}", e))?
+            .ok_or_else(|| format!("Conversation not found: {}", original_message.conversation_id))?;
+
+        // Create new user message as a sibling (same parent_id as original)
+        let new_user_message_id = Uuid::new_v4();
+        let new_user_message = messages::ActiveModel {
+            id: ActiveValue::Set(new_user_message_id),
+            conversation_id: ActiveValue::Set(original_message.conversation_id),
+            role: ActiveValue::Set("user".to_string()),
+            content: ActiveValue::Set(sanitized_content.content.clone()),
+            message_type: ActiveValue::Set(original_message.message_type.clone()),
+            metadata: ActiveValue::Set(serde_json::json!({
+                "edited_from": message_id.to_string()
+            })),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(original_message.parent_id), // Same parent = sibling branch
+        };
+
+        let saved_user_message = new_user_message.insert(db).await
+            .map_err(|e| format!("Failed to save new user message: {}", e))?;
+
+        // Build history up to (but not including) the original message's parent
+        // This gives us the conversation context up to the branch point
+        let mut history: Vec<(String, String)> = Vec::new();
+        
+        if let Some(parent_id) = original_message.parent_id {
+            // Walk up the tree to build history
+            let mut current_id = Some(parent_id);
+            let mut history_messages = Vec::new();
+            
+            while let Some(id) = current_id {
+                if let Some(msg) = messages::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .map_err(|e| format!("Failed to fetch history message: {}", e))?
+                {
+                    current_id = msg.parent_id;
+                    history_messages.push((msg.role, msg.content));
+                } else {
+                    break;
+                }
+            }
+            
+            // Reverse to get chronological order
+            history_messages.reverse();
+            history = history_messages;
+        }
+
+        println!("[CONVERSATION] Edit message: built {} history items for branch", history.len());
+
+        // Get AI response with the history up to the branch point
+        let ai_response = crate::agent_service::AgentService::send_message_to_agent(
+            db,
+            conversation.agent_id.to_string(),
+            new_content,
+            history,
+            image_base64,
+            ai_client,
+        ).await?;
+
+        // Create assistant response as child of new user message
+        let new_assistant_message = messages::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            conversation_id: ActiveValue::Set(original_message.conversation_id),
+            role: ActiveValue::Set("assistant".to_string()),
+            content: ActiveValue::Set(ai_response),
+            message_type: ActiveValue::Set("text".to_string()),
+            metadata: ActiveValue::Set(serde_json::json!({})),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(Some(new_user_message_id)),
+        };
+
+        let saved_assistant_message = new_assistant_message.insert(db).await
+            .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Update conversation timestamp
+        let mut conversation_model: conversations::ActiveModel = conversation.into();
+        conversation_model.updated_at = Set(chrono::Utc::now().into());
+        conversation_model.update(db).await
+            .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
+
+        println!("[CONVERSATION] Created edit branch from message {}", message_id);
+        Ok((saved_user_message.into(), saved_assistant_message.into()))
+    }
+
+    /// Edit a message by creating a new sibling branch (streaming version)
+    pub async fn edit_message_streaming(
+        db: &DatabaseConnection,
+        message_id: String,
+        new_content: String,
+        image_base64: Option<String>,
+        on_event: crate::ai_client::Channel<crate::ai_client::StreamEvent>,
+        ai_client: &crate::ai_client::AiClient,
+    ) -> Result<(MessageData, MessageData), String> {
+        let message_id = Uuid::parse_str(&message_id)
+            .map_err(|e| format!("Invalid message ID: {}", e))?;
+
+        // Sanitize the new content
+        let sanitized_content = sanitize_message(&new_content)
+            .map_err(|e| format!("Input validation failed: {}", e))?;
+
+        // Find the original message
+        let original_message = messages::Entity::find_by_id(message_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find message: {}", e))?
+            .ok_or_else(|| format!("Message not found: {}", message_id))?;
+
+        // Only user messages can be edited
+        if original_message.role != "user" {
+            return Err("Only user messages can be edited".to_string());
+        }
+
+        // Get the conversation for agent info
+        let conversation = conversations::Entity::find_by_id(original_message.conversation_id)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find conversation: {}", e))?
+            .ok_or_else(|| format!("Conversation not found: {}", original_message.conversation_id))?;
+
+        // Create new user message as a sibling (same parent_id as original)
+        let new_user_message_id = Uuid::new_v4();
+        let new_user_message = messages::ActiveModel {
+            id: ActiveValue::Set(new_user_message_id),
+            conversation_id: ActiveValue::Set(original_message.conversation_id),
+            role: ActiveValue::Set("user".to_string()),
+            content: ActiveValue::Set(sanitized_content.content.clone()),
+            message_type: ActiveValue::Set(original_message.message_type.clone()),
+            metadata: ActiveValue::Set(serde_json::json!({
+                "edited_from": message_id.to_string()
+            })),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(original_message.parent_id), // Same parent = sibling branch
+        };
+
+        let saved_user_message = new_user_message.insert(db).await
+            .map_err(|e| format!("Failed to save new user message: {}", e))?;
+
+        // Build history up to (but not including) the original message's parent
+        let mut history: Vec<(String, String)> = Vec::new();
+        
+        if let Some(parent_id) = original_message.parent_id {
+            let mut current_id = Some(parent_id);
+            let mut history_messages = Vec::new();
+            
+            while let Some(id) = current_id {
+                if let Some(msg) = messages::Entity::find_by_id(id)
+                    .one(db)
+                    .await
+                    .map_err(|e| format!("Failed to fetch history message: {}", e))?
+                {
+                    current_id = msg.parent_id;
+                    history_messages.push((msg.role, msg.content));
+                } else {
+                    break;
+                }
+            }
+            
+            history_messages.reverse();
+            history = history_messages;
+        }
+
+        println!("[CONVERSATION] Edit message streaming: built {} history items for branch", history.len());
+
+        // Get AI response with streaming
+        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+            db,
+            conversation.agent_id.to_string(),
+            new_content,
+            history,
+            image_base64,
+            on_event,
+            ai_client,
+        ).await?;
+
+        // Create assistant response as child of new user message
+        let new_assistant_message = messages::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            conversation_id: ActiveValue::Set(original_message.conversation_id),
+            role: ActiveValue::Set("assistant".to_string()),
+            content: ActiveValue::Set(ai_response),
+            message_type: ActiveValue::Set("text".to_string()),
+            metadata: ActiveValue::Set(serde_json::json!({})),
+            created_at: ActiveValue::Set(chrono::Utc::now().into()),
+            parent_id: ActiveValue::Set(Some(new_user_message_id)),
+        };
+
+        let saved_assistant_message = new_assistant_message.insert(db).await
+            .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+
+        // Update conversation timestamp
+        let mut conversation_model: conversations::ActiveModel = conversation.into();
+        conversation_model.updated_at = Set(chrono::Utc::now().into());
+        conversation_model.update(db).await
+            .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
+
+        println!("[CONVERSATION] Created edit branch (streaming) from message {}", message_id);
+        Ok((saved_user_message.into(), saved_assistant_message.into()))
+    }
+
     /// Save voice transcript entries to conversation
     /// This saves multiple transcript entries (user and assistant) as messages
     pub async fn save_voice_transcript(
@@ -460,6 +772,15 @@ impl ConversationService {
             .map_err(|e| format!("Failed to find conversation: {}", e))?
             .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
 
+        // Find the last message to chain parent_ids
+        let mut last_message_id = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conversation_id))
+            .order_by_desc(messages::Column::CreatedAt)
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find last message: {}", e))?
+            .map(|m| m.id);
+
         let mut saved_messages: Vec<MessageData> = Vec::new();
 
         for entry in entries {
@@ -467,8 +788,9 @@ impl ConversationService {
             let sanitized_text = sanitize_message(&entry.text)
                 .map_err(|e| format!("Input validation failed for transcript: {}", e))?;
 
+            let new_message_id = Uuid::new_v4();
             let message = messages::ActiveModel {
-                id: ActiveValue::Set(Uuid::new_v4()),
+                id: ActiveValue::Set(new_message_id),
                 conversation_id: ActiveValue::Set(conversation_id),
                 role: ActiveValue::Set(entry.role),
                 content: ActiveValue::Set(sanitized_text.content),
@@ -478,12 +800,15 @@ impl ConversationService {
                     "timestamp": entry.timestamp
                 })),
                 created_at: ActiveValue::Set(chrono::Utc::now().into()),
+                parent_id: ActiveValue::Set(last_message_id),
             };
 
             let saved = message.insert(db).await
                 .map_err(|e| format!("Failed to save transcript entry: {}", e))?;
             
             saved_messages.push(saved.into());
+            // Chain: next message's parent is this message
+            last_message_id = Some(new_message_id);
         }
 
         // Update conversation timestamp
