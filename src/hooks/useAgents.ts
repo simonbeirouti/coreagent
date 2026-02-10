@@ -2,15 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { Agent, CreateAgentRequest, UpdateAgentRequest } from '../types';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
+import { agentKeys } from '@/lib/query-keys';
 
-// Query keys
-export const agentKeys = {
-  all: ['agents'] as const,
-  lists: () => [...agentKeys.all, 'list'] as const,
-  list: (userId: string) => [...agentKeys.lists(), userId] as const,
-  details: () => [...agentKeys.all, 'detail'] as const,
-  detail: (id: string) => [...agentKeys.details(), id] as const,
-};
+export { agentKeys };
 
 // Fetch all agents for a user
 export function useAgents(userId: string) {
@@ -54,7 +48,7 @@ export function useCreateAgent() {
     },
     onMutate: async (request) => {
       // Cancel outgoing refetches
-      await queryClient.cancelQueries({ queryKey: agentKeys.lists() });
+      await queryClient.cancelQueries({ queryKey: agentKeys.list(request.user_id) });
 
       // Snapshot previous agents
       const previousAgents = queryClient.getQueryData<Agent[]>(
@@ -93,9 +87,9 @@ export function useCreateAgent() {
         );
       }
     },
-    onSettled: (_data, _error, _request) => {
+    onSettled: (_data, _error, request) => {
       // Refetch to ensure consistency
-      queryClient.invalidateQueries({ queryKey: agentKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: agentKeys.list(request.user_id) });
     },
   });
 }

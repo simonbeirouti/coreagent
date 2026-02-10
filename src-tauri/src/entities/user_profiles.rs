@@ -13,6 +13,10 @@ pub struct Model {
     pub preferences: Json,
     pub habits: Json,
     pub work_patterns: Json,
+    pub language: String,
+    pub ai_response_language: String,
+    pub notifications_enabled: bool,
+    pub analytics_enabled: bool,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

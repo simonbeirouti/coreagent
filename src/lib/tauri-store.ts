@@ -102,6 +102,7 @@ export async function saveCache(queryClient: QueryClient): Promise<void> {
       queries: serializedQueries,
       timestamp: Date.now(),
     };
+    memoryCache = serializedCache;
 
     const store = await getCacheStore();
     await store.set('cache', serializedCache);
@@ -201,10 +202,66 @@ export function getCachedDataUpdatedAt(queryKey: any): number | undefined {
 }
 
 /**
+ * Remove a specific query from the memory cache
+ */
+export function removeCachedQuery(queryKey: any): void {
+  if (!memoryCache || !memoryCache.queries) return;
+
+  const queryKeyString = JSON.stringify(queryKey);
+  if (memoryCache.queries[queryKeyString]) {
+    delete memoryCache.queries[queryKeyString];
+    console.log(`[Cache] Removed query from memory cache: ${queryKeyString}`);
+  }
+}
+
+/**
+ * Remove queries matching a prefix from the memory cache
+ * Useful for removing all queries related to a specific entity
+ */
+export function removeCachedQueriesMatching(predicate: (queryKey: any) => boolean): void {
+  if (!memoryCache || !memoryCache.queries) return;
+
+  const keysToRemove: string[] = [];
+  
+  for (const queryKeyString of Object.keys(memoryCache.queries)) {
+    try {
+      const queryKey = JSON.parse(queryKeyString);
+      if (predicate(queryKey)) {
+        keysToRemove.push(queryKeyString);
+      }
+    } catch {
+      // Skip malformed keys
+    }
+  }
+
+  for (const key of keysToRemove) {
+    delete memoryCache.queries[key];
+    console.log(`[Cache] Removed query from memory cache: ${key}`);
+  }
+}
+
+/**
+ * Persist the current memory cache to disk
+ * Call this after making changes to ensure they're saved
+ */
+export async function persistMemoryCache(): Promise<void> {
+  if (!memoryCache) return;
+
+  try {
+    const store = await getCacheStore();
+    memoryCache.timestamp = Date.now();
+    await store.set('cache', memoryCache);
+    console.log('[Cache] Persisted memory cache to disk');
+  } catch (error) {
+    console.warn('[Cache] Failed to persist memory cache:', error);
+  }
+}
+
+/**
  * Hydrate React Query cache with persisted data
  */
 export async function hydrateCache(queryClient: QueryClient): Promise<void> {
-  const cached = await loadCache();
+  const cached = memoryCache ?? await loadCache();
   if (!cached) return;
 
   const cache = queryClient.getQueryCache();
@@ -219,8 +276,10 @@ export async function hydrateCache(queryClient: QueryClient): Promise<void> {
         continue; // Skip hydration, we have fresher data
       }
 
-      // Set the cached data
-      queryClient.setQueryData(queryKey, entry.data);
+      // Preserve original freshness timestamp when hydrating.
+      queryClient.setQueryData(queryKey, entry.data, {
+        updatedAt: entry.dataUpdatedAt,
+      });
 
       console.log(`[Cache] Hydrated query: ${queryKeyString}`);
     } catch (error) {

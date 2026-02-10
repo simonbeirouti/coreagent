@@ -17,6 +17,8 @@ export interface Message {
   message_type: 'text' | 'image' | 'audio';
   metadata: Record<string, any>;
   created_at: string;
+  /** Parent message ID for branching support. NULL for root messages. */
+  parent_id?: string | null;
 }
 
 export interface CreateConversationRequest {
@@ -28,9 +30,17 @@ export interface CreateConversationRequest {
 export interface SendMessageRequest {
   conversation_id: string;
   content: string;
+  image_base64?: string;
 }
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
   agent_name?: string;
 }
+
+// Streaming event types for AI responses
+export type StreamEvent =
+  | { type: 'Started' }
+  | { type: 'Delta'; data: { content: string } }
+  | { type: 'Done'; data: { full_content: string } }
+  | { type: 'Error'; data: { message: string } };

@@ -1,0 +1,38 @@
+---
+description: Cache-first data and mutation consistency standards
+alwaysApply: true
+---
+
+# Cache And Data Consistency
+
+Follow these rules for any new data functionality (tables, hooks, routes, services):
+
+- TanStack Query is the runtime source of truth. Tauri Store is persistence/hydration only.
+- Use shared key factories in `src/lib/query-keys.ts`; do not inline ad-hoc query keys.
+- New `useQuery` hooks must be cache-first by default:
+  - `staleTime: Infinity`
+  - `gcTime: 24 * 60 * 60 * 1000`
+  - `refetchOnMount: false`
+  - `refetchOnWindowFocus: false`
+  - `refetchOnReconnect: false`
+- Always provide startup-hydrated/initial cached data where existing hook patterns support it.
+
+## Mutations (Create/Edit/Delete)
+
+- UX must be optimistic-first: update UI immediately in `onMutate`.
+- Snapshot all touched query data in `onMutate` for rollback.
+- On error, rollback every touched query entry.
+- On success, reconcile optimistic entities (for example temp IDs -> real IDs).
+- Use scoped invalidation only (entity + owner/agent scope). Avoid broad/global invalidations unless unavoidable.
+
+## Route And View Behavior
+
+- Persist selected entity state in URL search params when cross-route continuity is needed (for example `conversationId`).
+- Do not trigger implicit background reloads on page revisit; refresh should be explicit or mutation-driven.
+
+## Persistence And Race Safety
+
+- Do not introduce secondary cache writers that bypass QueryClient state.
+- Keep one persistence path from QueryClient cache snapshots to Tauri Store.
+- Guard async callbacks in hooks so unmounted/route-switched views do not apply stale updates.
+

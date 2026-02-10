@@ -35,7 +35,29 @@ rig-core = "0.30"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenv = "0.15"
+unicode-normalization = "0.1"
 
 # Store Plugin
 tauri-plugin-store = "2"
+
+# Perception - Vision (desktop only)
+xcap = "0.8.1"
+
+# Perception - Audio (cross-platform)
+tauri-plugin-mic-recorder = "2.0"
+
+# OpenAI API integration
+async-openai = { version = "0.32.4", features = ["audio", "chat-completion"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+base64 = "0.22"
+
+# Anthropic - true streaming support
+async-anthropic = "0.6.0"
+
+# Image processing
+image = "0.25"
+
+# Async utilities
+futures-util = "0.3"
+futures = "0.3"
 

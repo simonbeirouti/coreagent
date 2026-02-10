@@ -15,7 +15,10 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as AgentsCreateRouteImport } from './routes/agents/create'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
+import { Route as AgentsAgentIdVoiceRouteImport } from './routes/agents/$agentId.voice'
 import { Route as AgentsAgentIdSettingsRouteImport } from './routes/agents/$agentId.settings'
+import { Route as AgentsAgentIdMemoryRouteImport } from './routes/agents/$agentId.memory'
+import { Route as AgentsAgentIdDashboardRouteImport } from './routes/agents/$agentId.dashboard'
 import { Route as AgentsAgentIdChatRouteImport } from './routes/agents/$agentId.chat'
 
 const SettingsRoute = SettingsRouteImport.update({
@@ -48,9 +51,24 @@ const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentsAgentIdVoiceRoute = AgentsAgentIdVoiceRouteImport.update({
+  id: '/voice',
+  path: '/voice',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
 const AgentsAgentIdSettingsRoute = AgentsAgentIdSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
+const AgentsAgentIdMemoryRoute = AgentsAgentIdMemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
+  getParentRoute: () => AgentsAgentIdRoute,
+} as any)
+const AgentsAgentIdDashboardRoute = AgentsAgentIdDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
   getParentRoute: () => AgentsAgentIdRoute,
 } as any)
 const AgentsAgentIdChatRoute = AgentsAgentIdChatRouteImport.update({
@@ -67,7 +85,10 @@ export interface FileRoutesByFullPath {
   '/agents/create': typeof AgentsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -77,7 +98,10 @@ export interface FileRoutesByTo {
   '/agents/create': typeof AgentsCreateRoute
   '/agents': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -88,7 +112,10 @@ export interface FileRoutesById {
   '/agents/create': typeof AgentsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
+  '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
+  '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -100,7 +127,10 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents/'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/voice'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -110,7 +140,10 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/voice'
   id:
     | '__root__'
     | '/'
@@ -120,7 +153,10 @@ export interface FileRouteTypes {
     | '/agents/create'
     | '/agents/'
     | '/agents/$agentId/chat'
+    | '/agents/$agentId/dashboard'
+    | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/voice'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -176,11 +212,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsAgentIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agents/$agentId/voice': {
+      id: '/agents/$agentId/voice'
+      path: '/voice'
+      fullPath: '/agents/$agentId/voice'
+      preLoaderRoute: typeof AgentsAgentIdVoiceRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
     '/agents/$agentId/settings': {
       id: '/agents/$agentId/settings'
       path: '/settings'
       fullPath: '/agents/$agentId/settings'
       preLoaderRoute: typeof AgentsAgentIdSettingsRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
+    '/agents/$agentId/memory': {
+      id: '/agents/$agentId/memory'
+      path: '/memory'
+      fullPath: '/agents/$agentId/memory'
+      preLoaderRoute: typeof AgentsAgentIdMemoryRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
+    '/agents/$agentId/dashboard': {
+      id: '/agents/$agentId/dashboard'
+      path: '/dashboard'
+      fullPath: '/agents/$agentId/dashboard'
+      preLoaderRoute: typeof AgentsAgentIdDashboardRouteImport
       parentRoute: typeof AgentsAgentIdRoute
     }
     '/agents/$agentId/chat': {
@@ -195,12 +252,18 @@ declare module '@tanstack/react-router' {
 
 interface AgentsAgentIdRouteChildren {
   AgentsAgentIdChatRoute: typeof AgentsAgentIdChatRoute
+  AgentsAgentIdDashboardRoute: typeof AgentsAgentIdDashboardRoute
+  AgentsAgentIdMemoryRoute: typeof AgentsAgentIdMemoryRoute
   AgentsAgentIdSettingsRoute: typeof AgentsAgentIdSettingsRoute
+  AgentsAgentIdVoiceRoute: typeof AgentsAgentIdVoiceRoute
 }
 
 const AgentsAgentIdRouteChildren: AgentsAgentIdRouteChildren = {
   AgentsAgentIdChatRoute: AgentsAgentIdChatRoute,
+  AgentsAgentIdDashboardRoute: AgentsAgentIdDashboardRoute,
+  AgentsAgentIdMemoryRoute: AgentsAgentIdMemoryRoute,
   AgentsAgentIdSettingsRoute: AgentsAgentIdSettingsRoute,
+  AgentsAgentIdVoiceRoute: AgentsAgentIdVoiceRoute,
 }
 
 const AgentsAgentIdRouteWithChildren = AgentsAgentIdRoute._addFileChildren(

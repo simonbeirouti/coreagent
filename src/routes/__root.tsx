@@ -3,6 +3,7 @@ import { useMemo, useState, useEffect } from 'react'
 import { AppSidebar } from '@/components/dashboard/app-sidebar'
 import { QueryProvider } from '@/providers/query-provider'
 import { ensureCacheLoaded } from '@/lib/tauri-store'
+import { Toaster } from '@/components/ui/sonner'
 
 // Module-level: start loading cache immediately
 const cachePromise = ensureCacheLoaded()
@@ -62,6 +63,7 @@ function RootLayout() {
   return (
     <QueryProvider>
       <LayoutContent user={sidebarUser} onSignOut={signOut} />
+      <Toaster />
     </QueryProvider>
   )
 }
@@ -91,76 +93,61 @@ function LayoutContent({
 
   // Generate breadcrumbs based on current route - memoized with stable dependencies
   const breadcrumbs = useMemo(() => {
-    const breadcrumbItems = [
-      <BreadcrumbItem key="coreagent" className="hidden md:block">
-        <BreadcrumbLink asChild>
-          <Link to="/">Dashboard</Link>
-        </BreadcrumbLink>
-      </BreadcrumbItem>,
-    ]
+    const breadcrumbItems: React.ReactNode[] = []
+    const currentMatch = matches[matches.length - 1]
+    const pathSegments = currentMatch?.pathname.split('/').filter(Boolean) ?? []
 
-    if (matches.length > 1) {
-      const currentMatch = matches[matches.length - 1]
-      const pathSegments = currentMatch.pathname.split('/').filter(Boolean)
-
-      if (pathSegments.length > 0) {
-        breadcrumbItems.push(
-          <BreadcrumbSeparator key="separator" className="hidden md:block" />
-        )
-
-        // Create breadcrumb for each path segment
-        pathSegments.forEach((segment, index) => {
-          const isLast = index === pathSegments.length - 1
-          // Check if this segment is a UUID (agent ID)
-          const isUUID = segment.length > 20 && segment.includes('-')
-          
-          // Use agent name if available and this is a UUID, otherwise capitalize
-          let segmentName: string | React.ReactNode
-          if (isUUID && agent?.name) {
-            segmentName = agent.name
-          } else if (isUUID && agentId && !agent) {
-            // Agent is loading
-            segmentName = <Skeleton className="h-4 w-20 inline-block" />
-          } else if (isUUID) {
-            segmentName = 'Agent'
-          } else {
-            segmentName = segment.charAt(0).toUpperCase() + segment.slice(1)
-          }
-
-          if (isLast) {
-            breadcrumbItems.push(
-              <BreadcrumbItem key={segment}>
-                <BreadcrumbPage>{segmentName}</BreadcrumbPage>
-              </BreadcrumbItem>
-            )
-          } else {
-            breadcrumbItems.push(
-              <BreadcrumbItem key={segment} className="hidden md:block">
-                <BreadcrumbLink asChild>
-                  <Link to={`/${pathSegments.slice(0, index + 1).join('/')}` as any}>
-                    {segmentName}
-                  </Link>
-                </BreadcrumbLink>
-              </BreadcrumbItem>
-            )
-            if (index < pathSegments.length - 1) {
-              breadcrumbItems.push(
-                <BreadcrumbSeparator key={`sep-${segment}`} className="hidden md:block" />
-              )
-            }
-          }
-        })
-      }
-    } else {
-      breadcrumbItems.push(
-        <BreadcrumbSeparator key="dashboard-separator" className="hidden md:block" />
-      )
+    if (pathSegments.length === 0) {
       breadcrumbItems.push(
         <BreadcrumbItem key="dashboard">
           <BreadcrumbPage>Dashboard</BreadcrumbPage>
         </BreadcrumbItem>
       )
+      return breadcrumbItems
     }
+
+    // Create breadcrumb for each path segment
+    pathSegments.forEach((segment, index) => {
+      const isLast = index === pathSegments.length - 1
+      // Check if this segment is a UUID (agent ID)
+      const isUUID = segment.length > 20 && segment.includes('-')
+      
+      // Use agent name if available and this is a UUID, otherwise capitalize
+      let segmentName: string | React.ReactNode
+      if (isUUID && agent?.name) {
+        segmentName = agent.name
+      } else if (isUUID && agentId && !agent) {
+        // Agent is loading
+        segmentName = <Skeleton className="h-4 w-20 inline-block" />
+      } else if (isUUID) {
+        segmentName = 'Agent'
+      } else {
+        segmentName = segment.charAt(0).toUpperCase() + segment.slice(1)
+      }
+
+      if (isLast) {
+        breadcrumbItems.push(
+          <BreadcrumbItem key={segment}>
+            <BreadcrumbPage>{segmentName}</BreadcrumbPage>
+          </BreadcrumbItem>
+        )
+      } else {
+        breadcrumbItems.push(
+          <BreadcrumbItem key={segment} className="hidden md:block">
+            <BreadcrumbLink asChild>
+              <Link to={`/${pathSegments.slice(0, index + 1).join('/')}` as any}>
+                {segmentName}
+              </Link>
+            </BreadcrumbLink>
+          </BreadcrumbItem>
+        )
+        if (index < pathSegments.length - 1) {
+          breadcrumbItems.push(
+            <BreadcrumbSeparator key={`sep-${segment}`} className="hidden md:block" />
+          )
+        }
+      }
+    })
 
     return breadcrumbItems
   }, [pathname, matches.length, agent?.name])
