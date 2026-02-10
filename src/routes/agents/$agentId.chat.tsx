@@ -19,7 +19,11 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
+import { AttachButton } from '@/components/perception/attach-button';
 import { getScreenshotSignedUrl } from '@/lib/storage';
+
+// Maximum message length (matches backend validation)
+const MAX_MESSAGE_LENGTH = 32000;
 
 // Helper to extract storage path from message content (new format)
 function extractStoragePath(content: string): string | null {
@@ -167,7 +171,6 @@ function AgentChatPage() {
     base64: string;
     storagePath?: string; // Path in Supabase storage
     signedUrl?: string; // Temporary signed URL for immediate display
-    analysis?: string;
   } | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
 
@@ -227,8 +230,11 @@ function AgentChatPage() {
 
   const handleSendMessage = async () => {
     if (!messageInput.trim() && !pendingScreenshot) return;
+
+    let finalContent = messageInput.trim();
     
-    let finalContent = messageInput;
+    // Store the image base64 before clearing pendingScreenshot
+    const imageBase64 = pendingScreenshot?.base64;
     
     // Add screenshot to message if pending (already uploaded)
     if (pendingScreenshot) {
@@ -240,10 +246,13 @@ function AgentChatPage() {
         // Fallback: screenshot wasn't uploaded (user not authenticated?)
         console.warn('Screenshot was captured but not uploaded to storage');
       }
-      setPendingScreenshot(null);
     }
     
     if (!finalContent.trim()) return;
+    
+    // Clear input immediately when sending (before waiting for AI response)
+    setMessageInput('');
+    setPendingScreenshot(null);
     
     if (!activeConversationId) {
       // Create a new conversation if none exists
@@ -260,9 +269,8 @@ function AgentChatPage() {
         await sendMessageStreaming.sendMessage({
           conversation_id: newConversation.id,
           content: finalContent,
-          image_base64: pendingScreenshot?.base64,
+          image_base64: imageBase64,
         });
-        setMessageInput('');
 
         // Generate a proper title based on the first message (background operation)
         generateConversationTitle.mutate({
@@ -281,9 +289,8 @@ function AgentChatPage() {
         await sendMessageStreaming.sendMessage({
           conversation_id: activeConversationId,
           content: finalContent,
-          image_base64: pendingScreenshot?.base64,
+          image_base64: imageBase64,
         });
-        setMessageInput('');
       } catch (error) {
         toast.error(sendMessageStreaming.error || 'Failed to send message');
         console.error('Send message error:', error);
@@ -313,15 +320,10 @@ function AgentChatPage() {
     }
   };
 
-  const handleScreenshot = (imageBase64: string, storagePath?: string, signedUrl?: string, analysis?: string) => {
+  const handleScreenshot = (imageBase64: string, storagePath?: string, signedUrl?: string) => {
     // Store the screenshot with its storage path and temporary signed URL
-    setPendingScreenshot({ base64: imageBase64, storagePath, signedUrl, analysis });
-    
-    // Add analysis to message input if provided
-    if (analysis) {
-      setMessageInput(prev => prev + (prev ? '\n\n' : '') + analysis);
-    }
-    
+    setPendingScreenshot({ base64: imageBase64, storagePath, signedUrl });
+
     if (storagePath) {
       toast.success('Screenshot ready - send your message to include it');
     } else {
@@ -604,20 +606,39 @@ function AgentChatPage() {
                 onScreenshot={handleScreenshot}
                 disabled={sendMessage.isPending}
               />
+              <AttachButton
+                onAttach={handleScreenshot}
+                disabled={sendMessage.isPending}
+              />
               <div className="relative flex-1">
                 {isTranscribing && (
                   <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10">
                     <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                   </div>
                 )}
-                <Input
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
-                  onKeyPress={handleKeyPress}
-                  placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
-                  disabled={sendMessage.isPending || sendMessageStreaming.isStreaming}
-                  className={cn("w-full", isTranscribing && "pl-9")}
-                />
+                <div className="relative">
+                  <Input
+                    value={messageInput}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (value.length <= MAX_MESSAGE_LENGTH) {
+                        setMessageInput(value);
+                      }
+                    }}
+                    onKeyPress={handleKeyPress}
+                    placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
+                    disabled={sendMessage.isPending || sendMessageStreaming.isStreaming}
+                    className={cn("w-full pr-16", isTranscribing && "pl-9")}
+                    maxLength={MAX_MESSAGE_LENGTH}
+                  />
+                  <div className={cn(
+                    "absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground",
+                    messageInput.length > MAX_MESSAGE_LENGTH * 0.9 && "text-amber-600",
+                    messageInput.length > MAX_MESSAGE_LENGTH * 0.95 && "text-red-600"
+                  )}>
+                    {messageInput.length}/{MAX_MESSAGE_LENGTH}
+                  </div>
+                </div>
               </div>
               <Button
                 onClick={handleSendMessage}

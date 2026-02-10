@@ -8,6 +8,7 @@ mod user_profile_service;
 mod perception_tracker;
 mod audio_service;
 mod vision_service;
+mod input_sanitizer;
 
 use tauri::{Manager, ipc::Channel};
 use auth::{AuthState, SessionData};

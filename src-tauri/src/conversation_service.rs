@@ -6,6 +6,7 @@ use uuid::Uuid;
 use chrono;
 use tauri::ipc::Channel;
 use crate::ai_client::StreamEvent;
+use crate::input_sanitizer::sanitize_message;
 
 // Conversation data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +164,10 @@ impl ConversationService {
         let conversation_id = Uuid::parse_str(&conversation_id)
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
+        // Sanitize the user input
+        let sanitized_content = sanitize_message(&content)
+            .map_err(|e| format!("Input validation failed: {}", e))?;
+
         // First, verify the conversation exists and get the agent
         let conversation = conversations::Entity::find_by_id(conversation_id)
             .one(db)
@@ -175,7 +180,7 @@ impl ConversationService {
             id: ActiveValue::Set(Uuid::new_v4()),
             conversation_id: ActiveValue::Set(conversation_id),
             role: ActiveValue::Set("user".to_string()),
-            content: ActiveValue::Set(content.clone()),
+            content: ActiveValue::Set(sanitized_content.content.clone()),
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
@@ -253,6 +258,10 @@ impl ConversationService {
         let conversation_id = Uuid::parse_str(&conversation_id)
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
+        // Sanitize the user input
+        let sanitized_content = sanitize_message(&content)
+            .map_err(|e| format!("Input validation failed: {}", e))?;
+
         // First, verify the conversation exists and get the agent
         let conversation = conversations::Entity::find_by_id(conversation_id)
             .one(db)
@@ -265,7 +274,7 @@ impl ConversationService {
             id: ActiveValue::Set(Uuid::new_v4()),
             conversation_id: ActiveValue::Set(conversation_id),
             role: ActiveValue::Set("user".to_string()),
-            content: ActiveValue::Set(content.clone()),
+            content: ActiveValue::Set(sanitized_content.content.clone()),
             message_type: ActiveValue::Set("text".to_string()),
             metadata: ActiveValue::Set(serde_json::json!({})),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
@@ -368,10 +377,14 @@ impl ConversationService {
         let conversation_id = Uuid::parse_str(&conversation_id)
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
+        // Sanitize the first message before using it in the prompt
+        let sanitized_message = sanitize_message(&first_message)
+            .map_err(|e| format!("Input validation failed: {}", e))?;
+
         // Generate title using AI
         let title_prompt = format!(
             "Summarize this message in 2-5 words as a conversation title. Respond with only the title, no quotes or punctuation.\n\nMessage: {}",
-            first_message
+            sanitized_message.content
         );
 
         // Use a lightweight model for title generation
@@ -450,11 +463,15 @@ impl ConversationService {
         let mut saved_messages: Vec<MessageData> = Vec::new();
 
         for entry in entries {
+            // Sanitize the transcript text
+            let sanitized_text = sanitize_message(&entry.text)
+                .map_err(|e| format!("Input validation failed for transcript: {}", e))?;
+
             let message = messages::ActiveModel {
                 id: ActiveValue::Set(Uuid::new_v4()),
                 conversation_id: ActiveValue::Set(conversation_id),
                 role: ActiveValue::Set(entry.role),
-                content: ActiveValue::Set(entry.text),
+                content: ActiveValue::Set(sanitized_text.content),
                 message_type: ActiveValue::Set("audio".to_string()), // Mark as audio message
                 metadata: ActiveValue::Set(serde_json::json!({
                     "source": "voice_chat",

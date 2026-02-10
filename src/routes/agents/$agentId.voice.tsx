@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { useAgent } from '@/hooks/useAgents';
 import { useRealtimeVoiceChat } from '@/hooks/useRealtimeVoiceChat';
 import { useBackgroundPerception } from '@/hooks/useBackgroundPerception';
-import { useConversations, useCreateConversation, useCreateConversationInstant, useDeleteConversation } from '@/hooks/useConversations';
+import { useConversations, useCreateConversation, useCreateConversationInstant, useDeleteConversation, useGenerateConversationTitle } from '@/hooks/useConversations';
 import { useAuth } from '@/hooks/use-auth';
 import { AudioVisualizer } from '@/components/voice/audio-visualizer';
 import { Button } from '@/components/ui/button';
@@ -40,6 +40,7 @@ function AgentVoicePage() {
   const { createInstant } = useCreateConversationInstant();
   const createConversation = useCreateConversation();
   const deleteConversation = useDeleteConversation();
+  const generateConversationTitle = useGenerateConversationTitle();
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
@@ -212,6 +213,19 @@ function AgentVoicePage() {
 
         console.log('[VOICE] Save successful!');
         toast.success(`Voice chat saved (${transcriptToSave.length} messages)`);
+
+        // Generate a proper title based on the first user message (only for new conversations)
+        if (needsNewConversation && conversationId) {
+          const firstUserMessage = transcriptToSave.find(entry => entry.role === 'user')?.text;
+          if (firstUserMessage) {
+            console.log('[VOICE] Generating conversation title from first message:', firstUserMessage);
+            generateConversationTitle.mutate({
+              conversationId,
+              firstMessage: firstUserMessage,
+            });
+          }
+        }
+
         clearTranscript();
       } catch (err) {
         console.error('[VOICE] Failed to auto-save transcript:', err);
