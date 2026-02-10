@@ -13,6 +13,10 @@ pub struct UserProfileData {
     pub preferences: serde_json::Value,
     pub habits: serde_json::Value,
     pub work_patterns: serde_json::Value,
+    pub language: String,
+    pub ai_response_language: String,
+    pub notifications_enabled: bool,
+    pub analytics_enabled: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -22,6 +26,10 @@ pub struct UpdateUserProfileRequest {
     pub preferences: Option<serde_json::Value>,
     pub habits: Option<serde_json::Value>,
     pub work_patterns: Option<serde_json::Value>,
+    pub language: Option<String>,
+    pub ai_response_language: Option<String>,
+    pub notifications_enabled: Option<bool>,
+    pub analytics_enabled: Option<bool>,
 }
 
 // Convert SeaORM model to our UserProfileData struct
@@ -33,6 +41,10 @@ impl From<user_profiles::Model> for UserProfileData {
             preferences: model.preferences,
             habits: model.habits,
             work_patterns: model.work_patterns,
+            language: model.language,
+            ai_response_language: model.ai_response_language,
+            notifications_enabled: model.notifications_enabled,
+            analytics_enabled: model.analytics_enabled,
             created_at: model.created_at.into(),
             updated_at: model.updated_at.into(),
         }
@@ -69,13 +81,17 @@ impl UserProfileService {
             user_id: ActiveValue::Set(user_uuid),
             preferences: ActiveValue::Set(json!({
                 "communication_style": "balanced",
-                "language": "en",
                 "timezone": "UTC"
             })),
             habits: ActiveValue::Set(json!({
-                "feedback_style": "constructive"
+                "feedback_style": "constructive",
+                "session_length": "medium"
             })),
             work_patterns: ActiveValue::Set(json!({})),
+            language: ActiveValue::Set("en".to_string()),
+            ai_response_language: ActiveValue::Set("en".to_string()),
+            notifications_enabled: ActiveValue::Set(true),
+            analytics_enabled: ActiveValue::Set(false),
             created_at: ActiveValue::Set(chrono::Utc::now().into()),
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
@@ -131,6 +147,18 @@ impl UserProfileService {
         }
         if let Some(work_patterns) = updates.work_patterns {
             profile.work_patterns = Set(work_patterns);
+        }
+        if let Some(language) = updates.language {
+            profile.language = Set(language);
+        }
+        if let Some(ai_response_language) = updates.ai_response_language {
+            profile.ai_response_language = Set(ai_response_language);
+        }
+        if let Some(notifications_enabled) = updates.notifications_enabled {
+            profile.notifications_enabled = Set(notifications_enabled);
+        }
+        if let Some(analytics_enabled) = updates.analytics_enabled {
+            profile.analytics_enabled = Set(analytics_enabled);
         }
 
         profile.updated_at = Set(chrono::Utc::now().into());

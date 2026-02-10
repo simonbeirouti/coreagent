@@ -449,6 +449,24 @@ async fn get_perception_stats(
     PerceptionTracker::get_stats(&db, &agent_id).await
 }
 
+// User profile commands
+#[tauri::command]
+async fn get_user_profile(
+    user_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<user_profile_service::UserProfileData, String> {
+    user_profile_service::UserProfileService::get_or_create_profile(&db, user_id).await
+}
+
+#[tauri::command]
+async fn update_user_profile(
+    user_id: String,
+    updates: user_profile_service::UpdateUserProfileRequest,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<user_profile_service::UserProfileData, String> {
+    user_profile_service::UserProfileService::update_profile(&db, user_id, updates).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -519,6 +537,9 @@ pub fn run() {
             text_to_speech,
             read_audio_file,
             get_perception_stats,
+            // User profile commands
+            get_user_profile,
+            update_user_profile,
             // Realtime voice chat
             get_realtime_session_token
         ])

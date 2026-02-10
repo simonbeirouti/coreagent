@@ -95,20 +95,20 @@ impl AiClientManager {
         if let Some(profile) = user_profile {
             prompt.push_str("\n\n## About the User");
             
-            // Add preferences
+            // Add AI response language directive (from dedicated column)
+            prompt.push_str(&format!("\n- IMPORTANT: Respond in {} language", Self::get_language_name(&profile.ai_response_language)));
+            
+            // Add preferences from JSONB
             if let Some(prefs) = profile.preferences.as_object() {
                 if let Some(comm_style) = prefs.get("communication_style").and_then(|v| v.as_str()) {
                     prompt.push_str(&format!("\n- Communication style: {}", comm_style));
-                }
-                if let Some(language) = prefs.get("language").and_then(|v| v.as_str()) {
-                    prompt.push_str(&format!("\n- Preferred language: {}", language));
                 }
                 if let Some(timezone) = prefs.get("timezone").and_then(|v| v.as_str()) {
                     prompt.push_str(&format!("\n- Timezone: {}", timezone));
                 }
             }
             
-            // Add habits
+            // Add habits from JSONB
             if let Some(habits) = profile.habits.as_object() {
                 if let Some(feedback_style) = habits.get("feedback_style").and_then(|v| v.as_str()) {
                     prompt.push_str(&format!("\n- Feedback style: {}", feedback_style));
@@ -116,9 +116,12 @@ impl AiClientManager {
                 if let Some(session_length) = habits.get("session_length").and_then(|v| v.as_str()) {
                     prompt.push_str(&format!("\n- Typical session length: {}", session_length));
                 }
+                if let Some(preferred_hours) = habits.get("preferred_hours").and_then(|v| v.as_str()) {
+                    prompt.push_str(&format!("\n- Preferred working hours: {}", preferred_hours));
+                }
             }
             
-            // Add work patterns
+            // Add work patterns from JSONB
             if let Some(work) = profile.work_patterns.as_object() {
                 if let Some(domain) = work.get("domain").and_then(|v| v.as_str()) {
                     prompt.push_str(&format!("\n- Domain expertise: {}", domain));
@@ -162,6 +165,40 @@ impl AiClientManager {
         }
 
         prompt
+    }
+
+    /// Convert ISO 639-1 language code to readable language name
+    fn get_language_name(code: &str) -> &'static str {
+        match code {
+            "en" => "English",
+            "es" => "Spanish",
+            "fr" => "French",
+            "de" => "German",
+            "it" => "Italian",
+            "pt" => "Portuguese",
+            "ru" => "Russian",
+            "zh" => "Chinese",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "ar" => "Arabic",
+            "hi" => "Hindi",
+            "nl" => "Dutch",
+            "pl" => "Polish",
+            "tr" => "Turkish",
+            "vi" => "Vietnamese",
+            "th" => "Thai",
+            "id" => "Indonesian",
+            "ms" => "Malay",
+            "sv" => "Swedish",
+            "da" => "Danish",
+            "no" => "Norwegian",
+            "fi" => "Finnish",
+            "cs" => "Czech",
+            "el" => "Greek",
+            "he" => "Hebrew",
+            "uk" => "Ukrainian",
+            _ => "English", // Default to English for unknown codes
+        }
     }
 
     /// Initialize AI clients from environment variables

@@ -295,7 +295,7 @@ impl AgentService {
         println!("[AGENT] Sending streaming message to agent: {}", agent.name);
 
         // Fetch user profile for personalization (optional)
-        let user_profile = crate::user_profile_service::UserProfileService::get_profile(db, "default_user".to_string())
+        let user_profile = crate::user_profile_service::UserProfileService::get_profile(db, agent.user_id.to_string())
             .await.ok().flatten();
 
         // Call AI client with agent's configuration and user profile (streaming)
