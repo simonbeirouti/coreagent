@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { hydrateCache, saveCache } from '@/lib/tauri-store';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 import { useEffect, useRef, useState } from 'react';
 
 // Create a client
@@ -8,15 +9,7 @@ function makeQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        // Desktop cache-first UX:
-        // - show hydrated data immediately
-        // - do not auto-refetch on remount/focus/reconnect
-        // - refresh only via explicit refetch/invalidation from active views
-        staleTime: Infinity,
-        gcTime: 24 * 60 * 60 * 1000, // Keep unused data for 24 hours
-        refetchOnMount: false,
-        refetchOnWindowFocus: false,
-        refetchOnReconnect: false,
+        ...cacheFirstStaticQueryPolicy,
         retry: (failureCount: number, error: unknown) => {
           // Don't retry on 4xx errors
           if (error instanceof Error && error.message.includes('4')) {

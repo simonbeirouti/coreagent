@@ -19,7 +19,7 @@ import {
     type ChartConfig,
 } from "@/components/ui/chart"
 
-interface ChatBarStackedProps {
+interface SentimentFeedbackProps {
     monthlyData: FeedbackMonthlyPoint[]
     positive: number
     negative: number
@@ -29,15 +29,15 @@ interface ChatBarStackedProps {
 const chartConfig = {
     positive: {
         label: "Positive",
-        color: "hsl(var(--chart-2))",
+        color: "hsl(var(--chart-3))",
     },
     negative: {
         label: "Negative",
-        color: "hsl(var(--destructive))",
+        color: "hsl(var(--chart-5))",
     },
 } satisfies ChartConfig
 
-export function ChatBarStacked({ monthlyData, positive, negative, isLoading = false }: ChatBarStackedProps) {
+export function SentimentFeedback({ monthlyData, positive, negative, isLoading = false }: SentimentFeedbackProps) {
     const total = positive + negative
     const totalLabel = isLoading ? "Loading feedback..." : `${total} total ratings`
 
@@ -62,8 +62,8 @@ export function ChatBarStacked({ monthlyData, positive, negative, isLoading = fa
                         />
                         <ChartTooltip content={<ChartTooltipContent hideLabel />} />
                         <ChartLegend content={<ChartLegendContent />} />
-                        <Bar dataKey="positive" stackId="a" fill="var(--chart-2)" radius={[0, 0, 4, 4]} />
-                        <Bar dataKey="negative" stackId="a" fill="var(--destructive)" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="positive" stackId="a" fill="var(--chart-3)" radius={[0, 0, 4, 4]} />
+                        <Bar dataKey="negative" stackId="a" fill="var(--chart-5)" radius={[4, 4, 0, 0]} />
                     </BarChart>
                 </ChartContainer>
             </CardContent>

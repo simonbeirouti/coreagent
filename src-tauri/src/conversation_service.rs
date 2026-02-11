@@ -237,6 +237,13 @@ impl ConversationService {
         )
         .await
         {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation.agent_id,
+                "memory_retrieval",
+                !memories.is_empty(),
+            )
+            .await;
             if !memories.is_empty() {
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
@@ -367,6 +374,13 @@ impl ConversationService {
         )
         .await
         {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation.agent_id,
+                "memory_retrieval",
+                !memories.is_empty(),
+            )
+            .await;
             if !memories.is_empty() {
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
@@ -661,6 +675,13 @@ impl ConversationService {
         )
         .await
         {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation.agent_id,
+                "memory_retrieval",
+                !memories.is_empty(),
+            )
+            .await;
             if !memories.is_empty() {
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
@@ -798,6 +819,13 @@ impl ConversationService {
         )
         .await
         {
+            let _ = AbilityService::track_ability_usage(
+                db,
+                conversation.agent_id,
+                "memory_retrieval",
+                !memories.is_empty(),
+            )
+            .await;
             if !memories.is_empty() {
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",

@@ -1,9 +1,20 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { BarChart3, ThumbsDown, ThumbsUp } from 'lucide-react';
-import { useAgentSkillRatings } from '@/hooks/useAbilities';
-import { useFeedbackMonthly, useFeedbackStats } from '@/hooks/useFeedback';
-import { ChatBarStacked } from '@/components/ui/chat-bar-stacked';
-import { ChartRadarDots } from '@/components/ui/chart-radar-dots';
+import { useEffect } from 'react';
+import { useAgentSkillRatingTrends, useAgentSkillRatings } from '@/hooks/useAbilities';
+import {
+  useFeedbackMonthly,
+  useFeedbackStats,
+  usePersonalityAdjustments,
+  useTraitState,
+} from '@/hooks/useFeedback';
+import { useMemoryQualityTimeseries } from '@/hooks/useMemory';
+import { SentimentFeedback } from '@/components/ui/chart-sentiment-feedback';
+import { CoreSkillPerformance } from '@/components/ui/chart-core-skill-performance';
+import { ChartMemoryHitNoHit } from '@/components/ui/chart-memory-hit-nohit';
+import { ChartMemoryQualityLines } from '@/components/ui/chart-memory-quality-lines';
+import { ChartSkillTrendArea } from '@/components/ui/chart-skill-trend-area';
+import { ChartTraitStateRadar } from '@/components/ui/chart-trait-state-radar';
+import { PersonalityEvolution } from '@/components/agent/personality-evolution';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const Route = createFileRoute('/agents/$agentId/dashboard')({
@@ -19,72 +30,79 @@ function AgentDashboardPage() {
   } = useAgentSkillRatings(agentId);
   const { data: feedbackStats, isLoading: isFeedbackLoading } = useFeedbackStats(agentId);
   const { data: feedbackMonthly = [], isLoading: isFeedbackMonthlyLoading } = useFeedbackMonthly(agentId);
-  const sortedRatings = skillRatings.slice().sort((a, b) => b.rating - a.rating);
-  const topSkill = sortedRatings[0];
-  const lowestSkill = sortedRatings[sortedRatings.length - 1];
-  const overallRating =
-    sortedRatings.length > 0
-      ? Math.round(
-          sortedRatings.reduce((total, entry) => total + entry.rating, 0) / sortedRatings.length
-        )
-      : 0;
+  const { data: traitState, isLoading: isTraitStateLoading } = useTraitState(agentId);
+  const { data: adjustments = [], isLoading: isAdjustmentsLoading } = usePersonalityAdjustments(agentId);
+  const { data: skillTrends = [], isLoading: isSkillTrendsLoading } = useAgentSkillRatingTrends(agentId, 14);
+  const { data: memoryTimeseries = [], isLoading: isMemoryTimeseriesLoading } =
+    useMemoryQualityTimeseries(agentId, 14);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+
+    console.groupCollapsed(`[DashboardData] agent=${agentId}`);
+    console.log('ChartSkillTrendArea.series', skillTrends);
+    console.log('ChartSkillTrendArea.fallbackRatings', skillRatings);
+    console.log('ChartMemoryHitNoHit.points', memoryTimeseries);
+    console.log('ChartMemoryQualityLines.points', memoryTimeseries);
+    console.log('ChartTraitStateRadar.traitState', traitState);
+    console.log('PersonalityEvolution.adjustments', adjustments);
+    console.log('PersonalityEvolution.traitState', traitState);
+    console.log('SentimentFeedback.monthlyData', feedbackMonthly);
+    console.log('SentimentFeedback.stats', feedbackStats);
+    console.log('CoreSkillPerformance.ratings', skillRatings);
+    console.groupEnd();
+  }, [
+    agentId,
+    adjustments,
+    feedbackMonthly,
+    feedbackStats,
+    memoryTimeseries,
+    skillRatings,
+    skillTrends,
+    traitState,
+  ]);
 
   return (
     <div className="p-4 space-y-4 overflow-y-auto">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <BarChart3 className="h-4 w-4" />
-              Overall Skill Rating
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="text-2xl font-semibold">
-              {isSkillRatingsLoading ? '...' : `${overallRating}%`}
-            </div>
-            {!isSkillRatingsLoading && topSkill && lowestSkill ? (
-              <div className="text-xs text-muted-foreground">
-                Top: {topSkill.skill_name} ({Math.round(topSkill.rating)}%) | Needs work:{' '}
-                {lowestSkill.skill_name} ({Math.round(lowestSkill.rating)}%)
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
+      <ChartSkillTrendArea
+        series={skillTrends}
+        fallbackRatings={skillRatings}
+        isLoading={isSkillTrendsLoading}
+      />
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+        <ChartMemoryHitNoHit points={memoryTimeseries} isLoading={isMemoryTimeseriesLoading} />
+        <ChartMemoryQualityLines points={memoryTimeseries} isLoading={isMemoryTimeseriesLoading} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartTraitStateRadar
+          traitState={traitState}
+          isLoading={isTraitStateLoading || isAdjustmentsLoading}
+        />
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <ThumbsUp className="h-4 w-4" />
-              Positive Feedback
-            </CardTitle>
+            <CardTitle className="text-sm">Personality Evolution Timeline</CardTitle>
           </CardHeader>
-          <CardContent className="text-2xl font-semibold">
-            {isFeedbackLoading ? '...' : (feedbackStats?.positive ?? 0)}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <ThumbsDown className="h-4 w-4" />
-              Negative Feedback
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="text-2xl font-semibold">
-            {isFeedbackLoading ? '...' : (feedbackStats?.negative ?? 0)}
+          <CardContent>
+            <PersonalityEvolution
+              adjustments={adjustments}
+              traitState={traitState}
+              isLoading={isAdjustmentsLoading}
+            />
           </CardContent>
         </Card>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 lg:auto-rows-fr gap-4 items-stretch">
-        <ChatBarStacked
+        <SentimentFeedback
           monthlyData={feedbackMonthly}
           positive={feedbackStats?.positive ?? 0}
           negative={feedbackStats?.negative ?? 0}
           isLoading={isFeedbackLoading || isFeedbackMonthlyLoading}
         />
-        <ChartRadarDots
+        <CoreSkillPerformance
           ratings={skillRatings}
           isLoading={isSkillRatingsLoading}
           errorMessage={skillRatingsError ? String(skillRatingsError) : undefined}

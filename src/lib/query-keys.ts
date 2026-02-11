@@ -25,6 +25,8 @@ export const abilityKeys = {
   all: ['abilities'] as const,
   agent: (agentId: string) => [...abilityKeys.all, 'agent', agentId] as const,
   skillRatings: (agentId: string) => [...abilityKeys.all, 'skill-ratings', agentId] as const,
+  skillTrends: (agentId: string, days: number) =>
+    [...abilityKeys.all, 'skill-trends', agentId, days] as const,
 };
 
 export const feedbackKeys = {
@@ -33,6 +35,7 @@ export const feedbackKeys = {
   monthly: (agentId: string) => [...feedbackKeys.all, 'monthly', agentId] as const,
   adjustments: (agentId: string) =>
     [...feedbackKeys.all, 'adjustments', agentId] as const,
+  traitState: (agentId: string) => [...feedbackKeys.all, 'trait-state', agentId] as const,
   conversation: (conversationId: string, userId: string) =>
     [...feedbackKeys.all, 'conversation', conversationId, userId] as const,
 };
@@ -41,6 +44,10 @@ export const memoryKeys = {
   all: ['memory'] as const,
   search: (agentId: string, query: string, conversationId?: string) =>
     [...memoryKeys.all, 'search', agentId, query, conversationId] as const,
+  quality: (agentId: string, days: number) =>
+    [...memoryKeys.all, 'quality', agentId, days] as const,
+  qualityTimeseries: (agentId: string, days: number) =>
+    [...memoryKeys.all, 'quality-timeseries', agentId, days] as const,
 };
 
 export const perceptionKeys = {

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import { feedbackKeys } from '@/lib/query-keys';
+import { abilityKeys, feedbackKeys } from '@/lib/query-keys';
+import { cacheFirstStaticQueryPolicy, dynamic30sQueryPolicy } from '@/lib/query-policies';
 
 export type FeedbackType = 'positive' | 'negative' | 'neutral';
 export type FeedbackCategory = 'helpfulness' | 'accuracy' | 'tone' | 'verbosity';
@@ -25,6 +26,18 @@ export interface PersonalityAdjustment {
   new_value: number;
   reason?: string | null;
   created_at: string;
+}
+
+export interface TraitState {
+  agent_id: string;
+  helpfulness: number;
+  formality: number;
+  verbosity: number;
+  proactivity: number;
+  creativity: number;
+  empathy: number;
+  adaptation_enabled: boolean;
+  updated_at: string;
 }
 
 interface SubmitFeedbackRequest {
@@ -120,9 +133,22 @@ export function useSubmitFeedback(agentId?: string) {
     },
     onSuccess: (_data, request) => {
       if (agentId) {
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.monthly(agentId) });
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
+        queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId), refetchType: 'all' });
+        queryClient.invalidateQueries({ queryKey: feedbackKeys.monthly(agentId), refetchType: 'all' });
+        queryClient.invalidateQueries({
+          queryKey: feedbackKeys.adjustments(agentId),
+          refetchType: 'all',
+        });
+        queryClient.invalidateQueries({ queryKey: feedbackKeys.traitState(agentId), refetchType: 'all' });
+        queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId), refetchType: 'all' });
+        queryClient.invalidateQueries({
+          predicate: (query) =>
+            Array.isArray(query.queryKey) &&
+            query.queryKey[0] === abilityKeys.all[0] &&
+            query.queryKey[1] === 'skill-trends' &&
+            query.queryKey[2] === agentId,
+          refetchType: 'all',
+        });
       }
 
       if (request.conversation_id && request.user_id) {
@@ -185,11 +211,7 @@ export function useConversationFeedback(conversationId: string, userId: string) 
       return invoke('get_conversation_feedback', { conversationId, userId });
     },
     enabled: !!conversationId && !!userId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...cacheFirstStaticQueryPolicy,
     placeholderData: {},
   });
 }
@@ -201,11 +223,7 @@ export function useFeedbackStats(agentId: string) {
       return invoke('get_agent_feedback_stats', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...dynamic30sQueryPolicy,
   });
 }
 
@@ -216,11 +234,7 @@ export function useFeedbackMonthly(agentId: string) {
       return invoke('get_agent_feedback_monthly', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...dynamic30sQueryPolicy,
   });
 }
 
@@ -231,11 +245,44 @@ export function usePersonalityAdjustments(agentId: string) {
       return invoke('list_personality_adjustments', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...dynamic30sQueryPolicy,
+  });
+}
+
+export function useTraitState(agentId: string) {
+  return useQuery({
+    queryKey: feedbackKeys.traitState(agentId),
+    queryFn: async (): Promise<TraitState> => {
+      return invoke('get_agent_trait_state', { agentId });
+    },
+    enabled: !!agentId,
+    ...dynamic30sQueryPolicy,
+  });
+}
+
+export function useSetAdaptationEnabled(agentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (enabled: boolean): Promise<TraitState> => {
+      return invoke('set_agent_adaptation_enabled', { agentId, enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.traitState(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+    },
+  });
+}
+
+export function useRevertLastAdaptationCycle(agentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      return invoke('revert_agent_last_adaptation_cycle', { agentId });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.traitState(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+    },
   });
 }
 
@@ -246,8 +293,8 @@ export function useAnalyzeFeedbackPatterns(agentId: string) {
       return invoke('analyze_agent_feedback_patterns', { agentId });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
-      queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId), refetchType: 'all' });
     },
   });
 }

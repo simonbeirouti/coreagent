@@ -22,13 +22,18 @@ mod input_sanitizer;
 
 use tauri::{Manager, ipc::Channel};
 use auth::{AuthState, SessionData};
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use agent_service::{AgentService, CreateAgentRequest, UpdateAgentRequest};
 use ability_service::AbilityService;
 use conversation_service::{ConversationService, CreateConversationRequest, TranscriptEntry};
 use ai_client::AiClient;
-use feedback_service::{FeedbackService, SubmitFeedbackRequest};
-use memory_service::{MemoryService, SimilarMessage};
+use feedback_service::{
+    AdaptationCycleData, FeedbackService, SubmitFeedbackRequest, TraitStateData,
+};
+use memory_service::{
+    MemoryRetrievalQualitySummary, MemoryRetrievalTimeseriesPoint, MemoryService, RetrievalEvalResult,
+    SimilarMessage,
+};
 use perception_tracker::{PerceptionTracker, PerceptionStat};
 use audio_service::{AudioService, RecordingResult};
 use vision_service::{VisionService, ScreenshotResult};
@@ -556,6 +561,15 @@ async fn get_agent_skill_ratings(
 }
 
 #[tauri::command]
+async fn get_agent_skill_rating_trends(
+    agent_id: String,
+    days: Option<i32>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<ability_service::SkillRatingTrendSeries>, String> {
+    AbilityService::get_agent_skill_rating_trends(&db, agent_id, days.unwrap_or(14)).await
+}
+
+#[tauri::command]
 async fn get_relevant_memories(
     agent_id: String,
     query: String,
@@ -585,11 +599,65 @@ async fn get_relevant_memories(
 }
 
 #[tauri::command]
+async fn get_agent_retrieval_quality_summary(
+    agent_id: String,
+    days: Option<i32>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<MemoryRetrievalQualitySummary, String> {
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    MemoryService::get_retrieval_quality_summary(&db, agent_uuid, days.unwrap_or(14)).await
+}
+
+#[tauri::command]
+async fn get_agent_retrieval_quality_timeseries(
+    agent_id: String,
+    days: Option<i32>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<MemoryRetrievalTimeseriesPoint>, String> {
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    MemoryService::get_retrieval_quality_timeseries(&db, agent_uuid, days.unwrap_or(14)).await
+}
+
+#[tauri::command]
+async fn run_agent_retrieval_eval(
+    agent_id: String,
+    sample_size: Option<i32>,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<RetrievalEvalResult, String> {
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    MemoryService::run_retrieval_eval(&db, agent_uuid, sample_size.unwrap_or(20)).await
+}
+
+#[tauri::command]
 async fn submit_message_feedback(
     request: SubmitFeedbackRequest,
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<(), String> {
-    FeedbackService::submit_feedback(&db, request).await
+    let message_id =
+        uuid::Uuid::parse_str(&request.message_id).map_err(|e| format!("Invalid message_id: {e}"))?;
+    FeedbackService::submit_feedback(&db, request).await?;
+
+    // Trigger adaptive cycle best-effort after each feedback write.
+    let message = entities::messages::Entity::find_by_id(message_id)
+        .one(&*db)
+        .await
+        .map_err(|e| format!("Failed loading message after feedback submit: {e}"))?;
+    if let Some(message) = message {
+        if let Some(conversation) = entities::conversations::Entity::find_by_id(message.conversation_id)
+            .one(&*db)
+            .await
+            .map_err(|e| format!("Failed loading conversation after feedback submit: {e}"))?
+        {
+            if let Err(err) = FeedbackService::run_adaptation_cycle(&db, conversation.agent_id).await {
+                eprintln!(
+                    "[FEEDBACK] Adaptive cycle execution failed for agent {}: {}",
+                    conversation.agent_id, err
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -623,6 +691,31 @@ async fn analyze_agent_feedback_patterns(
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<Vec<feedback_service::PersonalityAdjustmentData>, String> {
     FeedbackService::analyze_feedback_patterns(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn get_agent_trait_state(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<TraitStateData, String> {
+    FeedbackService::get_trait_state(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn set_agent_adaptation_enabled(
+    agent_id: String,
+    enabled: bool,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<TraitStateData, String> {
+    FeedbackService::set_adaptation_enabled(&db, agent_id, enabled).await
+}
+
+#[tauri::command]
+async fn revert_agent_last_adaptation_cycle(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Option<AdaptationCycleData>, String> {
+    FeedbackService::revert_last_adaptation_cycle(&db, agent_id).await
 }
 
 #[tauri::command]
@@ -715,12 +808,19 @@ pub fn run() {
             // Skill tracking + memory + feedback
             list_agent_abilities,
             get_agent_skill_ratings,
+            get_agent_skill_rating_trends,
             get_relevant_memories,
+            get_agent_retrieval_quality_summary,
+            get_agent_retrieval_quality_timeseries,
+            run_agent_retrieval_eval,
             submit_message_feedback,
             get_agent_feedback_stats,
             get_agent_feedback_monthly,
             get_conversation_feedback,
             analyze_agent_feedback_patterns,
+            get_agent_trait_state,
+            set_agent_adaptation_enabled,
+            revert_agent_last_adaptation_cycle,
             list_personality_adjustments,
             // Realtime voice chat
             get_realtime_session_token

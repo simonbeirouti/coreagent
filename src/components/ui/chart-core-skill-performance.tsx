@@ -1,6 +1,6 @@
 "use client"
 
-import { LabelList, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart } from "recharts"
+import { PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart } from "recharts"
 import type { SkillPerformanceRating } from "@/hooks/useAbilities"
 
 import {
@@ -17,7 +17,7 @@ import {
     type ChartConfig,
 } from "@/components/ui/chart"
 
-interface ChartRadarDotsProps {
+interface CoreSkillPerformanceProps {
     ratings: SkillPerformanceRating[]
     isLoading?: boolean
     errorMessage?: string
@@ -30,11 +30,11 @@ const chartConfig = {
     },
 } satisfies ChartConfig
 
-export function ChartRadarDots({
+export function CoreSkillPerformance({
     ratings,
     isLoading = false,
     errorMessage,
-}: ChartRadarDotsProps) {
+}: CoreSkillPerformanceProps) {
     const ratingData = ratings
         .slice()
         .sort((a, b) => b.rating - a.rating)
@@ -64,16 +64,13 @@ export function ChartRadarDots({
                         ? "Loading skill ratings..."
                         : errorMessage
                             ? "Skill ratings unavailable"
-                        : ratings.length > 0
-                            ? `${ratings.length} rated skills`
-                            : "No rating data yet"}
+                            : ratings.length > 0
+                                ? `${ratings.length} rated skills`
+                                : "No rating data yet"}
                 </div>
             </CardHeader>
-            <CardContent className="flex-1 -mb-28">
-                <ChartContainer
-                    config={chartConfig}
-                    className="mx-auto h-full w-full aspect-auto"
-                >
+            <CardContent className="flex-1">
+                <ChartContainer config={chartConfig} className="mx-auto h-full w-full aspect-auto">
                     <RadarChart data={chartData}>
                         <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
                         <PolarAngleAxis dataKey="skill" />
@@ -81,20 +78,13 @@ export function ChartRadarDots({
                         <PolarGrid />
                         <Radar
                             dataKey="rating"
-                            fill="var(--color-rating)"
+                            fill="var(--chart-2)"
                             fillOpacity={0.6}
                             dot={{
                                 r: 4,
                                 fillOpacity: 1,
                             }}
-                        >
-                            <LabelList
-                                dataKey="rating"
-                                position="outside"
-                                formatter={(value: number) => `${value}%`}
-                                className="fill-foreground text-xs font-medium"
-                            />
-                        </Radar>
+                        />
                     </RadarChart>
                 </ChartContainer>
             </CardContent>

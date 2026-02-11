@@ -32,6 +32,7 @@ import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
 import { MessageFeedback } from '@/components/feedback/message-feedback';
+import { MarkdownContent } from '@/components/ui/markdown-content';
 import { useConversationFeedback } from '@/hooks/useFeedback';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
@@ -737,9 +738,7 @@ function AgentChatPage() {
                                   <MessageImage content={message.content} />
                                   {/* Render text content */}
                                   {getTextContent(message.content) && (
-                                    <div className="text-sm whitespace-pre-wrap">
-                                      {getTextContent(message.content)}
-                                    </div>
+                                    <MarkdownContent content={getTextContent(message.content)} />
                                   )}
                                   <div className="text-xs opacity-70 mt-2">
                                     {new Date(message.created_at).toLocaleTimeString()}
@@ -797,9 +796,7 @@ function AgentChatPage() {
                   <div className="flex justify-start">
                     <Card className="max-w-[80%] p-0 bg-muted">
                       <CardContent className="p-3">
-                        <div className="text-sm whitespace-pre-wrap">
-                          {editMessageStreaming.streamingContent}
-                        </div>
+                        <MarkdownContent content={editMessageStreaming.streamingContent} />
                         <div className="flex items-center gap-2 mt-2">
                           <Loader2 className="h-3 w-3 animate-spin" />
                           <span className="text-xs opacity-70">AI is responding...</span>
@@ -814,9 +811,7 @@ function AgentChatPage() {
                     <Card className="max-w-[80%] p-0 bg-muted">
                       <CardContent className="p-3">
                         {sendMessageStreaming.streamingContent ? (
-                          <div className="text-sm whitespace-pre-wrap">
-                            {sendMessageStreaming.streamingContent}
-                          </div>
+                          <MarkdownContent content={sendMessageStreaming.streamingContent} />
                         ) : (
                           <div className="flex items-center gap-2">
                             <Loader2 className="h-3 w-3 animate-spin" />

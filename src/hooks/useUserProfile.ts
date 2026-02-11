@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 import type { UserProfile, UpdateUserProfileRequest } from '../types/user-profile';
 import { userProfileKeys } from '@/lib/query-keys';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 
 export { userProfileKeys };
 
@@ -17,8 +18,7 @@ export function useUserProfile(userId: string) {
       return await invoke('get_user_profile', { userId });
     },
     enabled: !!userId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
+    ...cacheFirstStaticQueryPolicy,
     initialData,
     initialDataUpdatedAt,
   });

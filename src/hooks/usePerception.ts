@@ -5,6 +5,7 @@ import { startRecording as pluginStartRecording, stopRecording as pluginStopReco
 import { uploadScreenshot, compressImage } from '@/lib/storage';
 import { useAuth } from '@/hooks/use-auth';
 import { abilityKeys, perceptionKeys } from '@/lib/query-keys';
+import { dynamic30sQueryPolicy } from '@/lib/query-policies';
 
 export interface ScreenshotResult {
   image_base64: string;
@@ -102,9 +103,9 @@ export function useVision(agentId: string) {
       console.error('Screenshot capture failed:', error);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: perceptionKeys.stats(agentId) });
-      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
-      queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+      queryClient.invalidateQueries({ queryKey: perceptionKeys.stats(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId), refetchType: 'all' });
     },
   });
 
@@ -197,11 +198,7 @@ export function usePerceptionStats(agentId: string) {
       return invoke('get_perception_stats', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...dynamic30sQueryPolicy,
   });
 }
 
