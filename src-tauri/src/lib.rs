@@ -32,6 +32,7 @@ use feedback_service::{
 };
 use memory_service::{
     MemoryRetrievalQualitySummary, MemoryRetrievalTimeseriesPoint, MemoryService, RetrievalEvalResult,
+    RetrievalTuningStatus,
     SimilarMessage,
 };
 use perception_tracker::{PerceptionTracker, PerceptionStat};
@@ -629,33 +630,76 @@ async fn run_agent_retrieval_eval(
 }
 
 #[tauri::command]
+async fn get_agent_retrieval_tuning_status(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<RetrievalTuningStatus, String> {
+    let agent_uuid = uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    MemoryService::get_retrieval_tuning_status(&db, agent_uuid).await
+}
+
+#[tauri::command]
 async fn submit_message_feedback(
     request: SubmitFeedbackRequest,
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<(), String> {
+    let submit_started = std::time::Instant::now();
     let message_id =
         uuid::Uuid::parse_str(&request.message_id).map_err(|e| format!("Invalid message_id: {e}"))?;
     FeedbackService::submit_feedback(&db, request).await?;
+    eprintln!(
+        "[FEEDBACK] submit_message_feedback write completed in {}ms",
+        submit_started.elapsed().as_millis()
+    );
 
-    // Trigger adaptive cycle best-effort after each feedback write.
-    let message = entities::messages::Entity::find_by_id(message_id)
-        .one(&*db)
-        .await
-        .map_err(|e| format!("Failed loading message after feedback submit: {e}"))?;
-    if let Some(message) = message {
-        if let Some(conversation) = entities::conversations::Entity::find_by_id(message.conversation_id)
-            .one(&*db)
-            .await
-            .map_err(|e| format!("Failed loading conversation after feedback submit: {e}"))?
-        {
-            if let Err(err) = FeedbackService::run_adaptation_cycle(&db, conversation.agent_id).await {
-                eprintln!(
-                    "[FEEDBACK] Adaptive cycle execution failed for agent {}: {}",
-                    conversation.agent_id, err
-                );
+    // Run adaptation best-effort in the background so UI is unblocked.
+    let db_for_task = (*db).clone();
+    tauri::async_runtime::spawn(async move {
+        let adaptation_started = std::time::Instant::now();
+        let message = match entities::messages::Entity::find_by_id(message_id).one(&db_for_task).await {
+            Ok(message) => message,
+            Err(err) => {
+                eprintln!("[FEEDBACK] Background adaptation skipped: message lookup failed: {}", err);
+                return;
             }
+        };
+
+        let Some(message) = message else {
+            return;
+        };
+
+        let conversation = match entities::conversations::Entity::find_by_id(message.conversation_id)
+            .one(&db_for_task)
+            .await
+        {
+            Ok(conversation) => conversation,
+            Err(err) => {
+                eprintln!(
+                    "[FEEDBACK] Background adaptation skipped: conversation lookup failed: {}",
+                    err
+                );
+                return;
+            }
+        };
+
+        let Some(conversation) = conversation else {
+            return;
+        };
+
+        if let Err(err) = FeedbackService::run_adaptation_cycle(&db_for_task, conversation.agent_id).await {
+            eprintln!(
+                "[FEEDBACK] Adaptive cycle execution failed for agent {}: {}",
+                conversation.agent_id, err
+            );
+            return;
         }
-    }
+
+        eprintln!(
+            "[FEEDBACK] Background adaptation completed for agent {} in {}ms",
+            conversation.agent_id,
+            adaptation_started.elapsed().as_millis()
+        );
+    });
 
     Ok(())
 }
@@ -683,6 +727,15 @@ async fn get_conversation_feedback(
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<std::collections::HashMap<String, String>, String> {
     FeedbackService::get_conversation_feedback(&db, conversation_id, user_id).await
+}
+
+#[tauri::command]
+async fn get_conversation_dimension_feedback(
+    conversation_id: String,
+    user_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, String>>, String> {
+    FeedbackService::get_conversation_dimension_feedback(&db, conversation_id, user_id).await
 }
 
 #[tauri::command]
@@ -813,10 +866,12 @@ pub fn run() {
             get_agent_retrieval_quality_summary,
             get_agent_retrieval_quality_timeseries,
             run_agent_retrieval_eval,
+            get_agent_retrieval_tuning_status,
             submit_message_feedback,
             get_agent_feedback_stats,
             get_agent_feedback_monthly,
             get_conversation_feedback,
+            get_conversation_dimension_feedback,
             analyze_agent_feedback_patterns,
             get_agent_trait_state,
             set_agent_adaptation_enabled,

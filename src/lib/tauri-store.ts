@@ -120,6 +120,8 @@ export async function clearCache(): Promise<void> {
   try {
     const store = await getCacheStore();
     await store.delete('cache');
+    memoryCache = null;
+    cacheInitPromise = null;
     console.log('[Cache] Cleared cached queries');
   } catch (error) {
     console.warn('[Cache] Failed to clear cache:', error);

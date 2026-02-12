@@ -50,6 +50,7 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const hydrationStartedRef = useRef(false);
+  const startupRevalidationDoneRef = useRef(false);
 
   // Hydrate persisted cache before mounting query consumers.
   useEffect(() => {
@@ -64,6 +65,15 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
         setIsHydrated(true);
       });
   }, [queryClient]);
+
+  // After cache hydration, revalidate active queries once per app boot.
+  // This keeps startup fast from cache while still pulling fresh server state.
+  useEffect(() => {
+    if (!isHydrated || startupRevalidationDoneRef.current) return;
+    startupRevalidationDoneRef.current = true;
+
+    void queryClient.invalidateQueries({ refetchType: 'active' });
+  }, [isHydrated, queryClient]);
 
   // Subscribe to cache changes and persist them
   useEffect(() => {

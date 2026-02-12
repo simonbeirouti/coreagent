@@ -14,11 +14,14 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 
 interface ChartSkillTrendAreaProps {
   series: SkillRatingTrendSeries[]
   fallbackRatings?: SkillPerformanceRating[]
   isLoading?: boolean
+  isFetching?: boolean
+  errorMessage?: string
 }
 
 const chartConfig = {
@@ -44,6 +47,8 @@ export function ChartSkillTrendArea({
   series,
   fallbackRatings = [],
   isLoading = false,
+  isFetching = false,
+  errorMessage,
 }: ChartSkillTrendAreaProps) {
   const [timeRange, setTimeRange] = React.useState("14d")
 
@@ -100,6 +105,9 @@ export function ChartSkillTrendArea({
       : []
   const hasTrendData = filteredData.length > 0
   const chartData = hasTrendData ? filteredData : fallbackChartData
+  const hasData = chartData.length > 0
+  const showSkeleton = isLoading && !hasData
+  const showError = Boolean(errorMessage) && !hasData
 
   const dynamicConfig = {
     ...chartConfig,
@@ -120,6 +128,9 @@ export function ChartSkillTrendArea({
           <CardTitle>Skill Trend Highlights</CardTitle>
           <CardDescription>Top skill trajectories by rating</CardDescription>
         </div>
+        <div className="text-xs text-muted-foreground whitespace-nowrap">
+          {showSkeleton ? "Loading..." : isFetching ? "Updating..." : " "}
+        </div>
         <Select value={timeRange} onValueChange={setTimeRange}>
           <SelectTrigger className="w-[160px] rounded-lg sm:ml-auto" aria-label="Select time range">
             <SelectValue placeholder="Last 14 days" />
@@ -138,10 +149,19 @@ export function ChartSkillTrendArea({
         </Select>
       </CardHeader>
       <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        {isLoading ? (
-          <div className="text-sm text-muted-foreground">Loading trend data...</div>
+        {showSkeleton ? (
+          <div className="space-y-3 h-[280px] w-full">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-[240px] w-full" />
+          </div>
+        ) : showError ? (
+          <div className="h-[280px] w-full text-sm text-destructive flex items-center justify-center">
+            Unable to load skill trends right now.
+          </div>
         ) : chartData.length === 0 ? (
-          <div className="text-sm text-muted-foreground">No trend snapshots yet.</div>
+          <div className="h-[280px] w-full text-sm text-muted-foreground flex items-center justify-center">
+            No trend snapshots yet.
+          </div>
         ) : (
           <ChartContainer config={dynamicConfig} className="aspect-auto h-[280px] w-full">
             <AreaChart data={chartData}>

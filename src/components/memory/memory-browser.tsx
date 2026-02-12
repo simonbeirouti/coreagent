@@ -45,6 +45,10 @@ export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
         queryKey: memoryKeys.qualityTimeseries(agentId, 14),
         refetchType: 'all',
       }),
+      queryClient.invalidateQueries({
+        queryKey: memoryKeys.tuningStatus(agentId),
+        refetchType: 'all',
+      }),
     ]);
   }, [agentId, isFetching, isLoading, queryClient, submittedQuery]);
 

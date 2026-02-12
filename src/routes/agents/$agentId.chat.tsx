@@ -14,6 +14,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -33,7 +36,7 @@ import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
 import { MessageFeedback } from '@/components/feedback/message-feedback';
 import { MarkdownContent } from '@/components/ui/markdown-content';
-import { useConversationFeedback } from '@/hooks/useFeedback';
+import { useConversationDimensionFeedback } from '@/hooks/useFeedback';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
@@ -220,7 +223,7 @@ function AgentChatPage() {
   const [deleteConfirmMessageId, setDeleteConfirmMessageId] = useState<string | null>(null);
 
   const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
-  const { data: feedbackByMessage = {} } = useConversationFeedback(activeConversationId || '', userId);
+  const { data: feedbackByMessage = {} } = useConversationDimensionFeedback(activeConversationId || '', userId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
@@ -670,6 +673,23 @@ function AgentChatPage() {
                                     Edit
                                   </DropdownMenuItem>
                                 )}
+                                {message.role === 'assistant' && userId ? (
+                                  <DropdownMenuSub>
+                                    <DropdownMenuSubTrigger>
+                                      Feedback
+                                    </DropdownMenuSubTrigger>
+                                    <DropdownMenuSubContent className="w-52">
+                                      <MessageFeedback
+                                        agentId={agentId}
+                                        conversationId={activeConversationId || ''}
+                                        messageId={message.id}
+                                        userId={userId}
+                                        selected={feedbackByMessage[message.id]}
+                                        mode="menu"
+                                      />
+                                    </DropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                ) : null}
                                 <DropdownMenuItem
                                   variant="destructive"
                                   onClick={() => setDeleteConfirmMessageId(message.id)}
@@ -743,15 +763,6 @@ function AgentChatPage() {
                                   <div className="text-xs opacity-70 mt-2">
                                     {new Date(message.created_at).toLocaleTimeString()}
                                   </div>
-                                  {message.role === 'assistant' && userId ? (
-                                    <MessageFeedback
-                                      agentId={agentId}
-                                      conversationId={activeConversationId || ''}
-                                      messageId={message.id}
-                                      userId={userId}
-                                      selected={feedbackByMessage[message.id] ?? null}
-                                    />
-                                  ) : null}
                                 </>
                               )}
                             </CardContent>

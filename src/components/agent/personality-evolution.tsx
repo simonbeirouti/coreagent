@@ -6,11 +6,14 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface PersonalityEvolutionProps {
   adjustments: PersonalityAdjustment[];
   traitState?: TraitState;
   isLoading?: boolean;
+  isFetching?: boolean;
+  errorMessage?: string;
 }
 
 const chartConfig = {
@@ -20,17 +23,45 @@ const chartConfig = {
   },
 } satisfies ChartConfig;
 
+function toFiniteNumber(value: unknown, fallback = 0): number {
+  const next = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(next) ? next : fallback;
+}
+
 export function PersonalityEvolution({
   adjustments,
   traitState,
   isLoading = false,
+  isFetching = false,
+  errorMessage,
 }: PersonalityEvolutionProps) {
-  if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading personality evolution...</p>;
+  const hasData = adjustments.length > 0;
+  const showSkeleton = isLoading && !hasData;
+  const showError = Boolean(errorMessage) && !hasData;
+
+  if (showSkeleton) {
+    return (
+      <div className="flex h-full min-h-[260px] w-full flex-col gap-3">
+        <Skeleton className="h-4 w-44" />
+        <Skeleton className="h-full min-h-[200px] w-full" />
+      </div>
+    );
+  }
+
+  if (showError) {
+    return (
+      <div className="flex h-full min-h-[260px] w-full items-center justify-center text-sm text-destructive">
+        Unable to load personality timeline right now.
+      </div>
+    );
   }
 
   if (!adjustments.length) {
-    return <p className="text-sm text-muted-foreground">No personality adjustments yet.</p>;
+    return (
+      <div className="flex h-full min-h-[260px] w-full items-center justify-center text-sm text-muted-foreground">
+        No personality adjustments yet.
+      </div>
+    );
   }
 
   const recent = adjustments
@@ -39,13 +70,13 @@ export function PersonalityEvolution({
     .slice(-12);
   const chartData = recent.map((adj) => ({
     date: adj.created_at,
-    value: Math.round(adj.new_value * 100),
+    value: Math.round(toFiniteNumber(adj.new_value) * 100),
     trait: adj.trait_name,
   }));
 
   return (
-    <div className="space-y-4">
-      <ChartContainer config={chartConfig} className="h-[220px] w-full aspect-auto">
+    <div className="flex h-full min-h-[260px] flex-col gap-4">
+      <ChartContainer config={chartConfig} className="flex-1 min-h-[200px] w-full aspect-auto">
         <LineChart data={chartData}>
           <CartesianGrid vertical={false} />
           <XAxis
@@ -86,27 +117,11 @@ export function PersonalityEvolution({
       </ChartContainer>
 
       <div className="text-xs text-muted-foreground">
+        {isFetching ? "Updating timeline... " : null}
         Latest trait update:{" "}
         {traitState?.updated_at
           ? new Date(traitState.updated_at).toLocaleString()
           : "Not available"}
-      </div>
-
-      <div className="space-y-3">
-        {adjustments.slice(0, 6).map((adj) => (
-        <div key={adj.id} className="rounded-md border p-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-medium">{adj.trait_name}</span>
-            <span className="text-muted-foreground">
-              {new Date(adj.created_at).toLocaleDateString()}
-            </span>
-          </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {adj.old_value.toFixed(2)} -&gt; {adj.new_value.toFixed(2)}
-          </div>
-          {adj.reason ? <div className="mt-1 text-xs">{adj.reason}</div> : null}
-        </div>
-      ))}
       </div>
     </div>
   );

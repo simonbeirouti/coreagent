@@ -10,8 +10,8 @@ pub struct Model {
     pub id: Uuid,
     pub agent_id: Uuid,
     pub trait_name: String,
-    pub old_value: f32,
-    pub new_value: f32,
+    pub old_value: f64,
+    pub new_value: f64,
     pub reason: Option<String>,
     pub created_at: DateTimeWithTimeZone,
 }

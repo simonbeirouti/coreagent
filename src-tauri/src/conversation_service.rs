@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
 use crate::ability_service::AbilityService;
+use crate::feedback_service::FeedbackService;
 use crate::input_sanitizer::sanitize_message;
 use crate::memory_service::MemoryService;
 
@@ -72,6 +73,18 @@ impl From<messages::Model> for MessageData {
 pub struct ConversationService;
 
 impl ConversationService {
+    fn spawn_message_quality_scoring(db: &DatabaseConnection, message_id: Uuid) {
+        let db_for_task = db.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = FeedbackService::score_assistant_message_quality(&db_for_task, message_id).await {
+                eprintln!(
+                    "[CONVERSATION] Failed background message quality scoring for message {}: {}",
+                    message_id, err
+                );
+            }
+        });
+    }
+
     /// Create a new conversation
     pub async fn create_conversation(
         db: &DatabaseConnection,
@@ -277,6 +290,7 @@ impl ConversationService {
 
         let saved_message = assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+        Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
         let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
@@ -415,6 +429,7 @@ impl ConversationService {
 
         let saved_message = assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+        Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
         let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
@@ -715,6 +730,7 @@ impl ConversationService {
 
         let saved_assistant_message = new_assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+        Self::spawn_message_quality_scoring(db, saved_assistant_message.id);
 
         // Embed branch user + assistant messages (best-effort).
         let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
@@ -860,6 +876,7 @@ impl ConversationService {
 
         let saved_assistant_message = new_assistant_message.insert(db).await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
+        Self::spawn_message_quality_scoring(db, saved_assistant_message.id);
 
         // Embed branch user + assistant messages (best-effort).
         let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
@@ -935,6 +952,9 @@ impl ConversationService {
 
             let saved = message.insert(db).await
                 .map_err(|e| format!("Failed to save transcript entry: {}", e))?;
+            if saved.role == "assistant" {
+                Self::spawn_message_quality_scoring(db, saved.id);
+            }
             
             saved_messages.push(saved.into());
             let _ = MemoryService::embed_message_content(db, new_message_id, &sanitized_text_content).await;

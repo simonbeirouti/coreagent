@@ -16,10 +16,12 @@ import {
     ChartTooltipContent,
     type ChartConfig,
 } from "@/components/ui/chart"
+import { Skeleton } from "@/components/ui/skeleton"
 
 interface CoreSkillPerformanceProps {
     ratings: SkillPerformanceRating[]
     isLoading?: boolean
+    isFetching?: boolean
     errorMessage?: string
 }
 
@@ -33,6 +35,7 @@ const chartConfig = {
 export function CoreSkillPerformance({
     ratings,
     isLoading = false,
+    isFetching = false,
     errorMessage,
 }: CoreSkillPerformanceProps) {
     const ratingData = ratings
@@ -51,6 +54,9 @@ export function CoreSkillPerformance({
     ]
 
     const chartData = ratingData.length > 0 ? ratingData : fallbackData
+    const hasData = ratingData.length > 0
+    const showSkeleton = isLoading && !hasData
+    const showError = Boolean(errorMessage) && !hasData
 
     return (
         <Card className="h-full flex flex-col">
@@ -60,8 +66,10 @@ export function CoreSkillPerformance({
                     <CardDescription>Balanced rating for chat, voice, and screenshot</CardDescription>
                 </div>
                 <div className="text-sm text-muted-foreground whitespace-nowrap">
-                    {isLoading
+                    {showSkeleton
                         ? "Loading skill ratings..."
+                        : isFetching
+                            ? "Updating..."
                         : errorMessage
                             ? "Skill ratings unavailable"
                             : ratings.length > 0
@@ -69,24 +77,35 @@ export function CoreSkillPerformance({
                                 : "No rating data yet"}
                 </div>
             </CardHeader>
-            <CardContent className="flex-1">
-                <ChartContainer config={chartConfig} className="mx-auto h-full w-full aspect-auto">
-                    <RadarChart data={chartData}>
-                        <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
-                        <PolarAngleAxis dataKey="skill" />
-                        <PolarRadiusAxis angle={90} domain={[0, 100]} tickCount={6} />
-                        <PolarGrid />
-                        <Radar
-                            dataKey="rating"
-                            fill="var(--chart-2)"
-                            fillOpacity={0.6}
-                            dot={{
-                                r: 4,
-                                fillOpacity: 1,
-                            }}
-                        />
-                    </RadarChart>
-                </ChartContainer>
+            <CardContent className="flex flex-1">
+                {showSkeleton ? (
+                    <div className="flex h-full min-h-[300px] w-full flex-col gap-3">
+                        <Skeleton className="h-4 w-40" />
+                        <Skeleton className="h-full min-h-[260px] w-full" />
+                    </div>
+                ) : showError ? (
+                    <div className="flex h-full min-h-[300px] w-full items-center justify-center text-sm text-destructive">
+                        Unable to load core skill ratings right now.
+                    </div>
+                ) : (
+                    <ChartContainer config={chartConfig} className="mx-auto h-full min-h-[300px] w-full aspect-auto">
+                        <RadarChart data={chartData}>
+                            <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
+                            <PolarAngleAxis dataKey="skill" />
+                            <PolarRadiusAxis angle={90} domain={[0, 100]} tickCount={6} />
+                            <PolarGrid />
+                            <Radar
+                                dataKey="rating"
+                                fill="var(--chart-2)"
+                                fillOpacity={0.6}
+                                dot={{
+                                    r: 4,
+                                    fillOpacity: 1,
+                                }}
+                            />
+                        </RadarChart>
+                    </ChartContainer>
+                )}
             </CardContent>
         </Card>
     )

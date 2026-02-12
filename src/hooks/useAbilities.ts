@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { abilityKeys } from '@/lib/query-keys';
-import { cacheFirstStaticQueryPolicy, dynamic30sQueryPolicy } from '@/lib/query-policies';
+import { getCachedData, getCachedDataUpdatedAt } from '@/lib/tauri-store';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 
 export interface AgentAbility {
   id: string;
@@ -57,26 +58,36 @@ export function useAgentAbilities(agentId: string) {
 }
 
 export function useAgentSkillRatings(agentId: string) {
+  const queryKey = abilityKeys.skillRatings(agentId);
+  const initialData = getCachedData<SkillPerformanceRating[]>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
   return useQuery({
-    queryKey: abilityKeys.skillRatings(agentId),
+    queryKey,
     queryFn: async (): Promise<SkillPerformanceRating[]> => {
       return invoke('get_agent_skill_ratings', { agentId });
     },
     enabled: !!agentId,
-    placeholderData: [],
-    ...dynamic30sQueryPolicy,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
 export function useAgentSkillRatingTrends(agentId: string, days = 14) {
+  const queryKey = abilityKeys.skillTrends(agentId, days);
+  const initialData = getCachedData<SkillRatingTrendSeries[]>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
   return useQuery({
-    queryKey: abilityKeys.skillTrends(agentId, days),
+    queryKey,
     queryFn: async (): Promise<SkillRatingTrendSeries[]> => {
       return invoke('get_agent_skill_rating_trends', { agentId, days });
     },
     enabled: !!agentId,
-    placeholderData: [],
-    ...dynamic30sQueryPolicy,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 

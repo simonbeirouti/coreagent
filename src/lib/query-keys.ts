@@ -48,6 +48,8 @@ export const memoryKeys = {
     [...memoryKeys.all, 'quality', agentId, days] as const,
   qualityTimeseries: (agentId: string, days: number) =>
     [...memoryKeys.all, 'quality-timeseries', agentId, days] as const,
+  tuningStatus: (agentId: string) =>
+    [...memoryKeys.all, 'tuning-status', agentId] as const,
 };
 
 export const perceptionKeys = {

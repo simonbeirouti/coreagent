@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "seed:dashboard": "pnpm dlx tsx scripts/seed-test-data.ts",
     "check": "pnpm check:ts && pnpm check:rust",
     "check:ts": "tsc --noEmit",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings"
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@tanstack/router-plugin": "^1.158.1",
+    "dotenv": "17.2.4",
     "@tauri-apps/cli": "^2",
     "@types/node": "^25.2.0",
     "@types/react": "^19.1.8",
