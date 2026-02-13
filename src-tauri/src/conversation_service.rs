@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono;
 use crate::ability_service::AbilityService;
+use crate::agent_service::{AgentRuntimeCapability, AgentService};
 use crate::feedback_service::FeedbackService;
 use crate::input_sanitizer::sanitize_message;
 use crate::memory_service::MemoryService;
@@ -73,6 +74,20 @@ impl From<messages::Model> for MessageData {
 pub struct ConversationService;
 
 impl ConversationService {
+    fn ability_enabled(
+        runtime_tools: &[AgentRuntimeCapability],
+        implementation_key: &str,
+    ) -> bool {
+        if runtime_tools.is_empty() {
+            return true;
+        }
+        runtime_tools
+            .iter()
+            .find(|tool| tool.implementation_key == implementation_key)
+            .map(|tool| tool.enabled)
+            .unwrap_or(true)
+    }
+
     fn spawn_message_quality_scoring(db: &DatabaseConnection, message_id: Uuid) {
         let db_for_task = db.clone();
         tauri::async_runtime::spawn(async move {
@@ -266,8 +281,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with conversation history
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent(
+        let ai_response = AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -404,8 +428,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with conversation history (streaming)
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+        let ai_response = AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -706,8 +739,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with the history up to the branch point
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent(
+        let ai_response = AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -851,8 +893,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with streaming
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+        let ai_response = AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -999,4 +1050,26 @@ pub struct TranscriptEntry {
     pub role: String,
     pub text: String,
     pub timestamp: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConversationService;
+    use crate::agent_service::AgentRuntimeCapability;
+    use serde_json::json;
+
+    #[test]
+    fn ability_enabled_defaults_true_when_runtime_list_missing() {
+        assert!(ConversationService::ability_enabled(&[], "vision_analysis"));
+    }
+
+    #[test]
+    fn ability_enabled_respects_runtime_flag() {
+        let tools = vec![AgentRuntimeCapability {
+            implementation_key: "vision_analysis".to_string(),
+            enabled: false,
+            config: json!({}),
+        }];
+        assert!(!ConversationService::ability_enabled(&tools, "vision_analysis"));
+    }
 }

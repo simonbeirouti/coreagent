@@ -24,6 +24,7 @@ export const userProfileKeys = {
 export const abilityKeys = {
   all: ['abilities'] as const,
   agent: (agentId: string) => [...abilityKeys.all, 'agent', agentId] as const,
+  toolSettings: (agentId: string) => [...abilityKeys.all, 'tool-settings', agentId] as const,
   skillRatings: (agentId: string) => [...abilityKeys.all, 'skill-ratings', agentId] as const,
   skillTrends: (agentId: string, days: number) =>
     [...abilityKeys.all, 'skill-trends', agentId, days] as const,

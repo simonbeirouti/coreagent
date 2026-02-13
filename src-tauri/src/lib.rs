@@ -39,6 +39,30 @@ use perception_tracker::{PerceptionTracker, PerceptionStat};
 use audio_service::{AudioService, RecordingResult};
 use vision_service::{VisionService, ScreenshotResult};
 
+async fn ensure_tool_enabled(
+    db: &DatabaseConnection,
+    agent_id: &str,
+    implementation_key: &str,
+) -> Result<(), String> {
+    let agent_uuid = uuid::Uuid::parse_str(agent_id)
+        .map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let runtime_tools = AbilityService::resolve_agent_runtime_tools(db, agent_uuid).await?;
+    let enabled = runtime_tools
+        .iter()
+        .find(|tool| tool.implementation_key == implementation_key)
+        .map(|tool| tool.enabled)
+        .unwrap_or(true);
+
+    if enabled {
+        Ok(())
+    } else {
+        Err(format!(
+            "Tool '{}' is disabled for this agent. Enable it from agent tools settings.",
+            implementation_key
+        ))
+    }
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -272,6 +296,7 @@ async fn capture_screenshot(
     ai_client: tauri::State<'_, AiClient>,
     _app: tauri::AppHandle
 ) -> Result<ScreenshotResult, String> {
+    ensure_tool_enabled(&db, &agent_id, "vision_screenshot").await?;
     let vision_service = VisionService::new(&ai_client);
     let result = vision_service.capture_screenshot().await?;
 
@@ -321,6 +346,7 @@ async fn analyze_image(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<String, String> {
+    ensure_tool_enabled(&db, &agent_id, "vision_analysis").await?;
     let vision_service = VisionService::new(&ai_client);
     let analysis = vision_service.analyze_image_base64(&image_base64, prompt).await?;
 
@@ -344,6 +370,7 @@ async fn start_recording(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<(), String> {
+    ensure_tool_enabled(&db, &agent_id, "audio_transcription").await?;
     // Track usage when starting recording
     PerceptionTracker::track_usage(
         &db,
@@ -376,6 +403,7 @@ async fn transcribe_audio(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<String, String> {
+    ensure_tool_enabled(&db, &agent_id, "audio_transcription").await?;
     let audio_service = AudioService::new(&ai_client);
     
     // Simple transcription - audio upload/logging is handled by frontend
@@ -438,6 +466,7 @@ async fn text_to_speech(
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>
 ) -> Result<String, String> {
+    ensure_tool_enabled(&db, &agent_id, "voice_synthesis").await?;
     let audio_service = AudioService::new(&ai_client);
     let audio_base64 = audio_service.text_to_speech_base64(&text, voice).await?;
 
@@ -551,6 +580,34 @@ async fn list_agent_abilities(
     db: tauri::State<'_, DatabaseConnection>
 ) -> Result<Vec<ability_service::AgentAbilityData>, String> {
     AbilityService::list_agent_abilities(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn list_agent_tool_settings(
+    agent_id: String,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<Vec<ability_service::AgentToolSettingData>, String> {
+    AbilityService::list_agent_tool_settings(&db, agent_id).await
+}
+
+#[tauri::command]
+async fn set_agent_ability_enabled(
+    agent_id: String,
+    implementation_key: String,
+    enabled: bool,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<ability_service::AgentToolSettingData, String> {
+    AbilityService::set_agent_ability_enabled(&db, agent_id, implementation_key, enabled).await
+}
+
+#[tauri::command]
+async fn update_agent_ability_config(
+    agent_id: String,
+    implementation_key: String,
+    config: serde_json::Value,
+    db: tauri::State<'_, DatabaseConnection>
+) -> Result<ability_service::AgentToolSettingData, String> {
+    AbilityService::update_agent_ability_config(&db, agent_id, implementation_key, config).await
 }
 
 #[tauri::command]
@@ -860,6 +917,9 @@ pub fn run() {
             update_user_profile,
             // Skill tracking + memory + feedback
             list_agent_abilities,
+            list_agent_tool_settings,
+            set_agent_ability_enabled,
+            update_agent_ability_config,
             get_agent_skill_ratings,
             get_agent_skill_rating_trends,
             get_relevant_memories,

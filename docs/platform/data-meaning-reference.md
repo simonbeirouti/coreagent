@@ -20,6 +20,9 @@ This reference explains what key platform data means so product behavior is easi
 - **Ability**: A named tool/capability available to agents.
 - **Agent Ability**: Many-to-many relationship showing which abilities an agent has.
 - **Proficiency**: A normalized signal of effectiveness for an ability over time.
+- **Ability Enabled Flag**: Per-agent runtime gate that allows/disallows a tool at execution time.
+- **Ability Config**: Per-agent JSON configuration for tool runtime parameters.
+- **Core Ability**: Mandatory ability that cannot be disabled (for now: memory retrieval).
 
 ## Feedback And Quality Layers
 

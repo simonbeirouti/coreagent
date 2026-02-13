@@ -1,5 +1,6 @@
 use crate::entities::agents::{self};
 use crate::user_profile_service::UserProfileService;
+use crate::ability_service::AbilityService;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -49,6 +50,13 @@ pub struct UpdateAgentRequest {
     pub behavioral_constraints: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimeCapability {
+    pub implementation_key: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+}
+
 // Convert SeaORM model to our AgentData struct
 impl From<agents::Model> for AgentData {
     fn from(model: agents::Model) -> Self {
@@ -74,6 +82,40 @@ pub struct AgentService;
 
 impl AgentService {
     const STREAMING_TIMEOUT_SECONDS: u64 = 90;
+
+    fn merge_constraints_with_runtime_tools(
+        base_constraints: Option<&serde_json::Value>,
+        runtime_tools: &[AgentRuntimeCapability],
+    ) -> Option<serde_json::Value> {
+        if runtime_tools.is_empty() {
+            return base_constraints.cloned();
+        }
+        let mut merged = base_constraints
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert(
+                "runtime_tools".to_string(),
+                serde_json::to_value(runtime_tools).unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
+        Some(merged)
+    }
+
+    pub async fn resolve_enabled_tools(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+    ) -> Result<Vec<AgentRuntimeCapability>, String> {
+        let tools = AbilityService::resolve_agent_runtime_tools(db, agent_id).await?;
+        Ok(tools
+            .into_iter()
+            .map(|tool| AgentRuntimeCapability {
+                implementation_key: tool.implementation_key,
+                enabled: tool.enabled,
+                config: tool.config,
+            })
+            .collect())
+    }
 
     /// Create a new agent
     pub async fn create_agent(
@@ -254,6 +296,10 @@ impl AgentService {
             agent.user_id.to_string()
         ).await.ok();
 
+        let runtime_tools = Self::resolve_enabled_tools(db, agent.id).await.unwrap_or_default();
+        let merged_constraints =
+            Self::merge_constraints_with_runtime_tools(agent.behavioral_constraints.as_ref(), &runtime_tools);
+
         // Call AI client with agent's configuration and user profile
         let response = ai_client
             .get_completion_with_image(
@@ -263,7 +309,7 @@ impl AgentService {
                 &agent.persona,
                 agent.mission.as_deref(),
                 agent.values.as_deref(),
-                agent.behavioral_constraints.as_ref(),
+                merged_constraints.as_ref(),
                 user_profile.as_ref(),
                 history,
                 &message,
@@ -301,6 +347,10 @@ impl AgentService {
         let user_profile = crate::user_profile_service::UserProfileService::get_profile(db, agent.user_id.to_string())
             .await.ok().flatten();
 
+        let runtime_tools = Self::resolve_enabled_tools(db, agent.id).await.unwrap_or_default();
+        let merged_constraints =
+            Self::merge_constraints_with_runtime_tools(agent.behavioral_constraints.as_ref(), &runtime_tools);
+
         // Call AI client with agent's configuration and user profile (streaming)
         let timeout_result = timeout(
             Duration::from_secs(Self::STREAMING_TIMEOUT_SECONDS),
@@ -311,7 +361,7 @@ impl AgentService {
                 &agent.persona,
                 agent.mission.as_deref(),
                 agent.values.as_deref(),
-                agent.behavioral_constraints.as_ref(),
+                merged_constraints.as_ref(),
                 user_profile.as_ref(),
                 history,
                 &message,

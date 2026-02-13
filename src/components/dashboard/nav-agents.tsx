@@ -91,7 +91,7 @@ export function NavAgents() {
           >
             <Link
               className="group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:items-center"
-              to="/agents/create"
+              to="/agents"
             >
               <Plus className="size-4 shrink-0" />
               <span className="group-data-[collapsible=icon]:hidden">Create agent</span>

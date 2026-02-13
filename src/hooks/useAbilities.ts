@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { abilityKeys } from '@/lib/query-keys';
 import { getCachedData, getCachedDataUpdatedAt } from '@/lib/tauri-store';
@@ -15,6 +15,21 @@ export interface AgentAbility {
   success_count: number;
   proficiency: number;
   last_used_at?: string | null;
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+export interface AgentToolSetting {
+  agent_id: string;
+  ability_id: string;
+  ability_name: string;
+  description?: string | null;
+  implementation_key: string;
+  category: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  parameters_schema: Record<string, unknown>;
+  is_mandatory: boolean;
 }
 
 export interface SkillPerformanceRating {
@@ -88,6 +103,60 @@ export function useAgentSkillRatingTrends(agentId: string, days = 14) {
     initialData,
     initialDataUpdatedAt,
     ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useAgentToolSettings(agentId: string) {
+  return useQuery({
+    queryKey: abilityKeys.toolSettings(agentId),
+    queryFn: async (): Promise<AgentToolSetting[]> => {
+      return invoke('list_agent_tool_settings', { agentId });
+    },
+    enabled: !!agentId,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useSetAgentAbilityEnabled(agentId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (params: {
+      implementationKey: string;
+      enabled: boolean;
+    }): Promise<AgentToolSetting> => {
+      return invoke('set_agent_ability_enabled', {
+        agentId,
+        implementationKey: params.implementationKey,
+        enabled: params.enabled,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId), refetchType: 'all' });
+    },
+  });
+}
+
+export function useUpdateAgentAbilityConfig(agentId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (params: {
+      implementationKey: string;
+      config: Record<string, unknown>;
+    }): Promise<AgentToolSetting> => {
+      return invoke('update_agent_ability_config', {
+        agentId,
+        implementationKey: params.implementationKey,
+        config: params.config,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId), refetchType: 'all' });
+    },
   });
 }
 

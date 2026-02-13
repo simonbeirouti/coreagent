@@ -124,6 +124,7 @@ The script performs a clean reseed for rows tagged with its seed source and recr
 - **[docs/testing/two-layer-reliability.md](docs/testing/two-layer-reliability.md)** - Hardened test execution guide and quality gates
 - **[docs/platform/feature-map.md](docs/platform/feature-map.md)** - Feature ownership and platform capability map
 - **[docs/platform/getting-started-workflows.md](docs/platform/getting-started-workflows.md)** - Operator/developer workflow onboarding
+- **[docs/platform/ai-core-tools.md](docs/platform/ai-core-tools.md)** - Core AI tools reference and runtime rules
 - **[docs/platform/data-meaning-reference.md](docs/platform/data-meaning-reference.md)** - Metric and data semantics reference
 - **[docs/platform/feedback-and-adaptation-flow.md](docs/platform/feedback-and-adaptation-flow.md)** - Two-layer feedback to adaptation lifecycle
 - **[docs/platform/dashboard-metrics-guide.md](docs/platform/dashboard-metrics-guide.md)** - Dashboard metrics interpretation guide

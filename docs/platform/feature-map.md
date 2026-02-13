@@ -7,6 +7,7 @@ This guide maps major platform capabilities to where they appear in the product 
 - Agent creation and configuration: agent management flows and agent settings
 - Identity controls (mission, values, behavioral constraints): agent settings
 - Provider/model configuration: agent settings
+- Tool toggles and tool configuration: agent tools route
 
 ## Conversation And Chat
 
