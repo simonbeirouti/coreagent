@@ -3,7 +3,7 @@
 Cloud-first, multimodal AI agent platform built with Rust + Supabase where agents see, hear, interact with the web, and evolve unique identities over time.
 
 ## Current Status
-Phase 2 (Agent Identity) is in progress with dashboard analytics now wired end-to-end and ready for final hardening.
+Phase 2 (Agent Identity) is in progress with two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, and dashboard transparency surfaces now live; final rollout hardening is next.
 
 ### Shipped
 - ✅ **Phase 0 (Foundation):** React + TypeScript app shell, routing, UI system, and auth UX
@@ -15,14 +15,25 @@ Phase 2 (Agent Identity) is in progress with dashboard analytics now wired end-t
   - Feedback schema (`message_feedback`, `personality_adjustments`) for learning loops
   - Frontend integration for these flows is implemented, tested, and cache-backed
   - Agent dashboard stats are now connected across skill trends, memory hit/no-hit + quality, trait state, personality timeline, and feedback/skill summaries
+- ✅ **Two-layer feedback + learning (v1):**
+  - Async per-message quality scoring for assistant messages
+  - User per-dimension ratings (`helpfulness`, `accuracy`, `tone`, `verbosity`) with reconciliation into effective signals
+  - Adaptation loop consumes fused dimension signals with provenance-aware fallback
+  - Retrieval quality/tuning status includes quality source/provenance mix
+  - Dashboard now renders independent transparency cards for source mix, confidence coverage, and guardrail outcomes
+  - Latest retrieval tuning decision is surfaced inline with the personality evolution card
+  - Transparency route now redirects to dashboard so explainability panels are maintained in one place
+  - Streaming message timeout guard prevents indefinite request hangs
 
 ### In Progress (Current Focus)
-- Dashboard production polish (loading/empty/error states and UX refinement)
-- Closed-loop trait adaptation quality from user feedback
-- Retrieval quality tuning and observability validation for memory relevance
+- End-to-end validation of two-layer feedback/reconciliation across real data
+- Feedback discoverability polish for per-dimension controls and first-time guidance
+- Hardening tests + observability for adaptation/retrieval quality pipelines
 
 ### Next
-- Phase 2 hardening wrap-up, then Phase 3 kickoff: browser automation and deeper multimodal workflows
+- Replace heuristic scorer with orchestrator-model scoring + retry/backoff workflow
+- Complete Phase 2 hardening checklist and rollout acceptance
+- Kick off Phase 3: browser automation and deeper multimodal workflows
 
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + TanStack Router + Shadcn UI + Tailwind CSS
@@ -73,17 +84,43 @@ pnpm check            # TypeScript + Rust checks
 pnpm check:ts         # TypeScript only
 pnpm check:rust       # Rust only
 
+# Seed synthetic dashboard test data (3 agents, 14 days by default)
+pnpm run seed:dashboard -- --userEmail you@example.com --userId 00000000-0000-0000-0000-000000000000
+
 # Build
 pnpm build            # Frontend build
 pnpm run tauri build  # Full application build
 ```
 
+## Synthetic Dashboard Seeder
+
+Use the TypeScript seeder to generate realistic test data used by dashboard, agent settings, and user settings.
+
+Requirements:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Command:
+
+```bash
+pnpm run seed:dashboard -- --userEmail you@example.com --userId 00000000-0000-0000-0000-000000000000
+```
+
+Optional flags:
+- `--days <n>` (default: `14`)
+- `--agents <n>` (default: `3`)
+
+The script performs a clean reseed for rows tagged with its seed source and recreates a predictable dataset for testing.
+
 ## Documentation
 
 - **[prd.md](prd.md)** - Product requirements, shipped features, and roadmap
+- **[dashboard_transparency_prd.md](dashboard_transparency_prd.md)** - Phase 2 transparency UX and explainability requirements
+- **[two_layer_reliability_suite_prd.md](two_layer_reliability_suite_prd.md)** - Unified QA + observability + testing reliability plan
 - **[avatar_prd.md](avatar_prd.md)** - Avatar system feature specification
 - **[browser_automation_prd.md](browser_automation_prd.md)** - Browser automation feature specification
 - **[phase2_dashboard_data_guide.md](phase2_dashboard_data_guide.md)** - Dashboard data sources, chart wiring, and population checklist
+- **[scripts/seed-dashboard-test-data.ts](scripts/seed-dashboard-test-data.ts)** - TypeScript synthetic dashboard seed script
 
 ## Phase 2 Runtime Flags
 
@@ -102,6 +139,10 @@ After applying `supabase/migrations/010_hits_and_retrieval_observability.sql`, v
 - checking migration success in your Supabase SQL editor/history
 - confirming dashboard charts receive non-empty data after real interactions
 - using the checklist in `phase2_dashboard_data_guide.md` for data population and troubleshooting
+
+Also apply and verify:
+- `supabase/migrations/012_retrieval_tuning_state_and_events.sql`
+- `supabase/migrations/013_two_layer_message_quality_feedback.sql`
 
 ## Project Structure
 

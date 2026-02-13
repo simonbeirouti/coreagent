@@ -1,5 +1,7 @@
 import { CartesianGrid, Line, LineChart, XAxis } from "recharts";
 import type { PersonalityAdjustment, TraitState } from "@/hooks/useFeedback";
+import type { RetrievalTuningDecision } from "@/hooks/useMemory";
+import { Badge } from "@/components/ui/badge";
 import {
   ChartContainer,
   ChartTooltip,
@@ -11,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 interface PersonalityEvolutionProps {
   adjustments: PersonalityAdjustment[];
   traitState?: TraitState;
+  latestDecision?: RetrievalTuningDecision;
   isLoading?: boolean;
   isFetching?: boolean;
   errorMessage?: string;
@@ -18,8 +21,8 @@ interface PersonalityEvolutionProps {
 
 const chartConfig = {
   value: {
-    label: "Trait value",
-    color: "hsl(var(--chart-5))",
+    label: "Trait %",
+    color: "hsl(var(--chart-2))",
   },
 } satisfies ChartConfig;
 
@@ -31,6 +34,7 @@ function toFiniteNumber(value: unknown, fallback = 0): number {
 export function PersonalityEvolution({
   adjustments,
   traitState,
+  latestDecision,
   isLoading = false,
   isFetching = false,
   errorMessage,
@@ -76,7 +80,25 @@ export function PersonalityEvolution({
 
   return (
     <div className="flex h-full min-h-[260px] flex-col gap-4">
-      <ChartContainer config={chartConfig} className="flex-1 min-h-[200px] w-full aspect-auto">
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="text-sm font-medium">Personality Evolution Timeline</h3>
+          <p className="text-xs text-muted-foreground">Recent trait updates and latest tuning decision.</p>
+        </div>
+        {latestDecision ? (
+          <div className="text-right space-y-1">
+            <Badge variant={latestDecision.status === "applied" ? "default" : "secondary"}>
+              {latestDecision.status}
+            </Badge>
+            <p className="text-xs text-muted-foreground">
+              {latestDecision.reason ?? "latest decision"}
+            </p>
+          </div>
+        ) : (
+          <span className="text-xs text-muted-foreground">No recent decision</span>
+        )}
+      </div>
+      <ChartContainer config={chartConfig} className="flex-1 min-h-[300px] w-full aspect-auto">
         <LineChart data={chartData}>
           <CartesianGrid vertical={false} />
           <XAxis
@@ -102,7 +124,6 @@ export function PersonalityEvolution({
                     ? String(value)
                     : date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
                 }}
-                formatter={(value) => [`${value}%`, "New trait value"]}
               />
             }
           />

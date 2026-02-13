@@ -19,6 +19,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 interface ChartSkillTrendAreaProps {
   series: SkillRatingTrendSeries[]
   fallbackRatings?: SkillPerformanceRating[]
+  timeRangeDays?: 14 | 30 | 90
+  onTimeRangeDaysChange?: (days: 14 | 30 | 90) => void
   isLoading?: boolean
   isFetching?: boolean
   errorMessage?: string
@@ -46,11 +48,25 @@ function toIsoDateLabel(input: string) {
 export function ChartSkillTrendArea({
   series,
   fallbackRatings = [],
+  timeRangeDays,
+  onTimeRangeDaysChange,
   isLoading = false,
   isFetching = false,
   errorMessage,
 }: ChartSkillTrendAreaProps) {
-  const [timeRange, setTimeRange] = React.useState("14d")
+  const [internalTimeRangeDays, setInternalTimeRangeDays] = React.useState<14 | 30 | 90>(14)
+  const selectedTimeRangeDays = timeRangeDays ?? internalTimeRangeDays
+
+  const selectedTimeRangeValue = selectedTimeRangeDays === 90 ? "90d" : selectedTimeRangeDays === 30 ? "30d" : "14d"
+
+  const handleTimeRangeChange = (value: string) => {
+    const nextDays: 14 | 30 | 90 = value === "90d" ? 90 : value === "30d" ? 30 : 14
+    if (onTimeRangeDaysChange) {
+      onTimeRangeDaysChange(nextDays)
+      return
+    }
+    setInternalTimeRangeDays(nextDays)
+  }
 
   const sortedByLatest = series
     .filter((entry) => entry.points.length > 0)
@@ -76,7 +92,7 @@ export function ChartSkillTrendArea({
   }
   const merged = Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date))
 
-  const days = timeRange === "90d" ? 90 : timeRange === "30d" ? 30 : 14
+  const days = selectedTimeRangeDays
   const referenceDate = merged.length > 0 ? new Date(merged[merged.length - 1].date) : new Date()
   const startDate = new Date(referenceDate)
   startDate.setDate(startDate.getDate() - days + 1)
@@ -131,7 +147,7 @@ export function ChartSkillTrendArea({
         <div className="text-xs text-muted-foreground whitespace-nowrap">
           {showSkeleton ? "Loading..." : isFetching ? "Updating..." : " "}
         </div>
-        <Select value={timeRange} onValueChange={setTimeRange}>
+        <Select value={selectedTimeRangeValue} onValueChange={handleTimeRangeChange}>
           <SelectTrigger className="w-[160px] rounded-lg sm:ml-auto" aria-label="Select time range">
             <SelectValue placeholder="Last 14 days" />
           </SelectTrigger>

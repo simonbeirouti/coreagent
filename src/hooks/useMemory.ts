@@ -49,6 +49,10 @@ export interface RetrievalQualityValidation {
     agent_only_count: number;
     heuristic_fallback_count: number;
   };
+  confidence_target: number;
+  confidence_scored_sample_size: number;
+  confidence_above_target_count: number;
+  confidence_above_target_ratio: number;
   evaluated_at: string;
 }
 

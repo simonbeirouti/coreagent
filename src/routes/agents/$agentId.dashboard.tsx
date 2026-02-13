@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { useState } from 'react';
 import { useAgentSkillRatingTrends, useAgentSkillRatings } from '@/hooks/useAbilities';
 import {
   useFeedbackMonthly,
@@ -11,10 +12,13 @@ import { SentimentFeedback } from '@/components/ui/chart-sentiment-feedback';
 import { CoreSkillPerformance } from '@/components/ui/chart-core-skill-performance';
 import { ChartMemoryHitNoHit } from '@/components/ui/chart-memory-hit-nohit';
 import { ChartMemoryQualityLines } from '@/components/ui/chart-memory-quality-lines';
+import { ChartSourceMixBars } from '@/components/ui/chart-source-mix-bars';
+import { ChartConfidenceCoverage } from '@/components/ui/chart-confidence-coverage';
+import { ChartGuardrailOutcomes } from '@/components/ui/chart-guardrail-outcomes';
 import { ChartSkillTrendArea } from '@/components/ui/chart-skill-trend-area';
 import { ChartTraitStateRadar } from '@/components/ui/chart-trait-state-radar';
 import { PersonalityEvolution } from '@/components/agent/personality-evolution';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 
 export const Route = createFileRoute('/agents/$agentId/dashboard')({
   component: AgentDashboardPage,
@@ -22,6 +26,7 @@ export const Route = createFileRoute('/agents/$agentId/dashboard')({
 
 function AgentDashboardPage() {
   const { agentId } = Route.useParams();
+  const [skillTrendDays, setSkillTrendDays] = useState<14 | 30 | 90>(14);
   const {
     data: skillRatings = [],
     isLoading: isSkillRatingsLoading,
@@ -57,7 +62,7 @@ function AgentDashboardPage() {
     isLoading: isSkillTrendsLoading,
     isFetching: isSkillTrendsFetching,
     error: skillTrendsError,
-  } = useAgentSkillRatingTrends(agentId, 14);
+  } = useAgentSkillRatingTrends(agentId, skillTrendDays);
   const {
     data: memoryTimeseries = [],
     isLoading: isMemoryTimeseriesLoading,
@@ -74,15 +79,31 @@ function AgentDashboardPage() {
 
   return (
     <div className="p-4 space-y-4 overflow-y-auto">
-      <ChartSkillTrendArea
-        series={skillTrends}
-        fallbackRatings={skillRatings}
-        isLoading={isSkillTrendsLoading}
-        isFetching={isSkillTrendsFetching}
-        errorMessage={skillTrendsError ? String(skillTrendsError) : undefined}
-      />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartSkillTrendArea
+          series={skillTrends}
+          fallbackRatings={skillRatings}
+          timeRangeDays={skillTrendDays}
+          onTimeRangeDaysChange={setSkillTrendDays}
+          isLoading={isSkillTrendsLoading}
+          isFetching={isSkillTrendsFetching}
+          errorMessage={skillTrendsError ? String(skillTrendsError) : undefined}
+        />
+        <SentimentFeedback
+          monthlyData={feedbackMonthly}
+          positive={feedbackStats?.positive ?? 0}
+          negative={feedbackStats?.negative ?? 0}
+          isLoading={isFeedbackLoading || isFeedbackMonthlyLoading}
+          isFetching={isFeedbackFetching || isFeedbackMonthlyFetching}
+          errorMessage={
+            feedbackStatsError || feedbackMonthlyError
+              ? String(feedbackStatsError ?? feedbackMonthlyError)
+              : undefined
+          }
+        />
+      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartMemoryHitNoHit
           points={memoryTimeseries}
           tuningStatus={retrievalTuningStatus}
@@ -114,15 +135,28 @@ function AgentDashboardPage() {
           isFetching={isTraitStateFetching}
           errorMessage={traitStateError ? String(traitStateError) : undefined}
         />
+        <CoreSkillPerformance
+          ratings={skillRatings}
+          isLoading={isSkillRatingsLoading}
+          isFetching={isSkillRatingsFetching}
+          errorMessage={skillRatingsError ? String(skillRatingsError) : undefined}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartSourceMixBars
+          tuningStatus={retrievalTuningStatus}
+          isLoading={isTuningLoading}
+          isFetching={isTuningFetching}
+          errorMessage={tuningError ? String(tuningError) : undefined}
+        />
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Personality Evolution Timeline</CardTitle>
-          </CardHeader>
           <CardContent>
             <PersonalityEvolution
               adjustments={adjustments}
               traitState={traitState}
+              latestDecision={retrievalTuningStatus?.recent_decisions?.[0]}
               isLoading={isAdjustmentsLoading}
               isFetching={isAdjustmentsFetching}
               errorMessage={adjustmentsError ? String(adjustmentsError) : undefined}
@@ -131,26 +165,21 @@ function AgentDashboardPage() {
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 lg:auto-rows-fr gap-4 items-stretch">
-        <SentimentFeedback
-          monthlyData={feedbackMonthly}
-          positive={feedbackStats?.positive ?? 0}
-          negative={feedbackStats?.negative ?? 0}
-          isLoading={isFeedbackLoading || isFeedbackMonthlyLoading}
-          isFetching={isFeedbackFetching || isFeedbackMonthlyFetching}
-          errorMessage={
-            feedbackStatsError || feedbackMonthlyError
-              ? String(feedbackStatsError ?? feedbackMonthlyError)
-              : undefined
-          }
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartConfidenceCoverage
+          tuningStatus={retrievalTuningStatus}
+          isLoading={isTuningLoading}
+          isFetching={isTuningFetching}
+          errorMessage={tuningError ? String(tuningError) : undefined}
         />
-        <CoreSkillPerformance
-          ratings={skillRatings}
-          isLoading={isSkillRatingsLoading}
-          isFetching={isSkillRatingsFetching}
-          errorMessage={skillRatingsError ? String(skillRatingsError) : undefined}
+        <ChartGuardrailOutcomes
+          tuningStatus={retrievalTuningStatus}
+          isLoading={isTuningLoading}
+          isFetching={isTuningFetching}
+          errorMessage={tuningError ? String(tuningError) : undefined}
         />
       </div>
+
     </div>
   );
 }

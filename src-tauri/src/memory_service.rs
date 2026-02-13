@@ -56,6 +56,10 @@ pub struct RetrievalQualityValidation {
     pub passes_guardrails: bool,
     pub reasons: Vec<String>,
     pub source_mix: serde_json::Value,
+    pub confidence_target: f32,
+    pub confidence_scored_sample_size: i64,
+    pub confidence_above_target_count: i64,
+    pub confidence_above_target_ratio: f32,
     pub evaluated_at: String,
 }
 
@@ -100,6 +104,7 @@ impl MemoryService {
     const AUTO_TUNE_WINDOW_DAYS: i32 = 7;
     const AUTO_TUNE_MIN_EVENTS: i64 = 24;
     const AUTO_TUNE_STEP: f32 = 0.02;
+    const QUALITY_CONFIDENCE_TARGET: f32 = 0.70;
 
     fn retrieval_telemetry_enabled() -> bool {
         std::env::var("RETRIEVAL_TELEMETRY")
@@ -388,6 +393,43 @@ impl MemoryService {
                 .try_get::<i64>("", "heuristic_fallback_count")
                 .map_err(|e| format!("Failed decoding quality source heuristic_fallback_count: {e}"))?,
         });
+        let confidence_target = Self::QUALITY_CONFIDENCE_TARGET;
+        let confidence_row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE status IN ('scored', 'reconciled')
+                        )::bigint AS confidence_scored_sample_size,
+                        COUNT(*) FILTER (
+                            WHERE status IN ('scored', 'reconciled')
+                              AND confidence >= $3::float
+                        )::bigint AS confidence_above_target_count
+                    FROM message_quality_labels
+                    WHERE agent_id = $1::uuid
+                      AND updated_at >= NOW() - (($2::int || ' days')::interval)
+                "#,
+                vec![
+                    agent_id.into(),
+                    days.into(),
+                    (confidence_target as f64).into(),
+                ],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading confidence coverage metrics: {e}"))?
+            .ok_or_else(|| "No confidence coverage row returned".to_string())?;
+        let confidence_scored_sample_size = confidence_row
+            .try_get::<i64>("", "confidence_scored_sample_size")
+            .map_err(|e| format!("Failed decoding confidence scored sample size: {e}"))?;
+        let confidence_above_target_count = confidence_row
+            .try_get::<i64>("", "confidence_above_target_count")
+            .map_err(|e| format!("Failed decoding confidence above-target count: {e}"))?;
+        let confidence_above_target_ratio = if confidence_scored_sample_size > 0 {
+            (confidence_above_target_count as f32 / confidence_scored_sample_size as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         let latency_score = if p95_latency_ms <= 180.0 {
             1.0
@@ -441,6 +483,10 @@ impl MemoryService {
             passes_guardrails,
             reasons,
             source_mix,
+            confidence_target,
+            confidence_scored_sample_size,
+            confidence_above_target_count,
+            confidence_above_target_ratio,
             evaluated_at: chrono::Utc::now().to_rfc3339(),
         })
     }

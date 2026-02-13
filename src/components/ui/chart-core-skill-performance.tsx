@@ -88,7 +88,7 @@ export function CoreSkillPerformance({
                         Unable to load core skill ratings right now.
                     </div>
                 ) : (
-                    <ChartContainer config={chartConfig} className="mx-auto h-full min-h-[300px] w-full aspect-auto">
+                    <ChartContainer config={chartConfig} className="mx-auto min-h-[400px] w-full aspect-auto">
                         <RadarChart data={chartData}>
                             <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
                             <PolarAngleAxis dataKey="skill" />
