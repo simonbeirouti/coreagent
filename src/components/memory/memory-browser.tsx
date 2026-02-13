@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -10,6 +11,8 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion';
 import { useRelevantMemories } from '@/hooks/useMemory';
+import { memoryKeys } from '@/lib/query-keys';
+import { MarkdownContent } from '@/components/ui/markdown-content';
 
 interface MemoryBrowserProps {
   agentId: string;
@@ -17,6 +20,7 @@ interface MemoryBrowserProps {
 }
 
 export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
+  const queryClient = useQueryClient();
   const [query, setQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const { data: memories = [], isLoading, isFetching, refetch, error } = useRelevantMemories(
@@ -27,6 +31,26 @@ export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
   );
   const errorMessage = error instanceof Error ? error.message : null;
   const sortedMemories = [...memories].sort((a, b) => b.similarity - a.similarity);
+
+  useEffect(() => {
+    if (!submittedQuery || isLoading || isFetching) return;
+    // Retrieval searches create telemetry rows. Refresh quality caches directly so
+    // dashboards using cache-first queries pick up new data immediately.
+    void Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: memoryKeys.quality(agentId, 14),
+        refetchType: 'all',
+      }),
+      queryClient.invalidateQueries({
+        queryKey: memoryKeys.qualityTimeseries(agentId, 14),
+        refetchType: 'all',
+      }),
+      queryClient.invalidateQueries({
+        queryKey: memoryKeys.tuningStatus(agentId),
+        refetchType: 'all',
+      }),
+    ]);
+  }, [agentId, isFetching, isLoading, queryClient, submittedQuery]);
 
   const handleSearch = async () => {
     const trimmedQuery = query.trim();
@@ -87,7 +111,7 @@ export function MemoryBrowser({ agentId, conversationId }: MemoryBrowserProps) {
                     </AccordionTrigger>
                     <AccordionContent>
                       <div className="space-y-2">
-                        <div className="text-sm whitespace-pre-wrap">{memory.content}</div>
+                        <MarkdownContent content={memory.content} />
                         <div className="text-xs text-muted-foreground">
                           {new Date(memory.created_at).toLocaleString()}
                         </div>

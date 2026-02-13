@@ -1,5 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    EntityTrait, QueryFilter, Set, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,7 +19,7 @@ pub struct AgentAbilityData {
     pub category: String,
     pub usage_count: i32,
     pub success_count: i32,
-    pub proficiency: f32,
+    pub proficiency: f64,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -34,6 +35,24 @@ pub struct SkillPerformanceRatingData {
     pub usage_count: i32,
     pub ability_usage_count: i32,
     pub perception_usage_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRatingTrendPoint {
+    pub timestamp: String,
+    pub rating: f32,
+    pub quality_score: f32,
+    pub engagement_score: f32,
+    pub feedback_score: f32,
+    pub confidence_score: f32,
+    pub usage_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRatingTrendSeries {
+    pub skill_key: String,
+    pub skill_name: String,
+    pub points: Vec<SkillRatingTrendPoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,11 +72,80 @@ struct SkillDefinition<'a> {
 pub struct AbilityService;
 
 impl AbilityService {
-    fn calculate_proficiency(success_count: i32, usage_count: i32) -> f32 {
+    fn identity_trends_enabled() -> bool {
+        std::env::var("IDENTITY_TRENDS")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(true)
+    }
+
+    async fn persist_skill_rating_snapshots(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+        ratings: &[SkillPerformanceRatingData],
+    ) -> Result<(), String> {
+        let sql = r#"
+            INSERT INTO skill_rating_snapshots (
+                id,
+                agent_id,
+                skill_key,
+                skill_name,
+                rating,
+                quality_score,
+                engagement_score,
+                feedback_score,
+                confidence_score,
+                usage_count,
+                ability_usage_count,
+                perception_usage_count,
+                snapshot_at
+            )
+            VALUES (
+                gen_random_uuid(),
+                $1::uuid,
+                $2::text,
+                $3::text,
+                $4::float,
+                $5::float,
+                $6::float,
+                $7::float,
+                $8::float,
+                $9::int,
+                $10::int,
+                $11::int,
+                NOW()
+            )
+        "#;
+
+        for rating in ratings {
+            db.execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                vec![
+                    agent_id.into(),
+                    rating.skill_key.clone().into(),
+                    rating.skill_name.clone().into(),
+                    rating.rating.into(),
+                    rating.quality_score.into(),
+                    rating.engagement_score.into(),
+                    rating.feedback_score.into(),
+                    rating.confidence_score.into(),
+                    rating.usage_count.into(),
+                    rating.ability_usage_count.into(),
+                    rating.perception_usage_count.into(),
+                ],
+            ))
+            .await
+            .map_err(|e| format!("Failed persisting skill rating snapshot {}: {e}", rating.skill_key))?;
+        }
+        Ok(())
+    }
+
+    fn calculate_proficiency(success_count: i32, usage_count: i32) -> f64 {
         if usage_count <= 0 {
             return 0.0;
         }
-        (success_count as f32 / usage_count as f32).clamp(0.0, 1.0)
+        (success_count as f64 / usage_count as f64).clamp(0.0, 1.0)
     }
 
     fn skill_definitions<'a>() -> Vec<SkillDefinition<'a>> {
@@ -147,7 +235,7 @@ impl AbilityService {
             let weight = component.weight.max(0.0);
             weight_sum += weight;
             if let Some(ability) = ability_map.get(component.implementation_key) {
-                weighted_sum += ability.proficiency.clamp(0.0, 1.0) * weight;
+                weighted_sum += ability.proficiency.clamp(0.0, 1.0) as f32 * weight;
                 usage_count += ability.usage_count.max(0);
             }
         }
@@ -418,7 +506,101 @@ impl AbilityService {
         }
 
         ratings.sort_by(|a, b| b.rating.total_cmp(&a.rating));
+        if Self::identity_trends_enabled() {
+            if let Err(err) = Self::persist_skill_rating_snapshots(db, agent_uuid, &ratings).await {
+                eprintln!(
+                    "[RATING] Failed persisting skill rating snapshots for {}: {}",
+                    agent_id, err
+                );
+            }
+        }
         Ok(ratings)
+    }
+
+    pub async fn get_agent_skill_rating_trends(
+        db: &DatabaseConnection,
+        agent_id: String,
+        days: i32,
+    ) -> Result<Vec<SkillRatingTrendSeries>, String> {
+        let agent_uuid = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let days = days.clamp(1, 90);
+        let sql = r#"
+            SELECT
+                skill_key,
+                skill_name,
+                rating,
+                quality_score,
+                engagement_score,
+                feedback_score,
+                confidence_score,
+                usage_count,
+                snapshot_at::text AS snapshot_at
+            FROM skill_rating_snapshots
+            WHERE agent_id = $1::uuid
+              AND snapshot_at >= NOW() - (($2::int || ' days')::interval)
+            ORDER BY skill_key ASC, snapshot_at ASC
+        "#;
+
+        let rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                vec![agent_uuid.into(), days.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading skill rating trends: {e}"))?;
+
+        let mut grouped: HashMap<String, SkillRatingTrendSeries> = HashMap::new();
+        for row in rows {
+            let skill_key: String = row
+                .try_get("", "skill_key")
+                .map_err(|e| format!("Failed decoding trend skill_key: {e}"))?;
+            let skill_name: String = row
+                .try_get("", "skill_name")
+                .map_err(|e| format!("Failed decoding trend skill_name: {e}"))?;
+            let rating = row
+                .try_get::<f64>("", "rating")
+                .map_err(|e| format!("Failed decoding trend rating: {e}"))? as f32;
+            let quality_score = row
+                .try_get::<f64>("", "quality_score")
+                .map_err(|e| format!("Failed decoding trend quality_score: {e}"))? as f32;
+            let engagement_score = row
+                .try_get::<f64>("", "engagement_score")
+                .map_err(|e| format!("Failed decoding trend engagement_score: {e}"))? as f32;
+            let feedback_score = row
+                .try_get::<f64>("", "feedback_score")
+                .map_err(|e| format!("Failed decoding trend feedback_score: {e}"))? as f32;
+            let confidence_score = row
+                .try_get::<f64>("", "confidence_score")
+                .map_err(|e| format!("Failed decoding trend confidence_score: {e}"))? as f32;
+            let usage_count = row
+                .try_get::<i32>("", "usage_count")
+                .map_err(|e| format!("Failed decoding trend usage_count: {e}"))?;
+            let timestamp: String = row
+                .try_get("", "snapshot_at")
+                .map_err(|e| format!("Failed decoding trend snapshot_at: {e}"))?;
+
+            let entry = grouped
+                .entry(skill_key.clone())
+                .or_insert_with(|| SkillRatingTrendSeries {
+                    skill_key: skill_key.clone(),
+                    skill_name: skill_name.clone(),
+                    points: Vec::new(),
+                });
+            entry.points.push(SkillRatingTrendPoint {
+                timestamp,
+                rating,
+                quality_score,
+                engagement_score,
+                feedback_score,
+                confidence_score,
+                usage_count,
+            });
+        }
+
+        let mut out = grouped.into_values().collect::<Vec<_>>();
+        out.sort_by(|a, b| a.skill_key.cmp(&b.skill_key));
+        Ok(out)
     }
 }
 

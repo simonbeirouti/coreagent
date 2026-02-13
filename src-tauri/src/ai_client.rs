@@ -97,6 +97,35 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     }
                 }
             }
+
+            // Render adaptive trait state into deterministic behavioral guidance.
+            if let Some(adaptive_traits) = constraints_obj
+                .get("adaptive_traits")
+                .and_then(|value| value.as_object())
+            {
+                if !adaptive_traits.is_empty() {
+                    prompt.push_str("\n\n## Adaptive Trait State");
+                    for (trait_name, value) in adaptive_traits {
+                        let score = value.as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
+                        let descriptor = if score < 0.34 {
+                            "low"
+                        } else if score > 0.66 {
+                            "high"
+                        } else {
+                            "balanced"
+                        };
+                        prompt.push_str(&format!(
+                            "\n- {}: {} ({:.2})",
+                            trait_name,
+                            descriptor,
+                            score
+                        ));
+                    }
+                    prompt.push_str(
+                        "\n- Follow these trait levels consistently unless the user explicitly asks otherwise in the current request.",
+                    );
+                }
+            }
         }
 
         // Add user profile information if available

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { hydrateCache, saveCache } from '@/lib/tauri-store';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 import { useEffect, useRef, useState } from 'react';
 
 // Create a client
@@ -8,15 +9,7 @@ function makeQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        // Desktop cache-first UX:
-        // - show hydrated data immediately
-        // - do not auto-refetch on remount/focus/reconnect
-        // - refresh only via explicit refetch/invalidation from active views
-        staleTime: Infinity,
-        gcTime: 24 * 60 * 60 * 1000, // Keep unused data for 24 hours
-        refetchOnMount: false,
-        refetchOnWindowFocus: false,
-        refetchOnReconnect: false,
+        ...cacheFirstStaticQueryPolicy,
         retry: (failureCount: number, error: unknown) => {
           // Don't retry on 4xx errors
           if (error instanceof Error && error.message.includes('4')) {
@@ -57,6 +50,7 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const hydrationStartedRef = useRef(false);
+  const startupRevalidationDoneRef = useRef(false);
 
   // Hydrate persisted cache before mounting query consumers.
   useEffect(() => {
@@ -71,6 +65,15 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
         setIsHydrated(true);
       });
   }, [queryClient]);
+
+  // After cache hydration, revalidate active queries once per app boot.
+  // This keeps startup fast from cache while still pulling fresh server state.
+  useEffect(() => {
+    if (!isHydrated || startupRevalidationDoneRef.current) return;
+    startupRevalidationDoneRef.current = true;
+
+    void queryClient.invalidateQueries({ refetchType: 'active' });
+  }, [isHydrated, queryClient]);
 
   // Subscribe to cache changes and persist them
   useEffect(() => {

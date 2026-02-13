@@ -1,0 +1,38 @@
+---
+description: Hardened test lifecycle requirements for frontend and backend changes
+alwaysApply: true
+---
+
+# Test Lifecycle Hardening
+
+For every behavior change, keep tests in lockstep with code:
+
+- If functionality is added, add/extend tests in the same change.
+- If functionality is removed, remove/adjust obsolete tests in the same change.
+- If behavior changes, update assertions to the new contract (do not keep stale expectations).
+
+## Naming And Discoverability
+
+- Test names should mirror symbols/flows they validate (for example `useCreateConversation` in `useConversations.test.ts`).
+- Prefer test files colocated with the implementation and keep the same root name.
+- Use clear `describe`/`it` names that include the feature or function being verified.
+
+## Frontend Hardening Requirements
+
+- Prefer runtime behavior tests over file-content smoke checks.
+- Cover success + failure + edge states (`loading`, `empty`, `error`, and computed summaries where applicable).
+- For mutation hooks, test optimistic update, rollback on error, and reconciliation on success.
+- Assert user-visible outcomes and cache effects, not only that a function was called.
+
+## Backend Hardening Requirements
+
+- Add or update Rust tests for each new/changed command, service, or data policy.
+- Cover happy path and failure path (validation, constraints, rollback-safe behavior).
+- For DB-backed behavior, verify isolation/cleanup and deterministic assertions.
+- Keep integration tests in `src-tauri/tests` and unit tests close to the owning module.
+
+## Release Gate For Test Changes
+
+- Run `pnpm test` after test/code updates.
+- Run `pnpm run check` before finalizing.
+- Do not leave knowingly flaky tests or warning-heavy false positives in the suite.

@@ -1,9 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { feedbackKeys } from '@/lib/query-keys';
+import { getCachedData, getCachedDataUpdatedAt } from '@/lib/tauri-store';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 
 export type FeedbackType = 'positive' | 'negative' | 'neutral';
 export type FeedbackCategory = 'helpfulness' | 'accuracy' | 'tone' | 'verbosity';
+export type FeedbackDimension = 'helpfulness' | 'accuracy' | 'tone' | 'verbosity';
+export type FeedbackRating = 'up' | 'down';
 
 export interface FeedbackStats {
   positive: number;
@@ -27,6 +31,18 @@ export interface PersonalityAdjustment {
   created_at: string;
 }
 
+export interface TraitState {
+  agent_id: string;
+  helpfulness: number;
+  formality: number;
+  verbosity: number;
+  proactivity: number;
+  creativity: number;
+  empathy: number;
+  adaptation_enabled: boolean;
+  updated_at: string;
+}
+
 interface SubmitFeedbackRequest {
   message_id: string;
   user_id: string;
@@ -34,7 +50,13 @@ interface SubmitFeedbackRequest {
   feedback_category?: FeedbackCategory;
   notes?: string;
   conversation_id?: string;
+  dimension_ratings?: Partial<Record<FeedbackDimension, FeedbackRating>>;
 }
+
+export type ConversationDimensionFeedback = Record<
+  string,
+  Partial<Record<FeedbackDimension, FeedbackRating>>
+>;
 
 function updateMonthlyFeedback(
   points: FeedbackMonthlyPoint[] | undefined,
@@ -68,12 +90,18 @@ export function useSubmitFeedback(agentId?: string) {
       return invoke('submit_message_feedback', { request });
     },
     onMutate: async (request) => {
+      const dimensionQueryKey = request.conversation_id && request.user_id
+        ? [...feedbackKeys.conversation(request.conversation_id, request.user_id), 'dimensions']
+        : null;
       const previousConversationFeedback =
         request.conversation_id && request.user_id
           ? queryClient.getQueryData<Record<string, FeedbackType>>(
               feedbackKeys.conversation(request.conversation_id, request.user_id)
             )
           : undefined;
+      const previousDimensionFeedback = dimensionQueryKey
+        ? queryClient.getQueryData<ConversationDimensionFeedback>(dimensionQueryKey)
+        : undefined;
 
       const previousFeedbackType = previousConversationFeedback?.[request.message_id] ?? null;
 
@@ -85,6 +113,19 @@ export function useSubmitFeedback(agentId?: string) {
             [request.message_id]: request.feedback_type,
           })
         );
+        if (dimensionQueryKey && request.dimension_ratings && Object.keys(request.dimension_ratings).length > 0) {
+          queryClient.setQueryData<ConversationDimensionFeedback>(dimensionQueryKey, (current) => {
+              const safeCurrent: ConversationDimensionFeedback = current ?? {};
+              const nextForMessage = {
+                ...(safeCurrent[request.message_id] ?? {}),
+                ...request.dimension_ratings,
+              };
+              return {
+                ...safeCurrent,
+                [request.message_id]: nextForMessage,
+              };
+            });
+        }
       }
 
       if (agentId) {
@@ -116,19 +157,22 @@ export function useSubmitFeedback(agentId?: string) {
         );
       }
 
-      return { previousConversationFeedback, previousFeedbackType };
+      return { previousConversationFeedback, previousFeedbackType, previousDimensionFeedback, dimensionQueryKey };
     },
-    onSuccess: (_data, request) => {
+    onSuccess: () => {
       if (agentId) {
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.monthly(agentId) });
-        queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
-      }
-
-      if (request.conversation_id && request.user_id) {
-        queryClient.invalidateQueries({
-          queryKey: feedbackKeys.conversation(request.conversation_id, request.user_id),
-        });
+        // Thumbs feedback is optimistically reconciled for conversation/stats/monthly.
+        // Defer adaptation-related refresh and avoid active-view refetch storms.
+        window.setTimeout(() => {
+          queryClient.invalidateQueries({
+            queryKey: feedbackKeys.adjustments(agentId),
+            refetchType: 'inactive',
+          });
+          queryClient.invalidateQueries({
+            queryKey: feedbackKeys.traitState(agentId),
+            refetchType: 'inactive',
+          });
+        }, 1500);
       }
     },
     onError: (_error, request, context) => {
@@ -137,6 +181,9 @@ export function useSubmitFeedback(agentId?: string) {
           feedbackKeys.conversation(request.conversation_id, request.user_id),
           context.previousConversationFeedback
         );
+      }
+      if (context?.dimensionQueryKey && context.previousDimensionFeedback) {
+        queryClient.setQueryData(context.dimensionQueryKey, context.previousDimensionFeedback);
       }
 
       if (agentId) {
@@ -185,57 +232,114 @@ export function useConversationFeedback(conversationId: string, userId: string) 
       return invoke('get_conversation_feedback', { conversationId, userId });
     },
     enabled: !!conversationId && !!userId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    ...cacheFirstStaticQueryPolicy,
+    placeholderData: {},
+  });
+}
+
+export function useConversationDimensionFeedback(conversationId: string, userId: string) {
+  return useQuery({
+    queryKey: [...feedbackKeys.conversation(conversationId, userId), 'dimensions'],
+    queryFn: async (): Promise<ConversationDimensionFeedback> => {
+      return invoke('get_conversation_dimension_feedback', { conversationId, userId });
+    },
+    enabled: !!conversationId && !!userId,
+    ...cacheFirstStaticQueryPolicy,
     placeholderData: {},
   });
 }
 
 export function useFeedbackStats(agentId: string) {
+  const queryKey = feedbackKeys.stats(agentId);
+  const initialData = getCachedData<FeedbackStats>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
   return useQuery({
-    queryKey: feedbackKeys.stats(agentId),
+    queryKey,
     queryFn: async (): Promise<FeedbackStats> => {
       return invoke('get_agent_feedback_stats', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
 export function useFeedbackMonthly(agentId: string) {
+  const queryKey = feedbackKeys.monthly(agentId);
+  const initialData = getCachedData<FeedbackMonthlyPoint[]>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
   return useQuery({
-    queryKey: feedbackKeys.monthly(agentId),
+    queryKey,
     queryFn: async (): Promise<FeedbackMonthlyPoint[]> => {
       return invoke('get_agent_feedback_monthly', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
 export function usePersonalityAdjustments(agentId: string) {
+  const queryKey = feedbackKeys.adjustments(agentId);
+  const initialData = getCachedData<PersonalityAdjustment[]>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
   return useQuery({
-    queryKey: feedbackKeys.adjustments(agentId),
+    queryKey,
     queryFn: async (): Promise<PersonalityAdjustment[]> => {
       return invoke('list_personality_adjustments', { agentId });
     },
     enabled: !!agentId,
-    staleTime: Infinity,
-    gcTime: 24 * 60 * 60 * 1000,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useTraitState(agentId: string) {
+  const queryKey = feedbackKeys.traitState(agentId);
+  const initialData = getCachedData<TraitState>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
+  return useQuery({
+    queryKey,
+    queryFn: async (): Promise<TraitState> => {
+      return invoke('get_agent_trait_state', { agentId });
+    },
+    enabled: !!agentId,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useSetAdaptationEnabled(agentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (enabled: boolean): Promise<TraitState> => {
+      return invoke('set_agent_adaptation_enabled', { agentId, enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.traitState(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+    },
+  });
+}
+
+export function useRevertLastAdaptationCycle(agentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      return invoke('revert_agent_last_adaptation_cycle', { agentId });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.traitState(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+    },
   });
 }
 
@@ -246,8 +350,8 @@ export function useAnalyzeFeedbackPatterns(agentId: string) {
       return invoke('analyze_agent_feedback_patterns', { agentId });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId) });
-      queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId) });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.adjustments(agentId), refetchType: 'all' });
+      queryClient.invalidateQueries({ queryKey: feedbackKeys.stats(agentId), refetchType: 'all' });
     },
   });
 }

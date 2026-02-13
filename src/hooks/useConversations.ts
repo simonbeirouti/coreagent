@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
-import { abilityKeys, conversationKeys } from '@/lib/query-keys';
+import { abilityKeys, conversationKeys, memoryKeys } from '@/lib/query-keys';
 
 function getOptimisticParentId(messages: Message[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
@@ -43,6 +43,47 @@ function getAgentIdForConversation(
     if (match?.agent_id) return match.agent_id;
   }
   return null;
+}
+
+function invalidateAgentDashboardQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  agentId: string
+) {
+  queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
+  queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
+  queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+  queryClient.invalidateQueries({
+    predicate: (query) =>
+      Array.isArray(query.queryKey) &&
+      query.queryKey[0] === abilityKeys.all[0] &&
+      query.queryKey[1] === 'skill-trends' &&
+      query.queryKey[2] === agentId,
+  });
+  queryClient.invalidateQueries({
+    predicate: (query) =>
+      Array.isArray(query.queryKey) &&
+      query.queryKey[0] === memoryKeys.all[0] &&
+      query.queryKey[2] === agentId &&
+      (query.queryKey[1] === 'quality' || query.queryKey[1] === 'quality-timeseries'),
+  });
+}
+
+function invalidateFallbackDashboardQueries(queryClient: ReturnType<typeof useQueryClient>) {
+  queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+  queryClient.invalidateQueries({
+    predicate: (query) =>
+      Array.isArray(query.queryKey) &&
+      query.queryKey[0] === abilityKeys.all[0] &&
+      (query.queryKey[1] === 'agent' ||
+        query.queryKey[1] === 'skill-ratings' ||
+        query.queryKey[1] === 'skill-trends'),
+  });
+  queryClient.invalidateQueries({
+    predicate: (query) =>
+      Array.isArray(query.queryKey) &&
+      query.queryKey[0] === memoryKeys.all[0] &&
+      (query.queryKey[1] === 'quality' || query.queryKey[1] === 'quality-timeseries'),
+  });
 }
 
 // Fetch conversations for an agent
@@ -358,11 +399,9 @@ export function useSendMessage() {
       });
       
       if (agentId) {
-        queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
-        queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
-        queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+        invalidateAgentDashboardQueries(queryClient, agentId);
       } else {
-        queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+        invalidateFallbackDashboardQueries(queryClient);
       }
     },
   });
@@ -691,11 +730,9 @@ export function useSendMessageStreaming() {
             queryKey: conversationKeys.detail(request.conversation_id)
           });
           if (agentId) {
-            queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
-            queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
-            queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+            invalidateAgentDashboardQueries(queryClient, agentId);
           } else {
-            queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+            invalidateFallbackDashboardQueries(queryClient);
           }
 
           resolve(message);
@@ -911,11 +948,9 @@ export function useEditMessageStreaming() {
           });
 
           if (agentId) {
-            queryClient.invalidateQueries({ queryKey: conversationKeys.list(agentId) });
-            queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId) });
-            queryClient.invalidateQueries({ queryKey: abilityKeys.skillRatings(agentId) });
+            invalidateAgentDashboardQueries(queryClient, agentId);
           } else {
-            queryClient.invalidateQueries({ queryKey: conversationKeys.lists() });
+            invalidateFallbackDashboardQueries(queryClient);
           }
 
           resolve(result);

@@ -1,6 +1,7 @@
 "use client"
 
 import { Link } from "@tanstack/react-router"
+import { Plus } from "lucide-react"
 import { useAuth } from "@/hooks/use-auth"
 import { useAgents } from "@/hooks/useAgents"
 import {
@@ -80,13 +81,23 @@ export function NavAgents() {
               </SidebarMenuButton>
             </SidebarMenuItem>
           ))
-        ) : (
-          <SidebarMenuItem>
-            <div className="px-2 py-1.5 text-sm text-muted-foreground">
-              No agents yet
-            </div>
-          </SidebarMenuItem>
-        )}
+        ) : null}
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            className="h-12 border border-dashed border-foreground/20 hover:bg-foreground/10 transition-colors"
+            size="lg"
+            tooltip="Create agent"
+            asChild
+          >
+            <Link
+              className="group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:items-center"
+              to="/agents/create"
+            >
+              <Plus className="size-4 shrink-0" />
+              <span className="group-data-[collapsible=icon]:hidden">Create agent</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>
   )

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from "react"
 import { User, Session } from "@supabase/supabase-js"
 import { invoke } from "@tauri-apps/api/core"
 import supabase from "@/lib/supabase"
+import { clearCache } from "@/lib/tauri-store"
 
 interface AuthContextType {
   user: User | null
@@ -19,40 +20,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check active session on mount
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session) {
+    const bootstrapAuth = async () => {
+      try {
+        // Check active session on mount
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session) {
+          return
+        }
+
+        const validatedUser = await validateUserInAuth(session)
+        if (!validatedUser) {
+          console.warn("Session user no longer exists in auth.users - forcing sign out")
+          await forceSignOut()
+          return
+        }
+
         // Verify session exists in Rust backend
-        const isValid = await verifySessionWithBackend(session.user.id)
-        
-        if (isValid) {
-          setSession(session)
-          setUser(session.user)
-        } else {
+        const isValid = await verifySessionWithBackend(validatedUser.id)
+        if (!isValid) {
           // Backend doesn't have session - sync it
           console.warn("Session mismatch - resyncing to backend")
           await syncSessionToBackend(session)
-          setSession(session)
-          setUser(session.user)
         }
+
+        setSession(session)
+        setUser(validatedUser)
+      } catch (error) {
+        console.error("Failed to bootstrap auth state:", error)
+        await forceSignOut()
+      } finally {
+        setLoading(false)
       }
-      
-      setLoading(false)
-    })
+    }
+
+    void bootstrapAuth()
 
     // Listen for auth changes
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setSession(session)
-      setUser(session?.user ?? null)
-
       if (session) {
+        const validatedUser = await validateUserInAuth(session)
+        if (!validatedUser) {
+          console.warn("Auth state changed with stale user - forcing sign out")
+          await forceSignOut()
+          return
+        }
+
+        setSession(session)
+        setUser(validatedUser)
         // Sync session to Rust backend
         await syncSessionToBackend(session)
       } else {
+        setSession(null)
+        setUser(null)
         // Clear session from Rust backend
         await clearSessionFromBackend()
+        await clearCache()
       }
     })
 
@@ -91,13 +115,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  const signOut = async () => {
+  const validateUserInAuth = async (session: Session): Promise<User | null> => {
+    try {
+      const { data, error } = await supabase.auth.getUser(session.access_token)
+      if (error || !data.user) {
+        console.warn("Failed to validate user against auth.users:", error)
+        return null
+      }
+
+      if (data.user.id !== session.user.id) {
+        console.warn("Session user mismatch during auth.users validation")
+        return null
+      }
+
+      return data.user
+    } catch (error) {
+      console.error("Unexpected error validating user against auth.users:", error)
+      return null
+    }
+  }
+
+  const forceSignOut = async () => {
     try {
       await supabase.auth.signOut()
-      await clearSessionFromBackend()
     } catch (error) {
       console.error("Error signing out:", error)
+    } finally {
+      setSession(null)
+      setUser(null)
+      await clearSessionFromBackend()
+      await clearCache()
     }
+  }
+
+  const signOut = async () => {
+    await forceSignOut()
   }
 
   const value = {

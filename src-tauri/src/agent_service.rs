@@ -6,6 +6,7 @@ use uuid::Uuid;
 use chrono;
 use tauri::ipc::Channel;
 use crate::ai_client::StreamEvent;
+use tokio::time::{timeout, Duration};
 
 // Agent data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,8 @@ impl From<agents::Model> for AgentData {
 pub struct AgentService;
 
 impl AgentService {
+    const STREAMING_TIMEOUT_SECONDS: u64 = 90;
+
     /// Create a new agent
     pub async fn create_agent(
         db: &DatabaseConnection,
@@ -299,8 +302,9 @@ impl AgentService {
             .await.ok().flatten();
 
         // Call AI client with agent's configuration and user profile (streaming)
-        let response = ai_client
-            .get_completion_with_image_streaming(
+        let timeout_result = timeout(
+            Duration::from_secs(Self::STREAMING_TIMEOUT_SECONDS),
+            ai_client.get_completion_with_image_streaming(
                 &agent.provider_type,
                 &agent.model_id,
                 &agent.name,
@@ -312,9 +316,28 @@ impl AgentService {
                 history,
                 &message,
                 image_base64.as_deref(),
-                on_event,
-            )
-            .await?;
+                on_event.clone(),
+            ),
+        )
+        .await;
+
+        let response = match timeout_result {
+            Ok(result) => result?,
+            Err(_) => {
+                let timeout_message = format!(
+                    "Streaming response timeout after {} seconds",
+                    Self::STREAMING_TIMEOUT_SECONDS
+                );
+                eprintln!(
+                    "[AGENT] {} for agent {} (provider={}, model={})",
+                    timeout_message, agent.name, agent.provider_type, agent.model_id
+                );
+                let _ = on_event.send(StreamEvent::Error {
+                    message: timeout_message.clone(),
+                });
+                return Err(timeout_message);
+            }
+        };
 
         println!("[AGENT] Agent {} generated streaming response ({} chars)", agent.name, response.len());
         Ok(response)

@@ -13,7 +13,7 @@ pub struct Model {
     pub acquired_at: DateTimeWithTimeZone,
     pub usage_count: i32,
     pub success_count: i32,
-    pub proficiency: f32,
+    pub proficiency: f64,
     pub last_used_at: Option<DateTimeWithTimeZone>,
 }
 

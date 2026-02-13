@@ -14,6 +14,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -32,7 +35,8 @@ import { MicrophoneButton } from '@/components/perception/microphone-button';
 import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
 import { MessageFeedback } from '@/components/feedback/message-feedback';
-import { useConversationFeedback } from '@/hooks/useFeedback';
+import { MarkdownContent } from '@/components/ui/markdown-content';
+import { useConversationDimensionFeedback } from '@/hooks/useFeedback';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
@@ -219,7 +223,7 @@ function AgentChatPage() {
   const [deleteConfirmMessageId, setDeleteConfirmMessageId] = useState<string | null>(null);
 
   const { data: messages, isLoading: messagesLoading } = useMessages(activeConversationId || '');
-  const { data: feedbackByMessage = {} } = useConversationFeedback(activeConversationId || '', userId);
+  const { data: feedbackByMessage = {} } = useConversationDimensionFeedback(activeConversationId || '', userId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
@@ -669,6 +673,23 @@ function AgentChatPage() {
                                     Edit
                                   </DropdownMenuItem>
                                 )}
+                                {message.role === 'assistant' && userId ? (
+                                  <DropdownMenuSub>
+                                    <DropdownMenuSubTrigger>
+                                      Feedback
+                                    </DropdownMenuSubTrigger>
+                                    <DropdownMenuSubContent className="w-52">
+                                      <MessageFeedback
+                                        agentId={agentId}
+                                        conversationId={activeConversationId || ''}
+                                        messageId={message.id}
+                                        userId={userId}
+                                        selected={feedbackByMessage[message.id]}
+                                        mode="menu"
+                                      />
+                                    </DropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                ) : null}
                                 <DropdownMenuItem
                                   variant="destructive"
                                   onClick={() => setDeleteConfirmMessageId(message.id)}
@@ -737,22 +758,11 @@ function AgentChatPage() {
                                   <MessageImage content={message.content} />
                                   {/* Render text content */}
                                   {getTextContent(message.content) && (
-                                    <div className="text-sm whitespace-pre-wrap">
-                                      {getTextContent(message.content)}
-                                    </div>
+                                    <MarkdownContent content={getTextContent(message.content)} />
                                   )}
                                   <div className="text-xs opacity-70 mt-2">
                                     {new Date(message.created_at).toLocaleTimeString()}
                                   </div>
-                                  {message.role === 'assistant' && userId ? (
-                                    <MessageFeedback
-                                      agentId={agentId}
-                                      conversationId={activeConversationId || ''}
-                                      messageId={message.id}
-                                      userId={userId}
-                                      selected={feedbackByMessage[message.id] ?? null}
-                                    />
-                                  ) : null}
                                 </>
                               )}
                             </CardContent>
@@ -797,9 +807,7 @@ function AgentChatPage() {
                   <div className="flex justify-start">
                     <Card className="max-w-[80%] p-0 bg-muted">
                       <CardContent className="p-3">
-                        <div className="text-sm whitespace-pre-wrap">
-                          {editMessageStreaming.streamingContent}
-                        </div>
+                        <MarkdownContent content={editMessageStreaming.streamingContent} />
                         <div className="flex items-center gap-2 mt-2">
                           <Loader2 className="h-3 w-3 animate-spin" />
                           <span className="text-xs opacity-70">AI is responding...</span>
@@ -814,9 +822,7 @@ function AgentChatPage() {
                     <Card className="max-w-[80%] p-0 bg-muted">
                       <CardContent className="p-3">
                         {sendMessageStreaming.streamingContent ? (
-                          <div className="text-sm whitespace-pre-wrap">
-                            {sendMessageStreaming.streamingContent}
-                          </div>
+                          <MarkdownContent content={sendMessageStreaming.streamingContent} />
                         ) : (
                           <div className="flex items-center gap-2">
                             <Loader2 className="h-3 w-3 animate-spin" />

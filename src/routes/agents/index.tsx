@@ -1,28 +1,49 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { useAuth } from '@/hooks/use-auth';
-import { useAgents } from '@/hooks/useAgents';
+import { useAgents, useUpdateAgent } from '@/hooks/useAgents';
+import { Agent } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { Plus, Bot, MessageSquare, MoreHorizontal, Brain, Mic, Settings, BarChart3 } from 'lucide-react';
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Plus, Bot, MessageSquare, Brain, Mic, Settings, BarChart3 } from 'lucide-react';
 import { Header } from '@/components/header';
 
 export const Route = createFileRoute('/agents/')({
   component: AgentsPage,
 });
 
+const statusUi: Record<Agent['state'], { label: string; triggerClass: string; dotClass: string }> = {
+  active: {
+    label: 'Active',
+    triggerClass: 'border-green-500/40 text-green-700 dark:text-green-300',
+    dotClass: 'bg-green-500',
+  },
+  paused: {
+    label: 'Paused',
+    triggerClass: 'border-yellow-500/40 text-yellow-700 dark:text-yellow-300',
+    dotClass: 'bg-yellow-500',
+  },
+  stopped: {
+    label: 'Stopped',
+    triggerClass: 'border-red-500/40 text-red-700 dark:text-red-300',
+    dotClass: 'bg-red-500',
+  },
+};
+
 function AgentsPage() {
   const { user } = useAuth();
   const { data: agents, isLoading, error } = useAgents(user?.id || '');
+  const updateAgent = useUpdateAgent();
+
+  const actionLabelClass =
+    'max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 group-hover:ml-2 group-hover:max-w-24 group-hover:opacity-100 group-focus-visible:ml-2 group-focus-visible:max-w-24 group-focus-visible:opacity-100';
 
   if (isLoading) {
     return (
@@ -71,15 +92,52 @@ function AgentsPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {agents?.map((agent) => (
             <Card key={agent.id} className="relative flex h-full flex-col">
               <CardHeader>
-                <div className="flex items-start gap-2">
+                <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center space-x-2">
                     <Bot className="h-5 w-5" />
                     <CardTitle className="text-lg">{agent.name}</CardTitle>
                   </div>
+                  <Select
+                    value={agent.state}
+                    onValueChange={(value) =>
+                      updateAgent.mutate({
+                        agentId: agent.id,
+                        updates: { state: value as Agent['state'] },
+                      })
+                    }
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className={`w-[120px] ${statusUi[agent.state].triggerClass}`}
+                      aria-label="Agent status"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent align="end">
+                      <SelectItem value="active">
+                        <span className="flex items-center gap-2">
+                          <span className={`h-2.5 w-2.5 rounded-full ${statusUi.active.dotClass}`} />
+                          {statusUi.active.label}
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="paused">
+                        <span className="flex items-center gap-2">
+                          <span className={`h-2.5 w-2.5 rounded-full ${statusUi.paused.dotClass}`} />
+                          {statusUi.paused.label}
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="stopped">
+                        <span className="flex items-center gap-2">
+                          <span className={`h-2.5 w-2.5 rounded-full ${statusUi.stopped.dotClass}`} />
+                          {statusUi.stopped.label}
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <CardDescription className="line-clamp-2">
                   {agent.persona}
@@ -95,57 +153,37 @@ function AgentsPage() {
                     <span>Model:</span>
                     <span className="font-mono">{agent.model_id}</span>
                   </div>
-                  <div className="flex w-full items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Button variant="outline" size="icon" asChild>
-                        <Link to="/agents/$agentId/dashboard" params={{ agentId: agent.id }}>
-                          <BarChart3 className="h-4 w-4" />
-                          <span className="sr-only">Dashboard</span>
-                        </Link>
-                      </Button>
-                      <Button variant="outline" size="icon" asChild>
-                        <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
-                          <MessageSquare className="h-4 w-4" />
-                          <span className="sr-only">Chat</span>
-                        </Link>
-                      </Button>
-                      <Button variant="outline" size="icon" asChild>
-                        <Link to="/agents/$agentId/memory" params={{ agentId: agent.id }}>
-                          <Brain className="h-4 w-4" />
-                          <span className="sr-only">Brain</span>
-                        </Link>
-                      </Button>
-                      <Button variant="outline" size="icon" asChild>
-                        <Link to="/agents/$agentId/voice" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
-                          <Mic className="h-4 w-4" />
-                          <span className="sr-only">Mic</span>
-                        </Link>
-                      </Button>
-                    </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="outline" size="icon" className="ml-auto">
-                          <MoreHorizontal className="h-4 w-4" />
-                          <span className="sr-only">Open card menu</span>
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem asChild>
-                          <Link to="/agents/$agentId/settings" params={{ agentId: agent.id }}>
-                            <Settings className="h-4 w-4" />
-                            Settings
-                          </Link>
-                        </DropdownMenuItem>
-                        <DropdownMenuSub>
-                          <DropdownMenuSubTrigger>Status</DropdownMenuSubTrigger>
-                          <DropdownMenuSubContent>
-                            <DropdownMenuItem>Active</DropdownMenuItem>
-                            <DropdownMenuItem>Ideal</DropdownMenuItem>
-                            <DropdownMenuItem>Stop</DropdownMenuItem>
-                          </DropdownMenuSubContent>
-                        </DropdownMenuSub>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                  <div className="flex w-full items-center gap-2">
+                    <Button variant="outline" size="sm" className="group h-9 gap-0 px-2" asChild>
+                      <Link to="/agents/$agentId/dashboard" params={{ agentId: agent.id }}>
+                        <BarChart3 className="h-4 w-4 shrink-0" />
+                        <span className={actionLabelClass}>Dashboard</span>
+                      </Link>
+                    </Button>
+                    <Button variant="outline" size="sm" className="group h-9 gap-0 px-2" asChild>
+                      <Link to="/agents/$agentId/chat" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
+                        <MessageSquare className="h-4 w-4 shrink-0" />
+                        <span className={actionLabelClass}>Chat</span>
+                      </Link>
+                    </Button>
+                    <Button variant="outline" size="sm" className="group h-9 gap-0 px-2" asChild>
+                      <Link to="/agents/$agentId/voice" params={{ agentId: agent.id }} search={{ conversationId: undefined }}>
+                        <Mic className="h-4 w-4 shrink-0" />
+                        <span className={actionLabelClass}>Mic</span>
+                      </Link>
+                    </Button>
+                    <Button variant="outline" size="sm" className="group h-9 gap-0 px-2" asChild>
+                      <Link to="/agents/$agentId/memory" params={{ agentId: agent.id }}>
+                        <Brain className="h-4 w-4 shrink-0" />
+                        <span className={actionLabelClass}>Memory</span>
+                      </Link>
+                    </Button>
+                    <Button variant="outline" size="sm" className="group h-9 gap-0 px-2" asChild>
+                      <Link to="/agents/$agentId/settings" params={{ agentId: agent.id }}>
+                        <Settings className="h-4 w-4 shrink-0" />
+                        <span className={actionLabelClass}>Settings</span>
+                      </Link>
+                    </Button>
                   </div>
                 </div>
               </CardContent>
