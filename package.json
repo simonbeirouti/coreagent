@@ -8,10 +8,14 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test": "pnpm test:frontend && pnpm test:rust",
+    "test:frontend": "vitest run",
+    "test:frontend:watch": "vitest",
+    "test:rust": "cargo +stable nextest run --manifest-path src-tauri/Cargo.toml --config-file src-tauri/nextest.toml",
     "seed:dashboard": "pnpm dlx tsx scripts/seed-test-data.ts",
     "check": "pnpm check:ts && pnpm check:rust",
     "check:ts": "tsc --noEmit",
-    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings"
+    "check:rust": "cargo +stable check --manifest-path src-tauri/Cargo.toml && cargo +stable clippy --manifest-path src-tauri/Cargo.toml -- -D warnings"
   },
   "dependencies": {
     "@base-ui/react": "^1.1.0",

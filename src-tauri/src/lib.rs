@@ -5,20 +5,20 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::redundant_closure)]
 
-mod auth;
-mod db;
-mod entities;
-mod agent_service;
-mod ability_service;
-mod conversation_service;
-mod ai_client;
-mod feedback_service;
-mod memory_service;
-mod user_profile_service;
-mod perception_tracker;
-mod audio_service;
-mod vision_service;
-mod input_sanitizer;
+pub mod auth;
+pub mod db;
+pub mod entities;
+pub mod agent_service;
+pub mod ability_service;
+pub mod conversation_service;
+pub mod ai_client;
+pub mod feedback_service;
+pub mod memory_service;
+pub mod user_profile_service;
+pub mod perception_tracker;
+pub mod audio_service;
+pub mod vision_service;
+pub mod input_sanitizer;
 
 use tauri::{Manager, ipc::Channel};
 use auth::{AuthState, SessionData};
