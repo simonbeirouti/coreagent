@@ -3,7 +3,8 @@
 Cloud-first, multimodal AI agent platform built with Rust + Supabase where agents see, hear, interact with the web, and evolve unique identities over time.
 
 ## Current Status
-Phase 2 (Agent Identity) is in progress with two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, and dashboard transparency surfaces now live; final rollout hardening is next.
+Phase 2 (Agent Identity) hardening is complete: two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, dashboard transparency surfaces, hardened frontend/backend tests, and project quality rules + docs are in place.
+Current focus is Phase 3 kickoff: automation and delegation using Rig + swarms-rs.
 
 ### Shipped
 - ✅ **Phase 0 (Foundation):** React + TypeScript app shell, routing, UI system, and auth UX
@@ -26,14 +27,14 @@ Phase 2 (Agent Identity) is in progress with two-layer quality feedback, closed-
   - Streaming message timeout guard prevents indefinite request hangs
 
 ### In Progress (Current Focus)
-- End-to-end validation of two-layer feedback/reconciliation across real data
-- Feedback discoverability polish for per-dimension controls and first-time guidance
-- Hardening tests + observability for adaptation/retrieval quality pipelines
+- Phase 3 automation architecture: delegated task lifecycle, tool contracts, and retry-safe orchestration primitives with Rig
+- Phase 3 delegation architecture: worker-role routing, handoff semantics, and policy boundaries with swarms-rs
+- First delegated workflow surfaces (browser + documentation operations) and observability traces
 
 ### Next
-- Replace heuristic scorer with orchestrator-model scoring + retry/backoff workflow
-- Complete Phase 2 hardening checklist and rollout acceptance
-- Kick off Phase 3: browser automation and deeper multimodal workflows
+- Implement delegated execution flows across Rig agents with explicit task state transitions
+- Add swarms-rs orchestration paths for multi-agent task decomposition and coordination
+- Expand browser automation as the first production delegation capability
 
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + TanStack Router + Shadcn UI + Tailwind CSS
@@ -120,6 +121,12 @@ The script performs a clean reseed for rows tagged with its seed source and recr
 - **[avatar_prd.md](avatar_prd.md)** - Avatar system feature specification
 - **[browser_automation_prd.md](browser_automation_prd.md)** - Browser automation feature specification
 - **[phase2_dashboard_data_guide.md](phase2_dashboard_data_guide.md)** - Dashboard data sources, chart wiring, and population checklist
+- **[docs/testing/two-layer-reliability.md](docs/testing/two-layer-reliability.md)** - Hardened test execution guide and quality gates
+- **[docs/platform/feature-map.md](docs/platform/feature-map.md)** - Feature ownership and platform capability map
+- **[docs/platform/getting-started-workflows.md](docs/platform/getting-started-workflows.md)** - Operator/developer workflow onboarding
+- **[docs/platform/data-meaning-reference.md](docs/platform/data-meaning-reference.md)** - Metric and data semantics reference
+- **[docs/platform/feedback-and-adaptation-flow.md](docs/platform/feedback-and-adaptation-flow.md)** - Two-layer feedback to adaptation lifecycle
+- **[docs/platform/dashboard-metrics-guide.md](docs/platform/dashboard-metrics-guide.md)** - Dashboard metrics interpretation guide
 - **[scripts/seed-dashboard-test-data.ts](scripts/seed-dashboard-test-data.ts)** - TypeScript synthetic dashboard seed script
 
 ## Phase 2 Runtime Flags
