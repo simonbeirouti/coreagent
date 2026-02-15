@@ -838,6 +838,9 @@ async fn list_personality_adjustments(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+
     tauri::Builder::default()
         .setup(|app| {
             // Initialize database connection at startup
@@ -875,6 +878,7 @@ pub fn run() {
         })
         .manage(AuthState::new())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_mic_recorder::init())
         .invoke_handler(tauri::generate_handler![
