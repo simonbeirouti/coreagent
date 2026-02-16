@@ -30,4 +30,3 @@ impl Related<super::agent_abilities::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-

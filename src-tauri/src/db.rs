@@ -1,4 +1,4 @@
-use sea_orm::{Database, DatabaseConnection, DbErr, ConnectOptions, ConnectionTrait};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr};
 use std::env;
 use std::time::Duration;
 
@@ -8,8 +8,8 @@ pub async fn init_db() -> Result<DatabaseConnection, DbErr> {
     dotenv::dotenv().ok();
 
     // Get database URL from environment
-    let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set in environment variables");
+    let database_url =
+        env::var("DATABASE_URL").expect("DATABASE_URL must be set in environment variables");
 
     // Configure connection options
     let mut opt = ConnectOptions::new(database_url);
@@ -29,7 +29,9 @@ pub async fn init_db() -> Result<DatabaseConnection, DbErr> {
     // Connect to database with options
     let db = Database::connect(opt).await?;
 
-    println!("[DB] Connected to PostgreSQL database with connection pool (prepared statements disabled)");
+    println!(
+        "[DB] Connected to PostgreSQL database with connection pool (prepared statements disabled)"
+    );
 
     Ok(db)
 }
@@ -37,7 +39,7 @@ pub async fn init_db() -> Result<DatabaseConnection, DbErr> {
 /// Test database connection
 pub async fn test_connection(db: &DatabaseConnection) -> Result<(), DbErr> {
     use sea_orm::Statement;
-    
+
     // Simple query to test connection
     let _result = db
         .execute(Statement::from_string(

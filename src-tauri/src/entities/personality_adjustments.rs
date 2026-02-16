@@ -35,4 +35,3 @@ impl Related<super::agents::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-

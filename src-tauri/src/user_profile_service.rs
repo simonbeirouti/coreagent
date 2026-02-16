@@ -1,9 +1,11 @@
 use crate::entities::user_profiles::{self, Entity as UserProfiles};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
+use chrono;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use chrono;
 
 // User profile data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,8 +62,7 @@ impl UserProfileService {
         db: &DatabaseConnection,
         user_id: String,
     ) -> Result<UserProfileData, String> {
-        let user_uuid = Uuid::parse_str(&user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_uuid = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         // Try to find existing profile
         if let Some(profile) = UserProfiles::find()
@@ -70,12 +71,18 @@ impl UserProfileService {
             .await
             .map_err(|e| format!("Failed to query user profile: {}", e))?
         {
-            println!("[USER_PROFILE] Found existing profile for user: {}", user_uuid);
+            println!(
+                "[USER_PROFILE] Found existing profile for user: {}",
+                user_uuid
+            );
             return Ok(profile.into());
         }
 
         // Create default profile if it doesn't exist
-        println!("[USER_PROFILE] Creating default profile for user: {}", user_uuid);
+        println!(
+            "[USER_PROFILE] Creating default profile for user: {}",
+            user_uuid
+        );
         let profile = user_profiles::ActiveModel {
             id: ActiveValue::Set(Uuid::new_v4()),
             user_id: ActiveValue::Set(user_uuid),
@@ -96,10 +103,15 @@ impl UserProfileService {
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
 
-        let profile = profile.insert(db).await
+        let profile = profile
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to create user profile: {}", e))?;
 
-        println!("[USER_PROFILE] Created default profile for user: {}", user_uuid);
+        println!(
+            "[USER_PROFILE] Created default profile for user: {}",
+            user_uuid
+        );
         Ok(profile.into())
     }
 
@@ -108,8 +120,7 @@ impl UserProfileService {
         db: &DatabaseConnection,
         user_id: String,
     ) -> Result<Option<UserProfileData>, String> {
-        let user_uuid = Uuid::parse_str(&user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_uuid = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         let profile = UserProfiles::find()
             .filter(user_profiles::Column::UserId.eq(user_uuid))
@@ -126,8 +137,7 @@ impl UserProfileService {
         user_id: String,
         updates: UpdateUserProfileRequest,
     ) -> Result<UserProfileData, String> {
-        let user_uuid = Uuid::parse_str(&user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_uuid = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         // Find existing profile
         let mut profile: user_profiles::ActiveModel = UserProfiles::find()
@@ -163,7 +173,9 @@ impl UserProfileService {
 
         profile.updated_at = Set(chrono::Utc::now().into());
 
-        let profile = profile.update(db).await
+        let profile = profile
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update user profile: {}", e))?;
 
         println!("[USER_PROFILE] Updated profile for user: {}", user_uuid);
@@ -171,12 +183,8 @@ impl UserProfileService {
     }
 
     /// Delete a user profile
-    pub async fn delete_profile(
-        db: &DatabaseConnection,
-        user_id: String,
-    ) -> Result<(), String> {
-        let user_uuid = Uuid::parse_str(&user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+    pub async fn delete_profile(db: &DatabaseConnection, user_id: String) -> Result<(), String> {
+        let user_uuid = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         let result = UserProfiles::delete_many()
             .filter(user_profiles::Column::UserId.eq(user_uuid))

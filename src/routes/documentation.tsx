@@ -65,6 +65,13 @@ function Documentation() {
       path: '/docs/platform/dashboard-metrics-guide.md'
     },
     {
+      title: 'Orchestration Job Assignment Board',
+      description: 'Board lanes, drag rules, and guided assignment workflow for orchestration.',
+      category: 'Platform Usage',
+      tags: ['orchestration', 'kanban', 'assignment', 'agents'],
+      path: '/docs/platform/orchestration-job-assignment-board.md'
+    },
+    {
       title: 'Two-Layer Reliability Testing',
       description: 'Frontend and backend reliability suite, command matrix, and release gates.',
       category: 'Reliability & Testing',

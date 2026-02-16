@@ -1,8 +1,8 @@
-use sea_orm::{DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, ActiveValue, QueryOrder};
+use sea_orm::{ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::entities::{perception_stats, perception_logs};
+use crate::entities::{perception_logs, perception_stats};
 
 pub struct PerceptionTracker;
 
@@ -15,8 +15,8 @@ impl PerceptionTracker {
         action: &str,
         metadata: Option<Value>,
     ) -> Result<(), String> {
-        let agent_uuid = Uuid::parse_str(agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_uuid =
+            Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         // Try to find existing stat record
         let existing_stat = perception_stats::Entity::find()
@@ -52,7 +52,9 @@ impl PerceptionTracker {
                     action: ActiveValue::Set(action.to_string()),
                     usage_count: ActiveValue::Set(1),
                     last_used_at: ActiveValue::Set(chrono::Utc::now().into()),
-                    metadata: ActiveValue::Set(metadata.unwrap_or(Value::Object(serde_json::Map::new()))),
+                    metadata: ActiveValue::Set(
+                        metadata.unwrap_or(Value::Object(serde_json::Map::new())),
+                    ),
                     created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 };
 
@@ -76,8 +78,8 @@ impl PerceptionTracker {
         analysis_result: Option<Value>,
         duration_ms: Option<i32>,
     ) -> Result<(), String> {
-        let agent_uuid = Uuid::parse_str(agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_uuid =
+            Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let conversation_uuid = conversation_id
             .map(|id| Uuid::parse_str(id))
@@ -108,8 +110,8 @@ impl PerceptionTracker {
         db: &DatabaseConnection,
         agent_id: &str,
     ) -> Result<Vec<PerceptionStat>, String> {
-        let agent_uuid = Uuid::parse_str(agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_uuid =
+            Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let stats = perception_stats::Entity::find()
             .filter(perception_stats::Column::AgentId.eq(agent_uuid))
@@ -118,7 +120,8 @@ impl PerceptionTracker {
             .await
             .map_err(|e| format!("Failed to fetch perception stats: {}", e))?;
 
-        let result = stats.into_iter()
+        let result = stats
+            .into_iter()
             .map(|stat| PerceptionStat {
                 feature_type: stat.feature_type,
                 action: stat.action,

@@ -20,6 +20,15 @@ async fn migration_and_policy_sanity_checks() -> Result<(), String> {
         "personality_adjustments",
         "retrieval_tuning_state",
         "retrieval_tuning_events",
+        "agent_delegations",
+        "orchestration_runs",
+        "orchestration_tasks",
+        "orchestration_task_attempts",
+        "orchestration_delegations",
+        "orchestration_events",
+        "orchestration_heartbeats",
+        "orchestration_memories",
+        "orchestration_schedules",
     ];
 
     for table in required_tables {
@@ -81,7 +90,10 @@ async fn migration_and_policy_sanity_checks() -> Result<(), String> {
             ],
         ))
         .await;
-    assert!(invalid_rating_insert.is_err(), "expected check/enum constraint on rating");
+    assert!(
+        invalid_rating_insert.is_err(),
+        "expected check/enum constraint on rating"
+    );
 
     let invalid_score_insert = db
         .execute(Statement::from_sql_and_values(
@@ -99,7 +111,10 @@ async fn migration_and_policy_sanity_checks() -> Result<(), String> {
             vec![fixture.user_message_id.into(), fixture.agent_id.into()],
         ))
         .await;
-    assert!(invalid_score_insert.is_err(), "expected score bounds constraint on labels");
+    assert!(
+        invalid_score_insert.is_err(),
+        "expected score bounds constraint on labels"
+    );
 
     let policies_row = db
         .query_one(Statement::from_sql_and_values(

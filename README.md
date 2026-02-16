@@ -4,7 +4,21 @@ Cloud-first, multimodal AI agent platform built with Rust + Supabase where agent
 
 ## Current Status
 Phase 2 (Agent Identity) hardening is complete: two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, dashboard transparency surfaces, hardened frontend/backend tests, and project quality rules + docs are in place.
-Current focus is Phase 3 kickoff: automation and delegation using Rig + swarms-rs.
+Current focus is Phase 3 orchestration: board-first agent assignment, delegated run/task lifecycle, and upcoming skills runtime + vetted registry.
+
+## Project Updates (February 16, 2026)
+- Legacy monolithic PRD content has been extracted into focused phase PRDs.
+- Sub-agent/delegation/orchestration requirements now live in `sub_agents_orchestration_prd.md`.
+- Skills runtime + vetted registry requirements now live in `skills_registry_prd.md`.
+- `prd.md` is now a thin program index with extracted requirement mapping and next-step execution order.
+- Program backlog items not covered by those two phase PRDs are explicitly tracked: teams/collaboration, cross-device realtime sync, avatar roadmap, advanced audio, and documentation intelligence productization.
+- Root route now provides a board-first orchestration experience:
+  - lanes: `Idle Queue`, `Working Now`, `Ready For Review`
+  - guided `Create Job Assignment` wizard for run/task/delegation/schedule/memory creation
+  - drag guardrails:
+    - `idle -> review` is blocked
+    - `idle -> working` is task-context gated via dialog
+  - board lane positions persist locally per agent for continuity
 
 ### Shipped
 - ✅ **Phase 0 (Foundation):** React + TypeScript app shell, routing, UI system, and auth UX
@@ -27,14 +41,14 @@ Current focus is Phase 3 kickoff: automation and delegation using Rig + swarms-r
   - Streaming message timeout guard prevents indefinite request hangs
 
 ### In Progress (Current Focus)
-- Phase 3 automation architecture: delegated task lifecycle, tool contracts, and retry-safe orchestration primitives with Rig
-- Phase 3 delegation architecture: worker-role routing, handoff semantics, and policy boundaries with swarms-rs
-- First delegated workflow surfaces (browser + documentation operations) and observability traces
+- Phase 3 orchestration hardening: backend-driven lane state, review-completion semantics, and richer diagnostics
+- Skills runtime and vetted registry implementation for safe in-app install/update/disable
+- Reliability coverage expansion for orchestration board interactions and assignment lifecycle paths
 
 ### Next
-- Implement delegated execution flows across Rig agents with explicit task state transitions
-- Add swarms-rs orchestration paths for multi-agent task decomposition and coordination
-- Expand browser automation as the first production delegation capability
+- Connect lane state to orchestration run/task lifecycle as source-of-truth
+- Add explicit review completion transitions tied to run/task status outcomes
+- Implement skills runtime sandbox + signed registry integration
 
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + TanStack Router + Shadcn UI + Tailwind CSS
@@ -115,11 +129,13 @@ The script performs a clean reseed for rows tagged with its seed source and recr
 
 ## Documentation
 
-- **[prd.md](prd.md)** - Product requirements, shipped features, and roadmap
+- **[prd.md](prd.md)** - Thin program PRD index, requirement extraction map, and next-step sequence
 - **[dashboard_transparency_prd.md](dashboard_transparency_prd.md)** - Phase 2 transparency UX and explainability requirements
 - **[two_layer_reliability_suite_prd.md](two_layer_reliability_suite_prd.md)** - Unified QA + observability + testing reliability plan
 - **[avatar_prd.md](avatar_prd.md)** - Avatar system feature specification
 - **[browser_automation_prd.md](browser_automation_prd.md)** - Browser automation feature specification
+- **[sub_agents_orchestration_prd.md](sub_agents_orchestration_prd.md)** - Phase 3 sub-agent orchestration, heartbeats, scheduling, and reliability test gates
+- **[skills_registry_prd.md](skills_registry_prd.md)** - Skills runtime + vetted registry architecture for safe in-app install/update execution
 - **[phase2_dashboard_data_guide.md](phase2_dashboard_data_guide.md)** - Dashboard data sources, chart wiring, and population checklist
 - **[docs/testing/two-layer-reliability.md](docs/testing/two-layer-reliability.md)** - Hardened test execution guide and quality gates
 - **[docs/platform/feature-map.md](docs/platform/feature-map.md)** - Feature ownership and platform capability map
@@ -128,6 +144,7 @@ The script performs a clean reseed for rows tagged with its seed source and recr
 - **[docs/platform/data-meaning-reference.md](docs/platform/data-meaning-reference.md)** - Metric and data semantics reference
 - **[docs/platform/feedback-and-adaptation-flow.md](docs/platform/feedback-and-adaptation-flow.md)** - Two-layer feedback to adaptation lifecycle
 - **[docs/platform/dashboard-metrics-guide.md](docs/platform/dashboard-metrics-guide.md)** - Dashboard metrics interpretation guide
+- **[docs/platform/orchestration-job-assignment-board.md](docs/platform/orchestration-job-assignment-board.md)** - Board lanes, drag rules, and guided job-assignment flow
 - **[scripts/seed-dashboard-test-data.ts](scripts/seed-dashboard-test-data.ts)** - TypeScript synthetic dashboard seed script
 
 ## Phase 2 Runtime Flags
@@ -178,6 +195,6 @@ coreagent/
 
 ## Contributing
 
-1. Check [prd.md](prd.md) for current priorities, status, and roadmap
+1. Check [prd.md](prd.md), [sub_agents_orchestration_prd.md](sub_agents_orchestration_prd.md), and [skills_registry_prd.md](skills_registry_prd.md) for current priorities and active implementation scope
 2. Follow existing patterns for React Query caching and Supabase/RLS-safe data flows
 3. Run `pnpm run check` before opening a PR

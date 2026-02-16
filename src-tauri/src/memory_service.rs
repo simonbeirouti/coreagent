@@ -109,14 +109,24 @@ impl MemoryService {
     fn retrieval_telemetry_enabled() -> bool {
         std::env::var("RETRIEVAL_TELEMETRY")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true)
     }
 
     fn retrieval_auto_tune_enabled() -> bool {
         std::env::var("RETRIEVAL_AUTO_TUNE")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true)
     }
 
@@ -347,20 +357,24 @@ impl MemoryService {
             .map_err(|e| format!("Failed decoding quality sample_size: {e}"))?;
         let hit_rate = summary_row
             .try_get::<f64>("", "hit_rate")
-            .map_err(|e| format!("Failed decoding quality hit_rate: {e}"))? as f32;
+            .map_err(|e| format!("Failed decoding quality hit_rate: {e}"))?
+            as f32;
         let avg_top_similarity = summary_row
             .try_get::<f64>("", "avg_top_similarity")
-            .map_err(|e| format!("Failed decoding quality avg_top_similarity: {e}"))? as f32;
+            .map_err(|e| format!("Failed decoding quality avg_top_similarity: {e}"))?
+            as f32;
         let p95_latency_ms = summary_row
             .try_get::<f64>("", "p95_latency_ms")
-            .map_err(|e| format!("Failed decoding quality p95_latency_ms: {e}"))? as f32;
+            .map_err(|e| format!("Failed decoding quality p95_latency_ms: {e}"))?
+            as f32;
         let judged_precision = summary_row
             .try_get::<Option<f64>>("", "judged_precision")
             .map_err(|e| format!("Failed decoding quality judged_precision: {e}"))?
             .map(|v| v as f32);
         let hit_rate_stddev = stddev_row
             .try_get::<f64>("", "hit_rate_stddev")
-            .map_err(|e| format!("Failed decoding quality hit_rate_stddev: {e}"))? as f32;
+            .map_err(|e| format!("Failed decoding quality hit_rate_stddev: {e}"))?
+            as f32;
         let source_row = db
             .query_one(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -426,7 +440,8 @@ impl MemoryService {
             .try_get::<i64>("", "confidence_above_target_count")
             .map_err(|e| format!("Failed decoding confidence above-target count: {e}"))?;
         let confidence_above_target_ratio = if confidence_scored_sample_size > 0 {
-            (confidence_above_target_count as f32 / confidence_scored_sample_size as f32).clamp(0.0, 1.0)
+            (confidence_above_target_count as f32 / confidence_scored_sample_size as f32)
+                .clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -440,14 +455,12 @@ impl MemoryService {
         };
         let stability_score = (1.0 - (hit_rate_stddev / 0.30)).clamp(0.0, 1.0);
         let precision_score = judged_precision.unwrap_or(0.60).clamp(0.0, 1.0);
-        let quality_score = (
-            (hit_rate.clamp(0.0, 1.0) * 0.35)
-                + (avg_top_similarity.clamp(0.0, 1.0) * 0.30)
-                + (latency_score * 0.20)
-                + (stability_score * 0.10)
-                + (precision_score * 0.05)
-        )
-        .clamp(0.0, 1.0);
+        let quality_score = ((hit_rate.clamp(0.0, 1.0) * 0.35)
+            + (avg_top_similarity.clamp(0.0, 1.0) * 0.30)
+            + (latency_score * 0.20)
+            + (stability_score * 0.10)
+            + (precision_score * 0.05))
+            .clamp(0.0, 1.0);
 
         let mut reasons = Vec::new();
         if sample_size < Self::AUTO_TUNE_MIN_EVENTS {
@@ -491,15 +504,14 @@ impl MemoryService {
         })
     }
 
-    async fn run_auto_tuning_cycle(
-        db: &DatabaseConnection,
-        agent_id: Uuid,
-    ) -> Result<(), String> {
+    async fn run_auto_tuning_cycle(db: &DatabaseConnection, agent_id: Uuid) -> Result<(), String> {
         if !Self::retrieval_auto_tune_enabled() {
             return Ok(());
         }
         let state = Self::get_or_create_tuning_state(db, agent_id).await?;
-        let quality = Self::evaluate_retrieval_quality_window(db, agent_id, Self::AUTO_TUNE_WINDOW_DAYS).await?;
+        let quality =
+            Self::evaluate_retrieval_quality_window(db, agent_id, Self::AUTO_TUNE_WINDOW_DAYS)
+                .await?;
 
         let mut guardrail_flags = serde_json::json!({
             "cooldown_minutes": Self::AUTO_TUNE_COOLDOWN_MINUTES,
@@ -511,7 +523,8 @@ impl MemoryService {
             let since = chrono::Utc::now() - last_tuned_at;
             if since < chrono::Duration::minutes(Self::AUTO_TUNE_COOLDOWN_MINUTES) {
                 let reason = "cooldown_active";
-                guardrail_flags["minutes_since_last_tuned"] = serde_json::json!(since.num_minutes());
+                guardrail_flags["minutes_since_last_tuned"] =
+                    serde_json::json!(since.num_minutes());
                 Self::persist_tuning_event(
                     db,
                     agent_id,
@@ -621,7 +634,9 @@ impl MemoryService {
         agent_id: Uuid,
     ) -> Result<RetrievalTuningStatus, String> {
         let state = Self::get_or_create_tuning_state(db, agent_id).await?;
-        let quality = Self::evaluate_retrieval_quality_window(db, agent_id, Self::AUTO_TUNE_WINDOW_DAYS).await?;
+        let quality =
+            Self::evaluate_retrieval_quality_window(db, agent_id, Self::AUTO_TUNE_WINDOW_DAYS)
+                .await?;
         let rows = db
             .query_all(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -650,10 +665,9 @@ impl MemoryService {
                 status: row
                     .try_get("", "status")
                     .map_err(|e| format!("Failed decoding tuning decision status: {e}"))?,
-                previous_threshold: row
-                    .try_get::<f64>("", "previous_threshold")
-                    .map_err(|e| format!("Failed decoding tuning decision previous_threshold: {e}"))?
-                    as f32,
+                previous_threshold: row.try_get::<f64>("", "previous_threshold").map_err(|e| {
+                    format!("Failed decoding tuning decision previous_threshold: {e}")
+                })? as f32,
                 next_threshold: row
                     .try_get::<f64>("", "next_threshold")
                     .map_err(|e| format!("Failed decoding tuning decision next_threshold: {e}"))?
@@ -1241,4 +1255,3 @@ mod tests {
         assert_eq!(literal, "[0.5,-1.25,2]");
     }
 }
-

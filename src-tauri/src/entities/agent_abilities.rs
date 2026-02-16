@@ -52,4 +52,3 @@ impl Related<super::abilities::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-

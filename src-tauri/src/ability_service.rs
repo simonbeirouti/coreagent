@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, QueryFilter, QueryOrder, Set, Statement,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend,
+    DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,7 +106,12 @@ impl AbilityService {
     fn identity_trends_enabled() -> bool {
         std::env::var("IDENTITY_TRENDS")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true)
     }
 
@@ -167,7 +172,12 @@ impl AbilityService {
                 ],
             ))
             .await
-            .map_err(|e| format!("Failed persisting skill rating snapshot {}: {e}", rating.skill_key))?;
+            .map_err(|e| {
+                format!(
+                    "Failed persisting skill rating snapshot {}: {e}",
+                    rating.skill_key
+                )
+            })?;
         }
         Ok(())
     }
@@ -374,10 +384,9 @@ impl AbilityService {
         feedback_score: f32,
         confidence_score: f32,
     ) -> f32 {
-        let base =
-            (0.6 * quality_score.clamp(0.0, 1.0))
-                + (0.2 * engagement_score.clamp(0.0, 1.0))
-                + (0.2 * feedback_score.clamp(0.0, 1.0));
+        let base = (0.6 * quality_score.clamp(0.0, 1.0))
+            + (0.2 * engagement_score.clamp(0.0, 1.0))
+            + (0.2 * feedback_score.clamp(0.0, 1.0));
         let confidence_multiplier = 0.7 + 0.3 * confidence_score.clamp(0.0, 1.0);
         (100.0 * base * confidence_multiplier).clamp(0.0, 100.0)
     }
@@ -714,14 +723,17 @@ impl AbilityService {
         db: &DatabaseConnection,
         agent_id: String,
     ) -> Result<Vec<SkillPerformanceRatingData>, String> {
-        let agent_uuid = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
-        let abilities = Self::list_agent_abilities(db, agent_id.clone()).await.unwrap_or_else(|err| {
-            eprintln!(
-                "[RATING] Failed to load agent abilities for {}: {}",
-                agent_id, err
-            );
-            Vec::new()
-        });
+        let agent_uuid =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let abilities = Self::list_agent_abilities(db, agent_id.clone())
+            .await
+            .unwrap_or_else(|err| {
+                eprintln!(
+                    "[RATING] Failed to load agent abilities for {}: {}",
+                    agent_id, err
+                );
+                Vec::new()
+            });
         let ability_map: HashMap<String, AgentAbilityData> = abilities
             .into_iter()
             .map(|ability| (ability.implementation_key.clone(), ability))
@@ -771,8 +783,12 @@ impl AbilityService {
             let usage_count = ability_usage_count.max(perception_usage_count);
             let engagement_score = Self::normalize_usage(usage_count);
             let confidence_score = Self::confidence_from_usage(usage_count);
-            let rating =
-                Self::compute_rating(quality_score, engagement_score, feedback_score, confidence_score);
+            let rating = Self::compute_rating(
+                quality_score,
+                engagement_score,
+                feedback_score,
+                confidence_score,
+            );
 
             ratings.push(SkillPerformanceRatingData {
                 skill_key: definition.skill_key.to_string(),
@@ -805,7 +821,8 @@ impl AbilityService {
         agent_id: String,
         days: i32,
     ) -> Result<Vec<SkillRatingTrendSeries>, String> {
-        let agent_uuid = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let agent_uuid =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
         let days = days.clamp(1, 90);
         let sql = r#"
             SELECT
@@ -843,19 +860,24 @@ impl AbilityService {
                 .map_err(|e| format!("Failed decoding trend skill_name: {e}"))?;
             let rating = row
                 .try_get::<f64>("", "rating")
-                .map_err(|e| format!("Failed decoding trend rating: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend rating: {e}"))?
+                as f32;
             let quality_score = row
                 .try_get::<f64>("", "quality_score")
-                .map_err(|e| format!("Failed decoding trend quality_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend quality_score: {e}"))?
+                as f32;
             let engagement_score = row
                 .try_get::<f64>("", "engagement_score")
-                .map_err(|e| format!("Failed decoding trend engagement_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend engagement_score: {e}"))?
+                as f32;
             let feedback_score = row
                 .try_get::<f64>("", "feedback_score")
-                .map_err(|e| format!("Failed decoding trend feedback_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend feedback_score: {e}"))?
+                as f32;
             let confidence_score = row
                 .try_get::<f64>("", "confidence_score")
-                .map_err(|e| format!("Failed decoding trend confidence_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend confidence_score: {e}"))?
+                as f32;
             let usage_count = row
                 .try_get::<i32>("", "usage_count")
                 .map_err(|e| format!("Failed decoding trend usage_count: {e}"))?;
@@ -863,13 +885,14 @@ impl AbilityService {
                 .try_get("", "snapshot_at")
                 .map_err(|e| format!("Failed decoding trend snapshot_at: {e}"))?;
 
-            let entry = grouped
-                .entry(skill_key.clone())
-                .or_insert_with(|| SkillRatingTrendSeries {
-                    skill_key: skill_key.clone(),
-                    skill_name: skill_name.clone(),
-                    points: Vec::new(),
-                });
+            let entry =
+                grouped
+                    .entry(skill_key.clone())
+                    .or_insert_with(|| SkillRatingTrendSeries {
+                        skill_key: skill_key.clone(),
+                        skill_name: skill_name.clone(),
+                        points: Vec::new(),
+                    });
             entry.points.push(SkillRatingTrendPoint {
                 timestamp,
                 rating,
@@ -955,7 +978,9 @@ mod tests {
         });
         let missing_required = json!({});
         let unknown_field = json!({"detail": "low", "foo": true});
-        assert!(AbilityService::validate_config_against_schema(&missing_required, &schema).is_err());
+        assert!(
+            AbilityService::validate_config_against_schema(&missing_required, &schema).is_err()
+        );
         assert!(AbilityService::validate_config_against_schema(&unknown_field, &schema).is_err());
     }
 
@@ -967,4 +992,3 @@ mod tests {
         assert!(!AbilityService::is_core_category("automation"));
     }
 }
-

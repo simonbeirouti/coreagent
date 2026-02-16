@@ -1,25 +1,33 @@
 #![allow(deprecated)]
 
-use rig::completion::{Chat, Message};
+use crate::input_sanitizer::escape_for_prompt;
+use crate::user_profile_service::UserProfileData;
+use futures::StreamExt;
 use rig::agent::AgentBuilder;
 use rig::client::CompletionClient;
-use rig::providers::openai;
+use rig::completion::{Chat, Message};
 use rig::providers::anthropic;
+use rig::providers::openai;
 use std::sync::Arc;
-use crate::user_profile_service::UserProfileData;
 pub use tauri::ipc::Channel;
-use futures::StreamExt;
-use crate::input_sanitizer::escape_for_prompt;
 
 // OpenAI Vision API imports
 use async_openai::{
-    types::chat::{CreateChatCompletionRequestArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart, ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage, ImageUrl, ImageDetail},
+    types::chat::{
+        ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+        ChatCompletionRequestMessageContentPartText, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+        CreateChatCompletionRequestArgs, ImageDetail, ImageUrl,
+    },
     Client as OpenAIClient,
 };
 
 // Anthropic streaming imports
 use async_anthropic::{
-    types::{CreateMessagesRequestBuilder, MessageBuilder, MessageRole, MessagesStreamEvent, ContentBlockDelta},
+    types::{
+        ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder, MessageRole,
+        MessagesStreamEvent,
+    },
     Client as AnthropicStreamingClient,
 };
 
@@ -116,9 +124,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         };
                         prompt.push_str(&format!(
                             "\n- {}: {} ({:.2})",
-                            trait_name,
-                            descriptor,
-                            score
+                            trait_name, descriptor, score
                         ));
                     }
                     prompt.push_str(
@@ -131,13 +137,17 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Add user profile information if available
         if let Some(profile) = user_profile {
             prompt.push_str("\n\n# USER PROFILE INFORMATION - This contains user preferences and context\n## About the User");
-            
+
             // Add AI response language directive (from dedicated column)
-            prompt.push_str(&format!("\n- IMPORTANT: Respond in {} language", Self::get_language_name(&profile.ai_response_language)));
-            
+            prompt.push_str(&format!(
+                "\n- IMPORTANT: Respond in {} language",
+                Self::get_language_name(&profile.ai_response_language)
+            ));
+
             // Add preferences from JSONB
             if let Some(prefs) = profile.preferences.as_object() {
-                if let Some(comm_style) = prefs.get("communication_style").and_then(|v| v.as_str()) {
+                if let Some(comm_style) = prefs.get("communication_style").and_then(|v| v.as_str())
+                {
                     let escaped_style = escape_for_prompt(comm_style);
                     prompt.push_str(&format!("\n- Communication style: {}", escaped_style));
                 }
@@ -146,23 +156,27 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     prompt.push_str(&format!("\n- Timezone: {}", escaped_timezone));
                 }
             }
-            
+
             // Add habits from JSONB
             if let Some(habits) = profile.habits.as_object() {
-                if let Some(feedback_style) = habits.get("feedback_style").and_then(|v| v.as_str()) {
+                if let Some(feedback_style) = habits.get("feedback_style").and_then(|v| v.as_str())
+                {
                     let escaped_feedback = escape_for_prompt(feedback_style);
                     prompt.push_str(&format!("\n- Feedback style: {}", escaped_feedback));
                 }
-                if let Some(session_length) = habits.get("session_length").and_then(|v| v.as_str()) {
+                if let Some(session_length) = habits.get("session_length").and_then(|v| v.as_str())
+                {
                     let escaped_length = escape_for_prompt(session_length);
                     prompt.push_str(&format!("\n- Typical session length: {}", escaped_length));
                 }
-                if let Some(preferred_hours) = habits.get("preferred_hours").and_then(|v| v.as_str()) {
+                if let Some(preferred_hours) =
+                    habits.get("preferred_hours").and_then(|v| v.as_str())
+                {
                     let escaped_hours = escape_for_prompt(preferred_hours);
                     prompt.push_str(&format!("\n- Preferred working hours: {}", escaped_hours));
                 }
             }
-            
+
             // Add work patterns from JSONB
             if let Some(work) = profile.work_patterns.as_object() {
                 if let Some(domain) = work.get("domain").and_then(|v| v.as_str()) {
@@ -175,7 +189,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         .filter_map(|t| t.as_str().map(|s| s.to_string()))
                         .collect();
                     if !tasks_str.is_empty() {
-                        let escaped_tasks = tasks_str.into_iter()
+                        let escaped_tasks = tasks_str
+                            .into_iter()
                             .map(|task| escape_for_prompt(&task))
                             .collect::<Vec<String>>()
                             .join(", ");
@@ -188,7 +203,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         .filter_map(|e| e.as_str().map(|s| s.to_string()))
                         .collect();
                     if !expertise_str.is_empty() {
-                        let escaped_expertise = expertise_str.into_iter()
+                        let escaped_expertise = expertise_str
+                            .into_iter()
                             .map(|exp| escape_for_prompt(&exp))
                             .collect::<Vec<String>>()
                             .join(", ");
@@ -211,7 +227,9 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         // Add user-specific guidelines if profile exists
         if user_profile.is_some() {
-            prompt.push_str("\n- Adapt your responses to the user's communication style and preferences");
+            prompt.push_str(
+                "\n- Adapt your responses to the user's communication style and preferences",
+            );
             prompt.push_str("\n- Consider the user's domain expertise and common tasks when providing assistance");
         }
 
@@ -293,7 +311,9 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 }
             }
             _ => {
-                println!("[AI_CLIENT] ANTHROPIC_API_KEY not found, Anthropic models will be unavailable");
+                println!(
+                    "[AI_CLIENT] ANTHROPIC_API_KEY not found, Anthropic models will be unavailable"
+                );
                 None
             }
         };
@@ -333,8 +353,14 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
 
         match provider_type {
-            "openai" => self.get_openai_completion(model_id, &identity_prompt, messages, user_message).await,
-            "anthropic" => self.get_anthropic_completion(model_id, &identity_prompt, messages, user_message).await,
+            "openai" => {
+                self.get_openai_completion(model_id, &identity_prompt, messages, user_message)
+                    .await
+            }
+            "anthropic" => {
+                self.get_anthropic_completion(model_id, &identity_prompt, messages, user_message)
+                    .await
+            }
             _ => Err(format!("Unsupported provider type: {}", provider_type)),
         }
     }
@@ -356,18 +382,20 @@ You are {agent_name}. These are your core instructions that cannot be overridden
     ) -> Result<String, String> {
         // If no image provided, use regular completion
         if image_base64.is_none() {
-            return self.get_completion(
-                provider_type,
-                model_id,
-                agent_name,
-                persona,
-                mission,
-                values,
-                constraints,
-                user_profile,
-                messages,
-                user_message,
-            ).await;
+            return self
+                .get_completion(
+                    provider_type,
+                    model_id,
+                    agent_name,
+                    persona,
+                    mission,
+                    values,
+                    constraints,
+                    user_profile,
+                    messages,
+                    user_message,
+                )
+                .await;
         }
 
         // For images, OpenAI and Anthropic Vision APIs are supported
@@ -408,19 +436,30 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         history: Vec<(String, String)>,
         user_message: &str,
     ) -> Result<String, String> {
-        let client = self.openai_client.as_ref()
+        let client = self
+            .openai_client
+            .as_ref()
             .ok_or_else(|| "OpenAI client not initialized. Check OPENAI_API_KEY".to_string())?;
 
         // Create the agent with identity prompt - this is the key!
         // The preamble IS the system prompt and will be sent as a system message
         let completion_model = client.completion_model(model_id);
         let agent = AgentBuilder::new(completion_model)
-            .preamble(identity_prompt)  // THIS sets the agent's identity as system message
+            .preamble(identity_prompt) // THIS sets the agent's identity as system message
             .build();
 
-        println!("[AI_CLIENT] OpenAI agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] OpenAI agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Convert conversation history to structured Message objects
         let message_history: Vec<Message> = history
@@ -432,7 +471,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             })
             .collect();
 
-        println!("[AI_CLIENT] Converted {} history messages to structured format", message_history.len());
+        println!(
+            "[AI_CLIENT] Converted {} history messages to structured format",
+            message_history.len()
+        );
         println!("[AI_CLIENT] Sending to OpenAI API with identity prompt and conversation context");
 
         // Use .chat() method for conversational agents with structured message history
@@ -453,19 +495,29 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         history: Vec<(String, String)>,
         user_message: &str,
     ) -> Result<String, String> {
-        let client = self.anthropic_client.as_ref()
-            .ok_or_else(|| "Anthropic client not initialized. Check ANTHROPIC_API_KEY".to_string())?;
+        let client = self.anthropic_client.as_ref().ok_or_else(|| {
+            "Anthropic client not initialized. Check ANTHROPIC_API_KEY".to_string()
+        })?;
 
         // Create the agent with identity prompt - this is the key!
         // The preamble IS the system prompt and will be sent as a system message
         let completion_model = client.completion_model(model_id);
         let agent = AgentBuilder::new(completion_model)
-            .preamble(identity_prompt)  // THIS sets the agent's identity as system message
+            .preamble(identity_prompt) // THIS sets the agent's identity as system message
             .build();
 
-        println!("[AI_CLIENT] Anthropic agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] Anthropic agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Convert conversation history to structured Message objects
         let message_history: Vec<Message> = history
@@ -477,8 +529,13 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             })
             .collect();
 
-        println!("[AI_CLIENT] Converted {} history messages to structured format", message_history.len());
-        println!("[AI_CLIENT] Sending to Anthropic API with identity prompt and conversation context");
+        println!(
+            "[AI_CLIENT] Converted {} history messages to structured format",
+            message_history.len()
+        );
+        println!(
+            "[AI_CLIENT] Sending to Anthropic API with identity prompt and conversation context"
+        );
 
         // Use .chat() method for conversational agents with structured message history
         let response = agent
@@ -517,9 +574,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Create OpenAI Vision client directly (not using rig library for vision)
         let openai_client = OpenAIClient::new();
 
-        println!("[AI_CLIENT] OpenAI Vision agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] OpenAI Vision agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message with image",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Convert conversation history to OpenAI message format
         let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
@@ -527,9 +593,11 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Add system message with identity prompt
         chat_messages.push(ChatCompletionRequestMessage::System(
             async_openai::types::chat::ChatCompletionRequestSystemMessage {
-                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                    identity_prompt,
+                ),
                 name: None,
-            }
+            },
         ));
 
         // Add conversation history
@@ -562,15 +630,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
                     text: user_message.to_string(),
-                }
+                },
             ),
             ChatCompletionRequestUserMessageContentPart::ImageUrl(
                 ChatCompletionRequestMessageContentPartImage {
                     image_url: ImageUrl {
                         url: image_url,
                         detail: Some(ImageDetail::Low), // Use low detail for faster processing
-                    }
-                }
+                    },
+                },
             ),
         ];
 
@@ -591,7 +659,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .map_err(|e| format!("Failed to build vision request: {}", e))?;
 
         // Call OpenAI Vision API
-        let response = openai_client.chat().create(request).await
+        let response = openai_client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| format!("OpenAI Vision API error: {}", e))?;
 
         if let Some(choice) = response.choices.first() {
@@ -630,13 +701,24 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             user_profile,
         );
 
-        println!("[AI_CLIENT] Anthropic Vision agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] Anthropic Vision agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message with image",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // For Anthropic vision, we need to use the rig library's native support for images
         // The rig library supports Anthropic's vision API through the completion model
-        let client = self.anthropic_client.as_ref()
+        let client = self
+            .anthropic_client
+            .as_ref()
             .ok_or("Anthropic client not available")?;
 
         // Build a combined message that includes image description context
@@ -703,9 +785,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             user_profile,
         );
 
-        println!("[AI_CLIENT] Anthropic Vision streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] Anthropic Vision streaming agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message with image",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Get API key from environment
         let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -750,7 +841,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "stream": true
         });
 
-        println!("[AI_CLIENT] Sending Anthropic Vision request with {} messages", messages_json.len());
+        println!(
+            "[AI_CLIENT] Sending Anthropic Vision request with {} messages",
+            messages_json.len()
+        );
 
         // Create HTTP client and send request
         let client = reqwest::Client::new();
@@ -767,17 +861,26 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Check for HTTP errors
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            println!("[AI_CLIENT] Anthropic Vision API error: {} - {}", status, error_text);
-            on_event.send(StreamEvent::Error {
-                message: format!("Anthropic API error {}: {}", status, error_text)
-            }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            println!(
+                "[AI_CLIENT] Anthropic Vision API error: {} - {}",
+                status, error_text
+            );
+            on_event
+                .send(StreamEvent::Error {
+                    message: format!("Anthropic API error {}: {}", status, error_text),
+                })
+                .map_err(|e| format!("Failed to send Error event: {}", e))?;
             return Err(format!("Anthropic API error {}: {}", status, error_text));
         }
 
         // Process streaming response
         let mut full_content = String::new();
-        on_event.send(StreamEvent::Started)
+        on_event
+            .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
         // Read the streaming response as bytes
@@ -807,29 +910,58 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                                 // Parse JSON event
                                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                                     // Handle content_block_delta events
-                                    if event.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
+                                    if event.get("type").and_then(|t| t.as_str())
+                                        == Some("content_block_delta")
+                                    {
                                         if let Some(delta) = event.get("delta") {
-                                            if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                            if delta.get("type").and_then(|t| t.as_str())
+                                                == Some("text_delta")
+                                            {
+                                                if let Some(text) =
+                                                    delta.get("text").and_then(|t| t.as_str())
+                                                {
                                                     full_content.push_str(text);
-                                                    on_event.send(StreamEvent::Delta {
-                                                        content: text.to_string()
-                                                    }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                                                    on_event
+                                                        .send(StreamEvent::Delta {
+                                                            content: text.to_string(),
+                                                        })
+                                                        .map_err(|e| {
+                                                            format!(
+                                                                "Failed to send Delta event: {}",
+                                                                e
+                                                            )
+                                                        })?;
                                                 }
                                             }
                                         }
                                     }
                                     // Handle error events
-                                    else if event.get("type").and_then(|t| t.as_str()) == Some("error") {
-                                        let error_msg = event.get("error")
+                                    else if event.get("type").and_then(|t| t.as_str())
+                                        == Some("error")
+                                    {
+                                        let error_msg = event
+                                            .get("error")
                                             .and_then(|e| e.get("message"))
                                             .and_then(|m| m.as_str())
                                             .unwrap_or("Unknown error");
-                                        println!("[AI_CLIENT] Anthropic streaming error: {}", error_msg);
-                                        on_event.send(StreamEvent::Error {
-                                            message: format!("Anthropic streaming error: {}", error_msg)
-                                        }).map_err(|e| format!("Failed to send Error event: {}", e))?;
-                                        return Err(format!("Anthropic streaming error: {}", error_msg));
+                                        println!(
+                                            "[AI_CLIENT] Anthropic streaming error: {}",
+                                            error_msg
+                                        );
+                                        on_event
+                                            .send(StreamEvent::Error {
+                                                message: format!(
+                                                    "Anthropic streaming error: {}",
+                                                    error_msg
+                                                ),
+                                            })
+                                            .map_err(|e| {
+                                                format!("Failed to send Error event: {}", e)
+                                            })?;
+                                        return Err(format!(
+                                            "Anthropic streaming error: {}",
+                                            error_msg
+                                        ));
                                     }
                                 }
                             }
@@ -838,17 +970,21 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 }
                 Err(e) => {
                     println!("[AI_CLIENT] Stream read error: {}", e);
-                    on_event.send(StreamEvent::Error {
-                        message: format!("Stream read error: {}", e)
-                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    on_event
+                        .send(StreamEvent::Error {
+                            message: format!("Stream read error: {}", e),
+                        })
+                        .map_err(|e| format!("Failed to send Error event: {}", e))?;
                     return Err(format!("Stream read error: {}", e));
                 }
             }
         }
 
-        on_event.send(StreamEvent::Done {
-            full_content: full_content.clone()
-        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+        on_event
+            .send(StreamEvent::Done {
+                full_content: full_content.clone(),
+            })
+            .map_err(|e| format!("Failed to send Done event: {}", e))?;
 
         println!("[AI_CLIENT] Anthropic Vision streaming completion successful");
         Ok(full_content)
@@ -872,19 +1008,21 @@ You are {agent_name}. These are your core instructions that cannot be overridden
     ) -> Result<String, String> {
         // If no image provided, use regular completion
         if image_base64.is_none() {
-            return self.get_completion_streaming(
-                provider_type,
-                model_id,
-                agent_name,
-                persona,
-                mission,
-                values,
-                constraints,
-                user_profile,
-                messages,
-                user_message,
-                on_event,
-            ).await;
+            return self
+                .get_completion_streaming(
+                    provider_type,
+                    model_id,
+                    agent_name,
+                    persona,
+                    mission,
+                    values,
+                    constraints,
+                    user_profile,
+                    messages,
+                    user_message,
+                    on_event,
+                )
+                .await;
         }
 
         // For images, OpenAI and Anthropic Vision APIs are supported with streaming
@@ -935,12 +1073,40 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         match provider_type {
-            "openai" => self.get_openai_completion_streaming(model_id, agent_name, persona, mission, values, constraints, user_profile, messages, user_message, on_event).await,
-            "anthropic" => self.get_anthropic_completion_streaming(
-                model_id, agent_name, persona, mission, values, constraints,
-                user_profile, messages, user_message, on_event
-            ).await,
-            _ => Err(format!("Unsupported provider type for streaming: {}", provider_type)),
+            "openai" => {
+                self.get_openai_completion_streaming(
+                    model_id,
+                    agent_name,
+                    persona,
+                    mission,
+                    values,
+                    constraints,
+                    user_profile,
+                    messages,
+                    user_message,
+                    on_event,
+                )
+                .await
+            }
+            "anthropic" => {
+                self.get_anthropic_completion_streaming(
+                    model_id,
+                    agent_name,
+                    persona,
+                    mission,
+                    values,
+                    constraints,
+                    user_profile,
+                    messages,
+                    user_message,
+                    on_event,
+                )
+                .await
+            }
+            _ => Err(format!(
+                "Unsupported provider type for streaming: {}",
+                provider_type
+            )),
         }
     }
 
@@ -972,9 +1138,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Create OpenAI Vision client directly
         let openai_client = OpenAIClient::new();
 
-        println!("[AI_CLIENT] OpenAI Vision streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message with image", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] OpenAI Vision streaming agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message with image",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Convert conversation history to OpenAI message format
         let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
@@ -982,9 +1157,11 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Add system message with identity prompt
         chat_messages.push(ChatCompletionRequestMessage::System(
             async_openai::types::chat::ChatCompletionRequestSystemMessage {
-                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                    identity_prompt,
+                ),
                 name: None,
-            }
+            },
         ));
 
         // Add conversation history
@@ -1017,15 +1194,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             ChatCompletionRequestUserMessageContentPart::Text(
                 ChatCompletionRequestMessageContentPartText {
                     text: user_message.to_string(),
-                }
+                },
             ),
             ChatCompletionRequestUserMessageContentPart::ImageUrl(
                 ChatCompletionRequestMessageContentPartImage {
                     image_url: ImageUrl {
                         url: image_url,
                         detail: Some(ImageDetail::Low), // Use low detail for faster processing
-                    }
-                }
+                    },
+                },
             ),
         ];
 
@@ -1047,11 +1224,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .map_err(|e| format!("Failed to build vision streaming request: {}", e))?;
 
         // Create streaming response
-        let mut stream = openai_client.chat().create_stream(request).await
+        let mut stream = openai_client
+            .chat()
+            .create_stream(request)
+            .await
             .map_err(|e| format!("OpenAI Vision streaming API error: {}", e))?;
 
         let mut full_content = String::new();
-        on_event.send(StreamEvent::Started)
+        on_event
+            .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
         while let Some(result) = stream.next().await {
@@ -1060,24 +1241,30 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     if let Some(choice) = response.choices.first() {
                         if let Some(delta) = &choice.delta.content {
                             full_content.push_str(delta);
-                            on_event.send(StreamEvent::Delta {
-                                content: delta.clone()
-                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                            on_event
+                                .send(StreamEvent::Delta {
+                                    content: delta.clone(),
+                                })
+                                .map_err(|e| format!("Failed to send Delta event: {}", e))?;
                         }
                     }
                 }
                 Err(e) => {
-                    on_event.send(StreamEvent::Error {
-                        message: format!("Streaming error: {}", e)
-                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    on_event
+                        .send(StreamEvent::Error {
+                            message: format!("Streaming error: {}", e),
+                        })
+                        .map_err(|e| format!("Failed to send Error event: {}", e))?;
                     return Err(format!("OpenAI Vision streaming error: {}", e));
                 }
             }
         }
 
-        on_event.send(StreamEvent::Done {
-            full_content: full_content.clone()
-        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+        on_event
+            .send(StreamEvent::Done {
+                full_content: full_content.clone(),
+            })
+            .map_err(|e| format!("Failed to send Done event: {}", e))?;
 
         println!("[AI_CLIENT] OpenAI Vision streaming completion successful");
         Ok(full_content)
@@ -1110,9 +1297,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Create OpenAI client directly for streaming
         let openai_client = OpenAIClient::new();
 
-        println!("[AI_CLIENT] OpenAI streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] OpenAI streaming agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Convert conversation history to OpenAI message format
         let mut chat_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
@@ -1120,9 +1316,11 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Add system message with identity prompt
         chat_messages.push(ChatCompletionRequestMessage::System(
             async_openai::types::chat::ChatCompletionRequestSystemMessage {
-                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(identity_prompt),
+                content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                    identity_prompt,
+                ),
                 name: None,
-            }
+            },
         ));
 
         // Add conversation history
@@ -1154,7 +1352,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(user_message.to_string()),
                 name: None,
-            }
+            },
         ));
 
         // Build the streaming request
@@ -1168,11 +1366,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .map_err(|e| format!("Failed to build streaming request: {}", e))?;
 
         // Create streaming response
-        let mut stream = openai_client.chat().create_stream(request).await
+        let mut stream = openai_client
+            .chat()
+            .create_stream(request)
+            .await
             .map_err(|e| format!("OpenAI streaming API error: {}", e))?;
 
         let mut full_content = String::new();
-        on_event.send(StreamEvent::Started)
+        on_event
+            .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
         while let Some(result) = stream.next().await {
@@ -1181,24 +1383,30 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     if let Some(choice) = response.choices.first() {
                         if let Some(delta) = &choice.delta.content {
                             full_content.push_str(delta);
-                            on_event.send(StreamEvent::Delta {
-                                content: delta.clone()
-                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                            on_event
+                                .send(StreamEvent::Delta {
+                                    content: delta.clone(),
+                                })
+                                .map_err(|e| format!("Failed to send Delta event: {}", e))?;
                         }
                     }
                 }
                 Err(e) => {
-                    on_event.send(StreamEvent::Error {
-                        message: format!("Streaming error: {}", e)
-                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    on_event
+                        .send(StreamEvent::Error {
+                            message: format!("Streaming error: {}", e),
+                        })
+                        .map_err(|e| format!("Failed to send Error event: {}", e))?;
                     return Err(format!("OpenAI streaming error: {}", e));
                 }
             }
         }
 
-        on_event.send(StreamEvent::Done {
-            full_content: full_content.clone()
-        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+        on_event
+            .send(StreamEvent::Done {
+                full_content: full_content.clone(),
+            })
+            .map_err(|e| format!("Failed to send Done event: {}", e))?;
 
         println!("[AI_CLIENT] OpenAI streaming completion successful");
         Ok(full_content)
@@ -1231,9 +1439,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         // Create Anthropic streaming client (uses ANTHROPIC_API_KEY env var automatically)
         let client = AnthropicStreamingClient::default();
 
-        println!("[AI_CLIENT] Anthropic streaming agent with identity prompt: {}", &identity_prompt[..identity_prompt.len().min(50)]);
-        println!("[AI_CLIENT] Processing {} history messages + current message", history.len());
-        println!("[AI_CLIENT] Current user message: {}", &user_message[..user_message.len().min(100)]);
+        println!(
+            "[AI_CLIENT] Anthropic streaming agent with identity prompt: {}",
+            &identity_prompt[..identity_prompt.len().min(50)]
+        );
+        println!(
+            "[AI_CLIENT] Processing {} history messages + current message",
+            history.len()
+        );
+        println!(
+            "[AI_CLIENT] Current user message: {}",
+            &user_message[..user_message.len().min(100)]
+        );
 
         // Build messages list from history
         let mut messages = Vec::new();
@@ -1250,7 +1467,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     .role(message_role)
                     .content(content)
                     .build()
-                    .map_err(|e| format!("Failed to build history message: {}", e))?
+                    .map_err(|e| format!("Failed to build history message: {}", e))?,
             );
         }
 
@@ -1260,7 +1477,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 .role(MessageRole::User)
                 .content(user_message.to_string())
                 .build()
-                .map_err(|e| format!("Failed to build user message: {}", e))?
+                .map_err(|e| format!("Failed to build user message: {}", e))?,
         );
 
         // Build the streaming request
@@ -1276,7 +1493,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         let mut stream = client.messages().create_stream(request).await;
 
         let mut full_content = String::new();
-        on_event.send(StreamEvent::Started)
+        on_event
+            .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
         while let Some(result) = stream.next().await {
@@ -1286,24 +1504,28 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     if let MessagesStreamEvent::ContentBlockDelta { delta, .. } = event {
                         if let ContentBlockDelta::TextDelta { text } = delta {
                             full_content.push_str(&text);
-                            on_event.send(StreamEvent::Delta {
-                                content: text
-                            }).map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                            on_event
+                                .send(StreamEvent::Delta { content: text })
+                                .map_err(|e| format!("Failed to send Delta event: {}", e))?;
                         }
                     }
                 }
                 Err(e) => {
-                    on_event.send(StreamEvent::Error {
-                        message: format!("Anthropic streaming error: {}", e)
-                    }).map_err(|e| format!("Failed to send Error event: {}", e))?;
+                    on_event
+                        .send(StreamEvent::Error {
+                            message: format!("Anthropic streaming error: {}", e),
+                        })
+                        .map_err(|e| format!("Failed to send Error event: {}", e))?;
                     return Err(format!("Anthropic streaming error: {}", e));
                 }
             }
         }
 
-        on_event.send(StreamEvent::Done {
-            full_content: full_content.clone()
-        }).map_err(|e| format!("Failed to send Done event: {}", e))?;
+        on_event
+            .send(StreamEvent::Done {
+                full_content: full_content.clone(),
+            })
+            .map_err(|e| format!("Failed to send Done event: {}", e))?;
 
         println!("[AI_CLIENT] Anthropic streaming completion successful");
         Ok(full_content)

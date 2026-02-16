@@ -179,8 +179,6 @@ function AgentDashboardPage() {
           errorMessage={tuningError ? String(tuningError) : undefined}
         />
       </div>
-
     </div>
   );
 }
-

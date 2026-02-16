@@ -1,5 +1,7 @@
 use chrono::Utc;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+};
 use std::{env, time::Duration};
 use uuid::Uuid;
 
@@ -44,7 +46,10 @@ pub async fn connect_test_db() -> Option<DatabaseConnection> {
     }
 }
 
-pub async fn create_fixture(db: &DatabaseConnection, test_name: &str) -> Result<TestFixture, String> {
+pub async fn create_fixture(
+    db: &DatabaseConnection,
+    test_name: &str,
+) -> Result<TestFixture, String> {
     let run_id = format!("{}-{}", test_name, Uuid::new_v4());
     let now = Utc::now();
 
@@ -61,7 +66,9 @@ pub async fn create_fixture(db: &DatabaseConnection, test_name: &str) -> Result<
         ))
         .await
         .map_err(|e| format!("Failed querying existing user_id for fixture: {e}"))?
-        .ok_or_else(|| "No existing agents found to source a valid user_id for tests".to_string())?;
+        .ok_or_else(|| {
+            "No existing agents found to source a valid user_id for tests".to_string()
+        })?;
     let user_id: Uuid = user_id_row
         .try_get("", "user_id")
         .map_err(|e| format!("Failed decoding fixture user_id: {e}"))?;
@@ -196,7 +203,11 @@ pub async fn cleanup_fixture(db: &DatabaseConnection, fixture: &TestFixture) {
 
     for (sql, values) in cleanup_statements {
         if let Err(err) = db
-            .execute(Statement::from_sql_and_values(DbBackend::Postgres, sql, values))
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                sql,
+                values,
+            ))
             .await
         {
             eprintln!("[tests] Cleanup warning ({}): {}", fixture.run_id, err);

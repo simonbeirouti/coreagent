@@ -6,7 +6,8 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn retrieval_status_exposes_source_mix_confidence_and_guardrail_reasons() -> Result<(), String> {
+async fn retrieval_status_exposes_source_mix_confidence_and_guardrail_reasons() -> Result<(), String>
+{
     let Some(db) = connect_test_db().await else {
         return Ok(());
     };

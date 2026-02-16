@@ -57,3 +57,14 @@ export const perceptionKeys = {
   all: ['perception-stats'] as const,
   stats: (agentId: string) => [...perceptionKeys.all, agentId] as const,
 };
+
+export const orchestrationKeys = {
+  all: ['orchestration'] as const,
+  runs: (agentId: string) => [...orchestrationKeys.all, 'runs', agentId] as const,
+  run: (runId: string) => [...orchestrationKeys.all, 'run', runId] as const,
+  tasks: (runId: string) => [...orchestrationKeys.all, 'tasks', runId] as const,
+  diagnostics: (runId: string) => [...orchestrationKeys.all, 'diagnostics', runId] as const,
+  delegations: (agentId: string) => [...orchestrationKeys.all, 'delegations', agentId] as const,
+  memories: (runId: string, viewerAgentId: string, scopeFilter = 'all') =>
+    [...orchestrationKeys.all, 'memories', runId, viewerAgentId, scopeFilter] as const,
+};

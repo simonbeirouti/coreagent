@@ -1,9 +1,11 @@
 use async_openai::{
-    types::audio::{CreateTranscriptionRequestArgs, CreateSpeechRequestArgs, SpeechModel, Voice, AudioInput},
-    Client as OpenAIClient,
     config::OpenAIConfig,
+    types::audio::{
+        AudioInput, CreateSpeechRequestArgs, CreateTranscriptionRequestArgs, SpeechModel, Voice,
+    },
+    Client as OpenAIClient,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use reqwest::Client as HttpClient;
 use serde::Serialize;
 use std::sync::Arc;
@@ -42,7 +44,10 @@ impl AudioService {
         let openai_client = Arc::new(OpenAIClient::new());
         let http_client = HttpClient::new();
 
-        Self { openai_client, http_client }
+        Self {
+            openai_client,
+            http_client,
+        }
     }
 
     /// Start microphone recording
@@ -63,7 +68,10 @@ impl AudioService {
         // For now, return a placeholder - actual implementation would depend on plugin API
 
         // Placeholder implementation - in real usage, this would get actual audio data
-        Err("Audio recording not yet implemented - requires frontend plugin integration".to_string())
+        Err(
+            "Audio recording not yet implemented - requires frontend plugin integration"
+                .to_string(),
+        )
     }
 
     /// Transcribe audio using OpenAI Whisper API
@@ -73,10 +81,8 @@ impl AudioService {
         _language: Option<String>,
     ) -> Result<String, String> {
         // Create transcription request using audio bytes
-        let audio_input = AudioInput::from_vec_u8(
-            format!("audio_{}.wav", uuid::Uuid::new_v4()),
-            audio_data,
-        );
+        let audio_input =
+            AudioInput::from_vec_u8(format!("audio_{}.wav", uuid::Uuid::new_v4()), audio_data);
         let request = CreateTranscriptionRequestArgs::default()
             .file(audio_input)
             .model("whisper-1")
@@ -84,7 +90,12 @@ impl AudioService {
             .map_err(|e| format!("Failed to build transcription request: {}", e))?;
 
         // Call OpenAI API
-        let response = self.openai_client.audio().transcription().create(request).await
+        let response = self
+            .openai_client
+            .audio()
+            .transcription()
+            .create(request)
+            .await
             .map_err(|e| format!("Whisper API error: {}", e))?;
 
         Ok(response.text)
@@ -113,7 +124,12 @@ impl AudioService {
             .build()
             .map_err(|e| format!("Failed to build speech request: {}", e))?;
 
-        let response = self.openai_client.audio().speech().create(request).await
+        let response = self
+            .openai_client
+            .audio()
+            .speech()
+            .create(request)
+            .await
             .map_err(|e| format!("TTS API error: {}", e))?;
 
         // The response contains audio bytes directly
@@ -127,7 +143,8 @@ impl AudioService {
         language: Option<String>,
     ) -> Result<String, String> {
         // Decode base64 to bytes
-        let audio_data = general_purpose::STANDARD.decode(audio_base64)
+        let audio_data = general_purpose::STANDARD
+            .decode(audio_base64)
             .map_err(|e| format!("Invalid base64 audio data: {}", e))?;
 
         self.transcribe(audio_data, language).await
@@ -154,7 +171,8 @@ impl AudioService {
     ) -> Result<AudioUploadResult, String> {
         let upload_url = format!("{}/storage/v1/object/{}/{}", supabase_url, bucket, path);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&upload_url)
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "audio/wav")
@@ -166,7 +184,10 @@ impl AudioService {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(format!("Audio upload failed with status {}: {}", status, error_text));
+            return Err(format!(
+                "Audio upload failed with status {}: {}",
+                status, error_text
+            ));
         }
 
         Ok(AudioUploadResult {
@@ -196,13 +217,9 @@ impl AudioService {
         // Optionally save to storage
         let storage_path = if save_audio {
             let filename = format!("{}/{}.wav", user_id, uuid::Uuid::new_v4());
-            let upload_result = self.upload_to_storage(
-                &audio_data,
-                "audio",
-                &filename,
-                supabase_url,
-                access_token,
-            ).await?;
+            let upload_result = self
+                .upload_to_storage(&audio_data, "audio", &filename, supabase_url, access_token)
+                .await?;
             Some(upload_result.storage_path)
         } else {
             None
@@ -224,10 +241,12 @@ impl AudioService {
         access_token: &str,
     ) -> Result<AudioUploadResult, String> {
         // Decode base64 to bytes
-        let audio_data = general_purpose::STANDARD.decode(audio_base64)
+        let audio_data = general_purpose::STANDARD
+            .decode(audio_base64)
             .map_err(|e| format!("Invalid base64 audio data: {}", e))?;
 
         let filename = format!("{}/{}.wav", user_id, uuid::Uuid::new_v4());
-        self.upload_to_storage(&audio_data, "audio", &filename, supabase_url, access_token).await
+        self.upload_to_storage(&audio_data, "audio", &filename, supabase_url, access_token)
+            .await
     }
 }
