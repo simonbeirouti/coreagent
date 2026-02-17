@@ -1,0 +1,38 @@
+name: Skills Registry CI
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "supabase/migrations/**"
+      - ".github/workflows/skills-registry-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "server/**"
+      - "supabase/migrations/**"
+      - ".github/workflows/skills-registry-ci.yml"
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.0
+
+      - name: Install server dependencies
+        run: pnpm install --frozen-lockfile --dir server
+
+      - name: Run server CI checks
+        run: pnpm --dir server check:ci
