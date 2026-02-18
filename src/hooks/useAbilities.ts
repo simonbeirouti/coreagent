@@ -30,6 +30,34 @@ export interface AgentToolSetting {
   config: Record<string, unknown>;
   parameters_schema: Record<string, unknown>;
   is_mandatory: boolean;
+  source?: 'core' | 'registry-managed' | 'orchestration-runtime' | 'custom';
+  lifecycle_state?:
+    | 'discovered'
+    | 'installed'
+    | 'assigned'
+    | 'runtime_validated'
+    | 'active'
+    | 'revoked'
+    | 'force_disabled'
+    | 'sync_stale';
+  enforcement_state?:
+    | 'active'
+    | 'blocked_policy'
+    | 'blocked_compatibility'
+    | 'force_disabled'
+    | 'sync_stale';
+  disabled_reason?: string | null;
+}
+
+export interface AgentRegistrySkill {
+  agentAbilityId: string;
+  skillId: string;
+  implementationKey: string;
+  name: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  installState?: string | null;
+  pinnedVersion?: string | null;
 }
 
 export interface SkillPerformanceRating {
@@ -117,6 +145,17 @@ export function useAgentToolSettings(agentId: string) {
   });
 }
 
+export function useAgentRegistrySkills(agentId: string) {
+  return useQuery({
+    queryKey: abilityKeys.agentRegistrySkills(agentId),
+    queryFn: async (): Promise<AgentRegistrySkill[]> => {
+      return invoke('list_agent_registry_skills', { agentId });
+    },
+    enabled: !!agentId,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
 export function useSetAgentAbilityEnabled(agentId: string) {
   const queryClient = useQueryClient();
 
@@ -159,4 +198,3 @@ export function useUpdateAgentAbilityConfig(agentId: string) {
     },
   });
 }
-

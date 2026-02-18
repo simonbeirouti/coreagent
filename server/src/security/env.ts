@@ -50,15 +50,10 @@ export type AppEnv = z.infer<typeof EnvSchema>;
 
 function hydrateEnvFromDotenvFiles(): void {
   const cwd = process.cwd();
-  const rootEnvPath = resolve(cwd, "../.env");
   const serverEnvPath = resolve(cwd, ".env");
 
-  if (existsSync(rootEnvPath)) {
-    loadDotenv({ path: rootEnvPath, override: false });
-  }
-
   if (existsSync(serverEnvPath)) {
-    loadDotenv({ path: serverEnvPath, override: true });
+    loadDotenv({ path: serverEnvPath, override: false });
   }
 }
 

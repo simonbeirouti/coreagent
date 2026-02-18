@@ -1,11 +1,18 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useMemo, useState } from 'react';
 import {
+  useAgentRegistrySkills,
   useAgentToolSettings,
   useSetAgentAbilityEnabled,
   useUpdateAgentAbilityConfig,
   type AgentToolSetting,
 } from '@/hooks/useAbilities';
+import {
+  useAssignRegistrySkill,
+  useInstallRegistrySkill,
+  useInstalledSkills,
+  useRegistrySkills,
+} from '@/hooks/useRegistrySkills';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
@@ -28,6 +35,23 @@ import { toast } from 'sonner';
 
 const categoryOrder = ['memory', 'perception', 'communication', 'automation', 'productivity'];
 const AVAILABLE_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const;
+const SOURCE_LABELS: Record<'core' | 'registry-managed' | 'orchestration-runtime' | 'custom', string> = {
+  core: 'Core',
+  'registry-managed': 'Registry',
+  'orchestration-runtime': 'Orchestration',
+  custom: 'Custom',
+};
+
+const LIFECYCLE_LABELS: Record<NonNullable<AgentToolSetting['lifecycle_state']>, string> = {
+  discovered: 'Discovered',
+  installed: 'Installed',
+  assigned: 'Assigned',
+  runtime_validated: 'Validated',
+  active: 'Active',
+  revoked: 'Revoked',
+  force_disabled: 'Force Disabled',
+  sync_stale: 'Sync Stale',
+};
 
 function toCategoryLabel(category: string) {
   return category.charAt(0).toUpperCase() + category.slice(1);
@@ -66,6 +90,48 @@ function isToolEditable(setting: AgentToolSetting) {
   return getEditableFields(setting).length > 0;
 }
 
+function resolveToolSource(setting: AgentToolSetting): keyof typeof SOURCE_LABELS {
+  if (setting.source) {
+    return setting.source;
+  }
+  return setting.is_mandatory ? 'core' : 'registry-managed';
+}
+
+function resolveLifecycleState(setting: AgentToolSetting): NonNullable<AgentToolSetting['lifecycle_state']> {
+  if (setting.lifecycle_state) {
+    return setting.lifecycle_state;
+  }
+  if (setting.is_mandatory) {
+    return 'active';
+  }
+  return setting.enabled ? 'active' : 'assigned';
+}
+
+function resolveDisabledReason(setting: AgentToolSetting) {
+  if (setting.enabled) {
+    return null;
+  }
+  if (setting.disabled_reason && setting.disabled_reason.trim().length > 0) {
+    return setting.disabled_reason;
+  }
+  if (setting.enforcement_state === 'force_disabled') {
+    return 'Disabled by registry advisory or revocation.';
+  }
+  if (setting.enforcement_state === 'blocked_policy') {
+    return 'Disabled by policy requirements.';
+  }
+  if (setting.enforcement_state === 'blocked_compatibility') {
+    return 'Disabled due to app compatibility constraints.';
+  }
+  if (setting.enforcement_state === 'sync_stale') {
+    return 'Disabled while skill sync is stale.';
+  }
+  if (setting.is_mandatory) {
+    return 'Core tools remain enabled for runtime safety.';
+  }
+  return 'Disabled for this agent.';
+}
+
 export const Route = createFileRoute('/agents/$agentId/tools')({
   component: AgentToolsPage,
 });
@@ -73,19 +139,71 @@ export const Route = createFileRoute('/agents/$agentId/tools')({
 function AgentToolsPage() {
   const { agentId } = Route.useParams();
   const { data: settings = [], isLoading, error } = useAgentToolSettings(agentId);
+  const { data: registrySkills = [] } = useAgentRegistrySkills(agentId);
+  const { data: catalogSkills = [], isLoading: isCatalogLoading } = useRegistrySkills();
+  const { data: installedSkills = [] } = useInstalledSkills();
+  const installRegistrySkill = useInstallRegistrySkill();
+  const assignRegistrySkill = useAssignRegistrySkill(agentId);
   const setEnabled = useSetAgentAbilityEnabled(agentId);
   const updateConfig = useUpdateAgentAbilityConfig(agentId);
   const [editingTool, setEditingTool] = useState<AgentToolSetting | null>(null);
   const [configDrafts, setConfigDrafts] = useState<Record<string, string>>({});
 
+  const mergedSettings = useMemo(() => {
+    if (registrySkills.length === 0) {
+      return settings;
+    }
+    const registryByImplementation = new Map(
+      registrySkills.map((skill) => [skill.implementationKey, skill])
+    );
+
+    return settings.map((setting) => {
+      if (setting.is_mandatory) {
+        return { ...setting, source: setting.source ?? 'core' };
+      }
+
+      const registry = registryByImplementation.get(setting.implementation_key);
+      if (!registry) {
+        return {
+          ...setting,
+          source: setting.source ?? 'custom',
+          lifecycle_state: setting.lifecycle_state ?? (setting.enabled ? 'active' : 'assigned'),
+        };
+      }
+
+      const installState = registry.installState?.toLowerCase();
+      const isInstalled = installState === 'installed';
+      const lifecycleState: NonNullable<AgentToolSetting['lifecycle_state']> = !isInstalled
+        ? 'force_disabled'
+        : setting.enabled
+          ? 'active'
+          : 'assigned';
+
+      const enforcementState: NonNullable<AgentToolSetting['enforcement_state']> | undefined =
+        !isInstalled ? 'force_disabled' : setting.enabled ? 'active' : undefined;
+
+      return {
+        ...setting,
+        source: 'registry-managed' as const,
+        lifecycle_state: setting.lifecycle_state ?? lifecycleState,
+        enforcement_state: setting.enforcement_state ?? enforcementState,
+        disabled_reason:
+          setting.disabled_reason ??
+          (!isInstalled
+            ? `Registry install state is '${registry.installState ?? 'unknown'}'.`
+            : null),
+      };
+    });
+  }, [registrySkills, settings]);
+
   const grouped = useMemo(() => {
     const byCategory: Record<string, AgentToolSetting[]> = {};
-    for (const setting of settings) {
+    for (const setting of mergedSettings) {
       if (!byCategory[setting.category]) byCategory[setting.category] = [];
       byCategory[setting.category].push(setting);
     }
     return byCategory;
-  }, [settings]);
+  }, [mergedSettings]);
 
   const sortedCategories = useMemo(() => {
     const categories = Object.keys(grouped);
@@ -97,9 +215,29 @@ function AgentToolsPage() {
       return aRank - bRank;
     });
   }, [grouped]);
-  const enabledCount = settings.filter((tool) => tool.enabled).length;
-  const toggleableTools = settings.filter((tool) => !tool.is_mandatory);
+  const enabledCount = mergedSettings.filter((tool) => tool.enabled).length;
+  const sourceCounts = useMemo(() => {
+    const counts: Record<keyof typeof SOURCE_LABELS, number> = {
+      core: 0,
+      'registry-managed': 0,
+      'orchestration-runtime': 0,
+      custom: 0,
+    };
+    for (const tool of mergedSettings) {
+      counts[resolveToolSource(tool)] += 1;
+    }
+    return counts;
+  }, [mergedSettings]);
+  const toggleableTools = mergedSettings.filter((tool) => !tool.is_mandatory);
   const hasToggleableTools = toggleableTools.length > 0;
+  const installedSkillIds = useMemo(
+    () => new Set(installedSkills.map((skill) => skill.skillId)),
+    [installedSkills]
+  );
+  const assignedSkillIds = useMemo(
+    () => new Set(registrySkills.filter((skill) => skill.enabled).map((skill) => skill.skillId)),
+    [registrySkills]
+  );
 
   const setToolEnabled = async (setting: AgentToolSetting, enabled: boolean) => {
     try {
@@ -176,6 +314,37 @@ function AgentToolsPage() {
     }
   };
 
+  const installSkill = async (skillId: string) => {
+    try {
+      await installRegistrySkill.mutateAsync({ skillId });
+      await assignRegistrySkill.mutateAsync({ skillId, enabled: true });
+      toast.success('Skill installed and assigned to agent');
+    } catch (installError) {
+      toast.error('Failed to install and assign skill');
+      console.error(installError);
+    }
+  };
+
+  const assignSkill = async (skillId: string) => {
+    try {
+      await assignRegistrySkill.mutateAsync({ skillId });
+      toast.success('Skill assigned to agent');
+    } catch (assignError) {
+      toast.error('Failed to assign skill');
+      console.error(assignError);
+    }
+  };
+
+  const unassignSkill = async (skillId: string) => {
+    try {
+      await assignRegistrySkill.mutateAsync({ skillId, enabled: false });
+      toast.success('Skill unassigned from agent');
+    } catch (unassignError) {
+      toast.error('Failed to unassign skill');
+      console.error(unassignError);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="p-4 space-y-4">
@@ -235,7 +404,10 @@ function AgentToolsPage() {
 
   return (
     <div className="p-4 space-y-4 overflow-y-auto">
-      <Header title="Tool Access" description={`${enabledCount}/${settings.length} tools enabled`}>
+      <Header
+        title="Tool Access"
+        description={`${enabledCount}/${mergedSettings.length} tools enabled • ${sourceCounts.core} core • ${sourceCounts['registry-managed']} registry`}
+      >
         {hasToggleableTools ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
@@ -267,14 +439,27 @@ function AgentToolsPage() {
               .sort((a, b) => a.ability_name.localeCompare(b.ability_name))
               .map((setting) => {
                 const editable = isToolEditable(setting);
+                const source = resolveToolSource(setting);
+                const lifecycle = resolveLifecycleState(setting);
+                const disabledReason = resolveDisabledReason(setting);
                 return (
                   <Card key={setting.ability_id} className="px-0 py-4">
                     <CardHeader>
                       <div className="flex items-start justify-between gap-2">
                         <CardTitle className="text-base">{setting.ability_name}</CardTitle>
-                        {setting.is_mandatory ? <Badge variant="secondary">Core</Badge> : null}
+                        <div className="flex flex-wrap gap-1 justify-end">
+                          <Badge variant={source === 'core' ? 'secondary' : 'outline'}>
+                            {SOURCE_LABELS[source]}
+                          </Badge>
+                          <Badge variant={lifecycle === 'active' ? 'secondary' : 'outline'}>
+                            {LIFECYCLE_LABELS[lifecycle]}
+                          </Badge>
+                        </div>
                       </div>
                       <CardDescription className="line-clamp-2">{toToolSummary(setting)}</CardDescription>
+                      {disabledReason ? (
+                        <p className="text-xs text-muted-foreground mt-1">{disabledReason}</p>
+                      ) : null}
                     </CardHeader>
                     <CardContent className="flex items-center justify-between gap-2">
                       <Label htmlFor={`tool-toggle-${setting.ability_id}`} className="text-sm">
@@ -306,6 +491,106 @@ function AgentToolsPage() {
           </div>
         </section>
       ))}
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Registry Skills
+        </h2>
+        {isCatalogLoading ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <Card key={`registry-skeleton-${index}`} className="px-0 py-4">
+                <CardHeader className="space-y-2">
+                  <Skeleton className="h-5 w-40" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-2/3" />
+                </CardHeader>
+                <CardContent className="flex items-center justify-between">
+                  <Skeleton className="h-6 w-20" />
+                  <Skeleton className="h-9 w-24" />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        ) : catalogSkills.length > 0 ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {catalogSkills.map((skill) => {
+              const isInstalled = installedSkillIds.has(skill.skillId);
+              const isAssigned = assignedSkillIds.has(skill.skillId);
+              const actionPending = installRegistrySkill.isPending || assignRegistrySkill.isPending;
+              return (
+                <Card key={skill.skillId} className="px-0 py-4">
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-2">
+                      <CardTitle className="text-base">{skill.name}</CardTitle>
+                      <Badge variant="outline" className="capitalize">
+                        {skill.risk}
+                      </Badge>
+                    </div>
+                    <CardDescription className="line-clamp-3">{skill.description}</CardDescription>
+                    <p className="text-xs text-muted-foreground">Latest: {skill.latestVersion}</p>
+                  </CardHeader>
+                  <CardContent className="flex items-center justify-between gap-2">
+                    {isAssigned ? (
+                      <Badge variant="secondary">Assigned</Badge>
+                    ) : isInstalled ? (
+                      <Badge variant="outline">Installed</Badge>
+                    ) : (
+                      <Badge variant="outline">Not installed</Badge>
+                    )}
+                    {!isInstalled ? (
+                      <Button
+                        size="sm"
+                        disabled={actionPending}
+                        onClick={() => void installSkill(skill.skillId)}
+                      >
+                        Install & Assign
+                      </Button>
+                    ) : !isAssigned ? (
+                      <Button
+                        size="sm"
+                        disabled={actionPending}
+                        onClick={() => void assignSkill(skill.skillId)}
+                      >
+                        Assign
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={actionPending}
+                        onClick={() => void unassignSkill(skill.skillId)}
+                      >
+                        Unassign
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle>No Registry Skills Available</CardTitle>
+              <CardDescription>
+                Publish starter markdown skills to the registry, then install and assign them here.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
+      </section>
+
+      {mergedSettings.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>No Agent Tools Yet</CardTitle>
+            <CardDescription>
+              Use the Registry Skills section above to install and assign skills to this agent.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       <Dialog open={!!editingTool} onOpenChange={(open) => (!open ? closeDialog() : undefined)}>
         <DialogContent>

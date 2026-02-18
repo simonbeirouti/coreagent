@@ -49,8 +49,61 @@ vi.mock('@/hooks/useAbilities', () => ({
     isLoading: false,
     error: null,
   }),
+  useAgentRegistrySkills: () => ({
+    data: [
+      {
+        agentAbilityId: 'aa-2',
+        skillId: 'coreagent.vision',
+        implementationKey: 'vision_analysis',
+        name: 'Vision Analysis',
+        enabled: true,
+        config: {},
+        installState: 'installed',
+        pinnedVersion: '1.0.0',
+      },
+      {
+        agentAbilityId: 'aa-3',
+        skillId: 'coreagent.audio',
+        implementationKey: 'audio_transcription',
+        name: 'Audio Transcription',
+        enabled: true,
+        config: {},
+        installState: 'installed',
+        pinnedVersion: '1.0.0',
+      },
+    ],
+    isLoading: false,
+    error: null,
+  }),
   useSetAgentAbilityEnabled: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUpdateAgentAbilityConfig: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
+vi.mock('@/hooks/useRegistrySkills', () => ({
+  useRegistrySkills: () => ({
+    data: [
+      {
+        skillId: 'coreagent.md.research_brief',
+        name: 'Research Brief Composer',
+        description: 'Converts raw notes into concise briefs.',
+        latestVersion: '1.0.0',
+        risk: 'low',
+      },
+    ],
+    isLoading: false,
+  }),
+  useInstalledSkills: () => ({
+    data: [],
+    isLoading: false,
+  }),
+  useInstallRegistrySkill: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+  useAssignRegistrySkill: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
 }));
 
 import { Route } from './$agentId.tools';
@@ -67,5 +120,9 @@ describe('tools route runtime', () => {
     expect(screen.getByText('Vision Analysis')).toBeInTheDocument();
     expect(screen.getByText('Audio Transcription')).toBeInTheDocument();
     expect(screen.getByText('Core')).toBeInTheDocument();
+    expect(screen.getAllByText('Registry').length).toBeGreaterThan(0);
+    expect(screen.getByText('Registry Skills')).toBeInTheDocument();
+    expect(screen.getByText('Research Brief Composer')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Install & Assign' })).toBeInTheDocument();
   });
 });

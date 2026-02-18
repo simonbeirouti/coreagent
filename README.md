@@ -4,14 +4,11 @@ Cloud-first, multimodal AI agent platform built with Rust + Supabase where agent
 
 ## Current Status
 Phase 2 (Agent Identity) hardening is complete: two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, dashboard transparency surfaces, hardened frontend/backend tests, and project quality rules + docs are in place.
-Current focus is Phase 3 orchestration: board-first agent assignment, delegated run/task lifecycle, and upcoming skills runtime + vetted registry.
+Current focus is unified delivery across skills registry integration, reliable agent tooling, and next-iteration sub-agent orchestration + automation.
 
 ## Project Updates (February 16, 2026)
-- Legacy monolithic PRD content has been extracted into focused phase PRDs.
-- Sub-agent/delegation/orchestration requirements now live in `sub_agents_orchestration_prd.md`.
-- Skills runtime + vetted registry requirements now live in `skills_registry_prd.md`.
-- `prd.md` is now a thin program index with extracted requirement mapping and next-step execution order.
-- Program backlog items not covered by those two phase PRDs are explicitly tracked: teams/collaboration, cross-device realtime sync, avatar roadmap, advanced audio, and documentation intelligence productization.
+- Legacy split PRDs have been consolidated into a single unified program PRD in `prd.md`.
+- `prd.md` now contains completed work summary, current integration gaps, and next-iteration delivery for sub-agents + automation.
 - Root route now provides a board-first orchestration experience:
   - lanes: `Idle Queue`, `Working Now`, `Ready For Review`
   - guided `Create Job Assignment` wizard for run/task/delegation/schedule/memory creation
@@ -73,14 +70,18 @@ pnpm install
 ### 2. Environment Setup
 ```bash
 cp .env.example .env
-# Edit .env with your Supabase/project credentials
+cp server/.env.example server/.env
+# Edit .env and server/.env with your project credentials
 ```
 
 ### Environment Variables (Expected Values)
 
-`/server` loads env in this order:
-- `../.env` (repo root)
-- `server/.env` (optional override for server-only values)
+Env templates:
+- Root app env template: `.env.example`
+- Registry service env template: `server/.env.example`
+
+`/server` loads env from:
+- `server/.env` only
 
 For optional variables, leave them unset or blank. If you set a value, it must be valid (for example, real URL format for `*_URL` fields).
 
@@ -154,12 +155,14 @@ Admin publish flow (Phase 3):
 ### Phase 3 Local E2E (Registry + App)
 
 1. Apply latest DB migrations in Supabase (including `017_skills_registry_service.sql`).
-2. Configure `.env` with at least:
+2. Configure env files with at least:
    - `DATABASE_URL`
    - `SUPABASE_URL`
    - `ENABLE_ADMIN_API=true`
    - `ADMIN_API_TOKEN=<token>`
    - `SIGNING_SECRET=<long-random-secret>`
+   - set app/shared values in `.env`
+   - set registry-only values in `server/.env` (recommended)
 3. Start registry service:
    - `pnpm -C server dev:admin`
 4. Start the app:
@@ -246,13 +249,11 @@ The script performs a clean reseed for rows tagged with its seed source and recr
 
 ## Documentation
 
-- **[prd.md](prd.md)** - Thin program PRD index, requirement extraction map, and next-step sequence
+- **[prd.md](prd.md)** - Unified program PRD with completed delivery summary, integration gaps, and next-iteration roadmap
 - **[dashboard_transparency_prd.md](dashboard_transparency_prd.md)** - Phase 2 transparency UX and explainability requirements
 - **[two_layer_reliability_suite_prd.md](two_layer_reliability_suite_prd.md)** - Unified QA + observability + testing reliability plan
 - **[avatar_prd.md](avatar_prd.md)** - Avatar system feature specification
 - **[browser_automation_prd.md](browser_automation_prd.md)** - Browser automation feature specification
-- **[sub_agents_orchestration_prd.md](sub_agents_orchestration_prd.md)** - Phase 3 sub-agent orchestration, heartbeats, scheduling, and reliability test gates
-- **[skills_registry_prd.md](skills_registry_prd.md)** - Skills runtime + vetted registry architecture for safe in-app install/update execution
 - **[phase2_dashboard_data_guide.md](phase2_dashboard_data_guide.md)** - Dashboard data sources, chart wiring, and population checklist
 - **[docs/testing/two-layer-reliability.md](docs/testing/two-layer-reliability.md)** - Hardened test execution guide and quality gates
 - **[docs/platform/feature-map.md](docs/platform/feature-map.md)** - Feature ownership and platform capability map
@@ -313,6 +314,6 @@ coreagent/
 
 ## Contributing
 
-1. Check [prd.md](prd.md), [sub_agents_orchestration_prd.md](sub_agents_orchestration_prd.md), and [skills_registry_prd.md](skills_registry_prd.md) for current priorities and active implementation scope
+1. Check [prd.md](prd.md) for current priorities, completed status, and active implementation scope
 2. Follow existing patterns for React Query caching and Supabase/RLS-safe data flows
 3. Run `pnpm run check` before opening a PR

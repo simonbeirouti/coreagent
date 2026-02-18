@@ -18,6 +18,7 @@ pub mod input_sanitizer;
 pub mod memory_service;
 pub mod orchestration_service;
 pub mod perception_tracker;
+pub mod skills_registry_client;
 pub mod user_profile_service;
 pub mod vision_service;
 
@@ -43,6 +44,12 @@ use orchestration_service::{
 };
 use perception_tracker::{PerceptionStat, PerceptionTracker};
 use sea_orm::{DatabaseConnection, EntityTrait};
+use skills_registry_client::{
+    AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
+    RegistryAssignResponse, RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails,
+    RegistrySkillSummary, RegistrySkillVersion, RegistryUninstallResponse, RuntimeHandshake,
+    SkillsRegistryClient,
+};
 use tauri::{ipc::Channel, Manager};
 use vision_service::{ScreenshotResult, VisionService};
 
@@ -50,6 +57,7 @@ async fn ensure_tool_enabled(
     db: &DatabaseConnection,
     agent_id: &str,
     implementation_key: &str,
+    auth_state: &AuthState,
 ) -> Result<(), String> {
     let agent_uuid =
         uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
@@ -61,13 +69,135 @@ async fn ensure_tool_enabled(
         .unwrap_or(true);
 
     if enabled {
-        Ok(())
+        if is_core_tool_key(implementation_key) {
+            return Ok(());
+        }
+        enforce_registry_runtime_gate(agent_id, implementation_key, auth_state).await
     } else {
         Err(format!(
             "Tool '{}' is disabled for this agent. Enable it from agent tools settings.",
             implementation_key
         ))
     }
+}
+
+fn is_core_tool_key(implementation_key: &str) -> bool {
+    matches!(
+        implementation_key,
+        "memory_retrieval"
+            | "vision_screenshot"
+            | "vision_analysis"
+            | "audio_transcription"
+            | "voice_synthesis"
+    )
+}
+
+fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
+    let base = value.trim().split('-').next()?.split('+').next()?;
+    let mut parts = base.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    let patch = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    Some((major, minor, patch))
+}
+
+fn semver_outside_range(
+    current: &str,
+    min_version: Option<&str>,
+    max_version: Option<&str>,
+) -> Option<String> {
+    let current_semver = parse_semver(current)?;
+    if let Some(min) = min_version.and_then(parse_semver) {
+        if current_semver < min {
+            return Some(format!(
+                "current app version {current} is below minimum supported version {}.{}.{}",
+                min.0, min.1, min.2
+            ));
+        }
+    }
+    if let Some(max) = max_version.and_then(parse_semver) {
+        if current_semver > max {
+            return Some(format!(
+                "current app version {current} is above maximum supported version {}.{}.{}",
+                max.0, max.1, max.2
+            ));
+        }
+    }
+    None
+}
+
+fn validate_runtime_handshake_response(handshake: &RuntimeHandshake) -> Result<(), String> {
+    if handshake.artifact.digest.trim().is_empty() {
+        return Err("Registry runtime handshake missing artifact digest.".to_string());
+    }
+    if handshake.artifact.signature.trim().is_empty() {
+        return Err("Registry runtime handshake missing artifact signature.".to_string());
+    }
+    if handshake.policy.status != "approved" {
+        return Err(format!(
+            "Skill runtime blocked: policy status is '{}'.",
+            handshake.policy.status
+        ));
+    }
+    if !handshake.install.installed {
+        return Err("Skill runtime blocked: skill is not installed.".to_string());
+    }
+    if handshake.install.install_state.as_deref() != Some("installed") {
+        return Err("Skill runtime blocked: install state is not installed.".to_string());
+    }
+    if handshake.force_disable.required {
+        return Err(
+            handshake
+                .force_disable
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Skill runtime blocked by registry force-disable.".to_string()),
+        );
+    }
+    if let Ok(app_runtime_version) = std::env::var("APP_RUNTIME_VERSION") {
+        if !app_runtime_version.trim().is_empty() {
+            let compatibility = &handshake.runtime.compatibility;
+            if let Some(reason) = semver_outside_range(
+                &app_runtime_version,
+                compatibility.min_app_version.as_deref(),
+                compatibility.max_app_version.as_deref(),
+            ) {
+                return Err(format!("Skill runtime blocked by compatibility range: {reason}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn enforce_registry_runtime_gate(
+    agent_id: &str,
+    implementation_key: &str,
+    auth_state: &AuthState,
+) -> Result<(), String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(auth_state)?;
+    let assigned = client.list_agent_skills(&token, agent_id).await?;
+    let Some(skill) = assigned
+        .into_iter()
+        .find(|entry| entry.implementation_key == implementation_key)
+    else {
+        // Not a registry-managed tool assignment for this agent.
+        return Ok(());
+    };
+
+    if skill.install_state.as_deref() != Some("installed") {
+        return Err(format!(
+            "Skill runtime blocked: registry install state is '{}'.",
+            skill.install_state.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+    let Some(version) = skill.pinned_version else {
+        return Err("Skill runtime blocked: no pinned registry version found.".to_string());
+    };
+    let handshake = client
+        .runtime_handshake(&token, &skill.skill_id, &version)
+        .await?;
+    validate_runtime_handshake_response(&handshake)
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -94,6 +224,137 @@ fn verify_session(user_id: String, state: tauri::State<AuthState>) -> Result<boo
         Some(session) => Ok(session.user_id == user_id),
         None => Ok(false),
     }
+}
+
+#[tauri::command]
+async fn list_registry_skills(
+    query: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<Vec<RegistrySkillSummary>, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.list_skills(&token, query).await
+}
+
+#[tauri::command]
+async fn get_registry_skill(
+    skill_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistrySkillDetails, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.get_skill(&token, &skill_id).await
+}
+
+#[tauri::command]
+async fn get_registry_skill_version(
+    skill_id: String,
+    version: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistrySkillVersion, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.get_skill_version(&token, &skill_id, &version).await
+}
+
+#[tauri::command]
+async fn list_installed_skills(
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<Vec<InstalledSkill>, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.list_installed_skills(&token).await
+}
+
+#[tauri::command]
+async fn install_registry_skill(
+    skill_id: String,
+    version: Option<String>,
+    auto_update: Option<bool>,
+    install_config: Option<serde_json::Value>,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistryInstallResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let input = InstallSkillInput {
+        version,
+        auto_update: auto_update.unwrap_or(true),
+        install_config: install_config.unwrap_or_else(|| serde_json::json!({})),
+    };
+    client.install_skill(&token, &skill_id, input).await
+}
+
+#[tauri::command]
+async fn uninstall_registry_skill(
+    skill_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistryUninstallResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.uninstall_skill(&token, &skill_id).await
+}
+
+#[tauri::command]
+async fn pin_registry_skill_version(
+    skill_id: String,
+    version: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistryPinResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.pin_skill_version(&token, &skill_id, version).await
+}
+
+#[tauri::command]
+async fn assign_registry_skill(
+    skill_id: String,
+    agent_id: String,
+    enabled: Option<bool>,
+    config: Option<serde_json::Value>,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RegistryAssignResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let input = AssignSkillInput {
+        agent_id,
+        enabled: enabled.unwrap_or(true),
+        config: config.unwrap_or_else(|| serde_json::json!({})),
+    };
+    client.assign_skill(&token, &skill_id, input).await
+}
+
+#[tauri::command]
+async fn list_agent_registry_skills(
+    agent_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<Vec<RegistryAgentSkill>, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.list_agent_skills(&token, &agent_id).await
+}
+
+#[tauri::command]
+async fn sync_skill_advisories(
+    cursor: Option<String>,
+    limit: Option<i32>,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<AdvisoryFeedResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.advisory_feed(&token, cursor, limit).await
+}
+
+#[tauri::command]
+async fn validate_skill_runtime(
+    skill_id: String,
+    version: String,
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<RuntimeHandshake, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let handshake = client.runtime_handshake(&token, &skill_id, &version).await?;
+    validate_runtime_handshake_response(&handshake)?;
+    Ok(handshake)
 }
 
 // Agent commands
@@ -353,10 +614,11 @@ async fn edit_message_streaming(
 async fn capture_screenshot(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
     ai_client: tauri::State<'_, AiClient>,
     _app: tauri::AppHandle,
 ) -> Result<ScreenshotResult, String> {
-    ensure_tool_enabled(&db, &agent_id, "vision_screenshot").await?;
+    ensure_tool_enabled(&db, &agent_id, "vision_screenshot", auth_state.inner()).await?;
     let vision_service = VisionService::new(&ai_client);
     let result = vision_service.capture_screenshot().await?;
 
@@ -400,9 +662,10 @@ async fn analyze_image(
     image_base64: String,
     prompt: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "vision_analysis").await?;
+    ensure_tool_enabled(&db, &agent_id, "vision_analysis", auth_state.inner()).await?;
     let vision_service = VisionService::new(&ai_client);
     let analysis = vision_service
         .analyze_image_base64(&image_base64, prompt)
@@ -422,8 +685,9 @@ async fn analyze_image(
 async fn start_recording(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<(), String> {
-    ensure_tool_enabled(&db, &agent_id, "audio_transcription").await?;
+    ensure_tool_enabled(&db, &agent_id, "audio_transcription", auth_state.inner()).await?;
     // Track usage when starting recording
     PerceptionTracker::track_usage(&db, &agent_id, "audio", "start_recording", None).await?;
 
@@ -451,9 +715,10 @@ async fn transcribe_audio(
     agent_id: String,
     audio_base64: String,
     db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "audio_transcription").await?;
+    ensure_tool_enabled(&db, &agent_id, "audio_transcription", auth_state.inner()).await?;
     let audio_service = AudioService::new(&ai_client);
 
     // Simple transcription - audio upload/logging is handled by frontend
@@ -504,9 +769,10 @@ async fn text_to_speech(
     text: String,
     voice: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "voice_synthesis").await?;
+    ensure_tool_enabled(&db, &agent_id, "voice_synthesis", auth_state.inner()).await?;
     let audio_service = AudioService::new(&ai_client);
     let audio_base64 = audio_service.text_to_speech_base64(&text, voice).await?;
 
@@ -1161,6 +1427,17 @@ pub fn run() {
             set_session,
             clear_session,
             verify_session,
+            list_registry_skills,
+            get_registry_skill,
+            get_registry_skill_version,
+            list_installed_skills,
+            install_registry_skill,
+            uninstall_registry_skill,
+            pin_registry_skill_version,
+            assign_registry_skill,
+            list_agent_registry_skills,
+            sync_skill_advisories,
+            validate_skill_runtime,
             create_agent,
             list_agents,
             get_agent,
