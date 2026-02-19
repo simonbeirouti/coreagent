@@ -29,7 +29,6 @@ type AbilityTotals = {
 }
 
 type SeedCounts = {
-  profiles: number
   userProfiles: number
   agents: number
   traitState: number
@@ -73,7 +72,6 @@ type Args = {
 }
 
 const DEFAULT_COUNTS: SeedCounts = {
-  profiles: 0,
   userProfiles: 0,
   agents: 0,
   traitState: 0,
@@ -312,27 +310,6 @@ async function run(): Promise<void> {
 
   const counts: SeedCounts = { ...DEFAULT_COUNTS }
   logStep(`Validated auth user: ${userData.user.email ?? 'unknown-email'}`)
-
-  const fullName =
-    ((userData.user.user_metadata?.full_name as string | undefined) ??
-      args.userEmail.split('@')[0] ??
-      'Seed User')
-
-  const { error: profileBaseError } = await supabase
-    .from('profiles')
-    .upsert(
-      {
-        id: args.userId,
-        full_name: fullName,
-      },
-      { onConflict: 'id' },
-    )
-
-  if (profileBaseError) {
-    throw profileBaseError
-  }
-  counts.profiles += 1
-  logStep('Ensured base profiles row')
 
   const {
     data: existingSeededAgents,

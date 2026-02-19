@@ -1,7 +1,8 @@
--- CoreAgent Phase 3B: Skills registry service schema
--- Migration: 017_skills_registry_service.sql
--- Purpose: Introduce vetted skills catalog, versioning, installs, run logs, health events, and advisories.
+-- ============================================================================
+-- Skills Registry Service
+-- ============================================================================
 
+-- Canonical skill identity and high-level catalog metadata.
 CREATE TABLE IF NOT EXISTS skills (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     skill_id TEXT NOT NULL UNIQUE,
@@ -21,6 +22,8 @@ CREATE TABLE IF NOT EXISTS skills (
     CHECK (btrim(name) <> '')
 );
 
+-- Immutable versioned release metadata for each skill.
+-- `digest` + `signature` are required for runtime integrity checks.
 CREATE TABLE IF NOT EXISTS skill_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     skill_ref_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
@@ -49,6 +52,8 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     CHECK (btrim(signature) <> '')
 );
 
+-- Declared permission envelope per skill version.
+-- Enforced at publish-time and runtime via policy/broker layers.
 CREATE TABLE IF NOT EXISTS skill_permissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     skill_version_id UUID NOT NULL REFERENCES skill_versions(id) ON DELETE CASCADE,
@@ -62,6 +67,8 @@ CREATE TABLE IF NOT EXISTS skill_permissions (
     CHECK (btrim(permission_key) <> '')
 );
 
+-- Per-user install state and pinning.
+-- `install_state` supports lifecycle transitions and degraded handling.
 CREATE TABLE IF NOT EXISTS skill_installs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -79,6 +86,8 @@ CREATE TABLE IF NOT EXISTS skill_installs (
     UNIQUE(user_id, skill_ref_id)
 );
 
+-- Per-invocation run history for observability, auditing, and replay safety.
+-- `idempotency_key` can be used to deduplicate client retries.
 CREATE TABLE IF NOT EXISTS skill_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -100,10 +109,12 @@ CREATE TABLE IF NOT EXISTS skill_runs (
     CHECK (btrim(input_hash) <> '')
 );
 
+-- Ensures idempotent run creation for callers that provide a stable key.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_user_idempotency
 ON skill_runs(user_id, idempotency_key)
 WHERE idempotency_key IS NOT NULL;
 
+-- Time-series health snapshots used by diagnostics and SLO tracking.
 CREATE TABLE IF NOT EXISTS skill_health_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -118,6 +129,8 @@ CREATE TABLE IF NOT EXISTS skill_health_events (
     observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Advisory stream for warnings/revocations/security events.
+-- Active advisories are those without `resolved_at`.
 CREATE TABLE IF NOT EXISTS skill_advisories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     advisory_key TEXT NOT NULL UNIQUE,
@@ -138,6 +151,7 @@ CREATE TABLE IF NOT EXISTS skill_advisories (
     CHECK (btrim(title) <> '')
 );
 
+-- Publication lifecycle audit trail for each skill version.
 CREATE TABLE IF NOT EXISTS skill_publication_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     skill_version_id UUID NOT NULL REFERENCES skill_versions(id) ON DELETE CASCADE,
@@ -148,7 +162,9 @@ CREATE TABLE IF NOT EXISTS skill_publication_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Search/list performance
+-- ---------------------------------------------------------------------------
+-- Search/list performance indexes
+-- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_skills_status_updated_at
 ON skills(status, updated_at DESC);
 
@@ -204,14 +220,18 @@ WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_skill_publication_events_version_created
 ON skill_publication_events(skill_version_id, created_at DESC);
 
--- Automatic updated_at maintenance
+-- ---------------------------------------------------------------------------
+-- Automatic timestamp maintenance
+-- ---------------------------------------------------------------------------
 CREATE TRIGGER update_skills_updated_at BEFORE UPDATE ON skills
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_skill_installs_updated_at BEFORE UPDATE ON skill_installs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- RLS
+-- ---------------------------------------------------------------------------
+-- Row Level Security (RLS)
+-- ---------------------------------------------------------------------------
 ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_permissions ENABLE ROW LEVEL SECURITY;
@@ -221,7 +241,7 @@ ALTER TABLE skill_health_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_advisories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_publication_events ENABLE ROW LEVEL SECURITY;
 
--- Catalog read access for authenticated users
+-- Catalog entities are readable by any authenticated user.
 CREATE POLICY "Authenticated users can read skills catalog"
 ON skills FOR SELECT USING (auth.uid() IS NOT NULL);
 
@@ -234,7 +254,7 @@ ON skill_permissions FOR SELECT USING (auth.uid() IS NOT NULL);
 CREATE POLICY "Authenticated users can read skill advisories"
 ON skill_advisories FOR SELECT USING (auth.uid() IS NOT NULL);
 
--- Per-user install scope
+-- Install records are strictly scoped to the installing user.
 CREATE POLICY "Users can access their skill installs"
 ON skill_installs FOR SELECT USING (user_id = auth.uid());
 
@@ -247,7 +267,7 @@ ON skill_installs FOR UPDATE USING (user_id = auth.uid());
 CREATE POLICY "Users can delete their skill installs"
 ON skill_installs FOR DELETE USING (user_id = auth.uid());
 
--- Per-user runtime logs and health records
+-- Runtime run/health records are strictly scoped to the owning user.
 CREATE POLICY "Users can access their skill runs"
 ON skill_runs FOR SELECT USING (user_id = auth.uid());
 
