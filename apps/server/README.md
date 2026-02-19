@@ -83,10 +83,10 @@ Phase 6 gates are wired in this service:
 - Unit tests for manifest, policy, artifact validation, and signing.
 - Integration test for publish-to-catalog availability.
 - Security/resilience tests for revocation enforcement and failure paths.
-- CI gate command: `pnpm --dir server check:ci`
+- CI gate command: `pnpm --filter server check:ci`
 
 `check:ci` runs:
-1. `typecheck`
+1. `check-types`
 2. `lint`
 3. `test`
 4. migration validation (`validate:migrations`)
@@ -100,15 +100,15 @@ GitHub Actions workflow:
 From repo root:
 
 ```bash
-pnpm --dir server dev
+pnpm --filter server dev
 ```
 
 Useful commands:
 
 ```bash
-pnpm --dir server test
-pnpm --dir server lint
-pnpm --dir server typecheck
-pnpm --dir server validate:migrations
-pnpm --dir server check:ci
+pnpm --filter server test
+pnpm --filter server lint
+pnpm --filter server check-types
+pnpm --filter server validate:migrations
+pnpm --filter server check:ci
 ```

@@ -1,4 +1,4 @@
-# CoreAgent Admin (`core-admin`)
+# CoreAgent Admin (`apps/admin`)
 
 Independent Next.js admin panel for operational visibility into:
 - users (`profiles`, `user_profiles`)
@@ -9,7 +9,7 @@ Independent Next.js admin panel for operational visibility into:
 
 ## Environment
 
-Create `core-admin/.env.local` from `core-admin/.env.local.example`.
+Create `apps/admin/.env.local` from `apps/admin/.env.local.example`.
 
 Required variables:
 - `NEXT_PUBLIC_SUPABASE_URL`
@@ -33,4 +33,4 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Notes
 
 - Data is fetched server-side from Supabase PostgREST using the service role key.
-- The app is intentionally isolated from the root Vite app env; configure only inside `core-admin/.env.local`.
+- The app is intentionally isolated from the desktop app env; configure only inside `apps/admin/.env.local`.
