@@ -43,6 +43,7 @@ use orchestration_service::{
     UpsertOrchestrationMemoryRequest,
 };
 use perception_tracker::{PerceptionStat, PerceptionTracker};
+use serde::Serialize;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use skills_registry_client::{
     AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
@@ -52,6 +53,10 @@ use skills_registry_client::{
 };
 use tauri::{ipc::Channel, Manager};
 use vision_service::{ScreenshotResult, VisionService};
+use std::process::Command;
+use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 async fn ensure_tool_enabled(
     db: &DatabaseConnection,
@@ -851,6 +856,207 @@ async fn get_realtime_session_token(voice: Option<String>) -> Result<String, Str
     Ok(token.to_string())
 }
 
+#[derive(Debug, Serialize)]
+struct LocalDockerRuntimeStatus {
+    available: bool,
+    daemon_reachable: bool,
+    image_present: bool,
+    image: String,
+    docker_version: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalDockerRuntimePrepareStatus {
+    available: bool,
+    daemon_reachable: bool,
+    image_present: bool,
+    image: String,
+    docker_version: Option<String>,
+    message: String,
+    image_pulled: bool,
+}
+
+fn resolve_docker_binary() -> Result<String, String> {
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Ok(configured) = std::env::var("COREAGENT_DOCKER_BIN") {
+        let trimmed = configured.trim();
+        if !trimmed.is_empty() {
+            candidates.push(trimmed.to_string());
+        }
+    }
+
+    candidates.push("/opt/homebrew/bin/docker".to_string());
+    candidates.push("/usr/local/bin/docker".to_string());
+    candidates.push("/Applications/Docker.app/Contents/Resources/bin/docker".to_string());
+    candidates.push("docker".to_string());
+
+    let mut attempted: Vec<String> = Vec::new();
+    for candidate in candidates {
+        if candidate == "docker" {
+            match Command::new("docker").arg("--version").output() {
+                Ok(output) if output.status.success() => return Ok("docker".to_string()),
+                Ok(_) => attempted.push("docker (on PATH)".to_string()),
+                Err(_) => attempted.push("docker (on PATH)".to_string()),
+            }
+            continue;
+        }
+
+        if Path::new(&candidate).exists() {
+            return Ok(candidate);
+        }
+        attempted.push(candidate);
+    }
+
+    Err(format!(
+        "Docker CLI was not found. Tried: {}. Install Docker Desktop and ensure docker is available.",
+        attempted.join(", ")
+    ))
+}
+
+fn run_docker_command(docker_bin: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(docker_bin)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run docker command '{} {}': {}", docker_bin, args.join(" "), e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("Docker command failed: '{} {}'", docker_bin, args.join(" "))
+        } else {
+            stderr
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn check_local_docker_runtime_sync(image: String) -> LocalDockerRuntimeStatus {
+    let image_to_use = if image.trim().is_empty() {
+        "node:20-alpine".to_string()
+    } else {
+        image.trim().to_string()
+    };
+
+    let docker_bin = match resolve_docker_binary() {
+        Ok(path) => path,
+        Err(message) => {
+            return LocalDockerRuntimeStatus {
+                available: false,
+                daemon_reachable: false,
+                image_present: false,
+                image: image_to_use,
+                docker_version: None,
+                message,
+            }
+        }
+    };
+
+    let version_result = run_docker_command(&docker_bin, &["--version"]);
+    if let Err(error_message) = version_result {
+        return LocalDockerRuntimeStatus {
+            available: false,
+            daemon_reachable: false,
+            image_present: false,
+            image: image_to_use,
+            docker_version: None,
+            message: format!(
+                "Docker CLI was resolved at '{}' but could not be executed: {}",
+                docker_bin, error_message
+            ),
+        };
+    }
+
+    let daemon_result = run_docker_command(&docker_bin, &["info", "--format", "{{.ServerVersion}}"]);
+    let daemon_version = daemon_result.ok();
+    if daemon_version.is_none() {
+        return LocalDockerRuntimeStatus {
+            available: true,
+            daemon_reachable: false,
+            image_present: false,
+            image: image_to_use,
+            docker_version: version_result.ok().map(|v| format!("{} ({})", v, docker_bin)),
+            message: "Open docker in background".to_string(),
+        };
+    }
+
+    let image_present = run_docker_command(&docker_bin, &["image", "inspect", &image_to_use]).is_ok();
+
+    LocalDockerRuntimeStatus {
+        available: true,
+        daemon_reachable: true,
+        image_present,
+        image: image_to_use,
+        docker_version: daemon_version.map(|v| format!("{} ({})", v, docker_bin)),
+        message: if image_present {
+            "Docker is running".to_string()
+        } else {
+            "Docker ready but local runtime image is missing.".to_string()
+        },
+    }
+}
+
+#[tauri::command]
+async fn check_local_docker_runtime(image: Option<String>) -> Result<LocalDockerRuntimeStatus, String> {
+    let target_image = image.unwrap_or_else(|| "node:20-alpine".to_string());
+    tauri::async_runtime::spawn_blocking(move || check_local_docker_runtime_sync(target_image))
+        .await
+        .map_err(|e| format!("Docker runtime check task failed: {}", e))
+}
+
+#[tauri::command]
+async fn prepare_local_docker_runtime(
+    image: Option<String>,
+) -> Result<LocalDockerRuntimePrepareStatus, String> {
+    let target_image = image.unwrap_or_else(|| "node:20-alpine".to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        let docker_bin = resolve_docker_binary()?;
+        let status = check_local_docker_runtime_sync(target_image.clone());
+        if !status.available {
+            return Err(status.message);
+        }
+        if !status.daemon_reachable {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = Command::new("open").args(["-a", "Docker"]).status();
+                for _ in 0..20 {
+                    thread::sleep(Duration::from_secs(1));
+                    if run_docker_command(&docker_bin, &["info", "--format", "{{.ServerVersion}}"]).is_ok() {
+                        break;
+                    }
+                }
+            }
+            let post_start_status = check_local_docker_runtime_sync(target_image.clone());
+            if !post_start_status.daemon_reachable {
+                return Err(post_start_status.message);
+            }
+        }
+
+        let mut image_pulled = false;
+        let mut resolved_status = check_local_docker_runtime_sync(target_image.clone());
+        if !resolved_status.image_present {
+            run_docker_command(&docker_bin, &["pull", &target_image])
+                .map_err(|e| format!("Failed to pull Docker image '{}' via '{}': {}", target_image, docker_bin, e))?;
+            image_pulled = true;
+            resolved_status = check_local_docker_runtime_sync(target_image.clone());
+        }
+
+        Ok(LocalDockerRuntimePrepareStatus {
+            available: resolved_status.available,
+            daemon_reachable: resolved_status.daemon_reachable,
+            image_present: resolved_status.image_present,
+            image: resolved_status.image,
+            docker_version: resolved_status.docker_version,
+            message: "Docker is running".to_string(),
+            image_pulled,
+        })
+    })
+    .await
+    .map_err(|e| format!("Docker runtime prepare task failed: {}", e))?
+}
+
 // Stats command
 #[tauri::command]
 async fn get_perception_stats(
@@ -1471,6 +1677,8 @@ pub fn run() {
             // User profile commands
             get_user_profile,
             update_user_profile,
+            check_local_docker_runtime,
+            prepare_local_docker_runtime,
             // Skill tracking + memory + feedback
             list_agent_abilities,
             list_agent_tool_settings,

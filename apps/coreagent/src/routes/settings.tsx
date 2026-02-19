@@ -1,10 +1,11 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useTheme } from '@/components/theme-provider'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -18,6 +19,7 @@ import { X, Trash2, Settings as SettingsIcon, Save } from 'lucide-react'
 import { toast } from 'sonner'
 import supabase from '@/lib/supabase'
 import type { LanguageCode, UserPreferences, UserHabits, UserWorkPatterns } from '@/types/user-profile'
+import { getRuntimeStatus, type RuntimeExecutionMode } from './runtime-status'
 
 // Tag Input Component for adding/removing items with comma/enter
 function TagInput({ value, onChange, placeholder }: { value: string[], onChange: (values: string[]) => void, placeholder: string }) {
@@ -105,6 +107,49 @@ const TIMEZONE_OPTIONS = [
   'Australia/Sydney',
 ]
 
+const DEFAULT_RUNTIME_IMAGE = 'node:20-alpine'
+const DOCKER_NOT_FOUND_MESSAGE = 'docker not found'
+
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) {
+    return err.message
+  }
+  if (typeof err === 'string' && err.trim().length > 0) {
+    return err
+  }
+  if (err && typeof err === 'object') {
+    const maybeMessage = (err as { message?: unknown }).message
+    if (typeof maybeMessage === 'string' && maybeMessage.trim().length > 0) {
+      return maybeMessage
+    }
+    try {
+      return JSON.stringify(err)
+    } catch {
+      return fallback
+    }
+  }
+  return fallback
+}
+
+function normalizeRuntimeSetupMessage(message: string): string {
+  const value = message.trim().toLowerCase()
+  if (
+    value.includes('docker cli was not found') ||
+    value.includes('docker not found') ||
+    value.includes('command not found')
+  ) {
+    return DOCKER_NOT_FOUND_MESSAGE
+  }
+  return message
+}
+
+type DockerRuntimeCheckResponse = {
+  available: boolean
+  daemon_reachable?: boolean
+  image_present?: boolean
+  message?: string
+}
+
 function Settings() {
   const { theme, setTheme } = useTheme()
   const { user, signOut } = useAuth()
@@ -126,6 +171,66 @@ function Settings() {
   // Form state - Preferences
   const [communicationStyle, setCommunicationStyle] = useState<'concise' | 'balanced' | 'detailed'>('balanced')
   const [timezone, setTimezone] = useState('UTC')
+  const [runtimeExecutionMode, setRuntimeExecutionMode] = useState<RuntimeExecutionMode>('remote')
+  const [runtimeSetupState, setRuntimeSetupState] = useState<'idle' | 'checking' | 'ready' | 'failed'>('idle')
+  const [runtimeSetupMessage, setRuntimeSetupMessage] = useState<string | null>(null)
+  const [dockerFoundInPath, setDockerFoundInPath] = useState<boolean | null>(null)
+  const localSetupInFlightRef = useRef(false)
+  const previousRuntimeModeRef = useRef<RuntimeExecutionMode>('remote')
+
+  const fallbackToRemoteRuntime = useCallback((message: string) => {
+    setRuntimeExecutionMode('remote')
+    setRuntimeSetupState('idle')
+    setRuntimeSetupMessage(null)
+    setDockerFoundInPath(null)
+    toast.error(`${message}. Using remote execution.`)
+
+    if (!user?.id) {
+      return
+    }
+
+    void updateProfileMutation.mutateAsync({
+      userId: user.id,
+      updates: {
+        preferences: {
+          ...(profile?.preferences || {}),
+          runtime_execution_mode: 'remote',
+          runtime_local_image: DEFAULT_RUNTIME_IMAGE,
+        } as UserPreferences,
+      },
+    }).catch((err) => {
+      console.error('Failed to persist remote runtime fallback:', err)
+    })
+  }, [user?.id, profile?.preferences, updateProfileMutation])
+
+  const runLocalDockerSetup = useCallback(() => {
+    if (localSetupInFlightRef.current) {
+      return
+    }
+    localSetupInFlightRef.current = true
+    setRuntimeSetupState('checking')
+    setRuntimeSetupMessage('Checking...')
+    setDockerFoundInPath(null)
+    void invoke('prepare_local_docker_runtime', {
+      image: DEFAULT_RUNTIME_IMAGE,
+    })
+      .then((result) => {
+        const message =
+          result && typeof result === 'object' && 'message' in result && typeof result.message === 'string'
+            ? result.message
+            : 'Ready'
+        setDockerFoundInPath(true)
+        setRuntimeSetupState('ready')
+        setRuntimeSetupMessage(message)
+      })
+      .catch((err) => {
+        const message = normalizeRuntimeSetupMessage(getErrorMessage(err, 'Failed to prepare local Docker runtime.'))
+        fallbackToRemoteRuntime(message)
+      })
+      .finally(() => {
+        localSetupInFlightRef.current = false
+      })
+  }, [fallbackToRemoteRuntime])
 
   // Form state - Habits
   const [preferredHours, setPreferredHours] = useState('')
@@ -153,6 +258,9 @@ function Settings() {
     // Preferences
     setCommunicationStyle(profile.preferences?.communication_style || 'balanced')
     setTimezone(profile.preferences?.timezone || 'UTC')
+    setRuntimeExecutionMode(
+      profile.preferences?.runtime_execution_mode === 'local_docker' ? 'local_docker' : 'remote'
+    )
 
     // Habits
     setPreferredHours(profile.habits?.preferred_hours || '')
@@ -176,6 +284,7 @@ function Settings() {
       analytics !== profile.analytics_enabled ||
       communicationStyle !== (profile.preferences?.communication_style || 'balanced') ||
       timezone !== (profile.preferences?.timezone || 'UTC') ||
+      runtimeExecutionMode !== (profile.preferences?.runtime_execution_mode === 'local_docker' ? 'local_docker' : 'remote') ||
       preferredHours !== (profile.habits?.preferred_hours || '') ||
       sessionLength !== (profile.habits?.session_length || 'medium') ||
       feedbackStyle !== (profile.habits?.feedback_style || 'constructive') ||
@@ -184,7 +293,7 @@ function Settings() {
       JSON.stringify(expertise) !== JSON.stringify(profile.work_patterns?.expertise || [])
 
     setHasChanges(hasAnyChanges)
-  }, [profile, language, aiResponseLanguage, notifications, analytics, communicationStyle, timezone, preferredHours, sessionLength, feedbackStyle, domain, commonTasks, expertise])
+  }, [profile, language, aiResponseLanguage, notifications, analytics, communicationStyle, timezone, runtimeExecutionMode, preferredHours, sessionLength, feedbackStyle, domain, commonTasks, expertise])
 
   const handleThemeChange = (value: string) => {
     setTheme(value as 'dark' | 'light' | 'system')
@@ -202,8 +311,11 @@ function Settings() {
           notifications_enabled: notifications,
           analytics_enabled: analytics,
           preferences: {
+            ...(profile?.preferences || {}),
             communication_style: communicationStyle,
             timezone,
+            runtime_execution_mode: runtimeExecutionMode,
+            runtime_local_image: DEFAULT_RUNTIME_IMAGE,
           } as UserPreferences,
           habits: {
             preferred_hours: preferredHours || undefined,
@@ -225,6 +337,50 @@ function Settings() {
       toast.error('Failed to save settings')
     }
   }
+
+  useEffect(() => {
+    if (runtimeExecutionMode !== 'local_docker') {
+      previousRuntimeModeRef.current = runtimeExecutionMode
+      setRuntimeSetupState('idle')
+      setRuntimeSetupMessage(null)
+      setDockerFoundInPath(null)
+      return
+    }
+
+    const modeChanged = previousRuntimeModeRef.current !== runtimeExecutionMode
+    previousRuntimeModeRef.current = runtimeExecutionMode
+    if (modeChanged) {
+      runLocalDockerSetup()
+    }
+  }, [runtimeExecutionMode])
+
+  useEffect(() => {
+    if (runtimeExecutionMode !== 'local_docker') {
+      return
+    }
+
+    const interval = setInterval(() => {
+      void invoke<DockerRuntimeCheckResponse>('check_local_docker_runtime', {
+        image: DEFAULT_RUNTIME_IMAGE,
+      })
+        .then((status) => {
+          if (!status.available || status.daemon_reachable === false) {
+            fallbackToRemoteRuntime(status.message || 'Open docker in background')
+            return
+          }
+          if (runtimeSetupState !== 'ready' && runtimeSetupState !== 'checking') {
+            runLocalDockerSetup()
+          }
+        })
+        .catch(() => {
+          fallbackToRemoteRuntime('Open docker in background')
+        })
+    }, 15_000)
+
+    return () => {
+      clearInterval(interval)
+    }
+  }, [runtimeExecutionMode, runtimeSetupState, runLocalDockerSetup, fallbackToRemoteRuntime])
 
   const handleDeleteAccount = async () => {
     if (!user?.id) return
@@ -250,6 +406,12 @@ function Settings() {
       setDeleting(false)
     }
   }
+
+  const runtimeStatus = getRuntimeStatus({
+    mode: runtimeExecutionMode,
+    setupState: runtimeSetupState,
+    setupMessage: runtimeSetupMessage
+  })
 
 
   if (isLoading) {
@@ -491,6 +653,60 @@ function Settings() {
                       onCheckedChange={setAnalytics}
                     />
                   </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Runtime Setup</CardTitle>
+                  <CardDescription>Post-account setup for skill execution mode and local Docker readiness</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 pb-2">
+                        <Label htmlFor="runtime-mode">Execution Mode</Label>
+                        <span
+                          className={`h-2 w-2 rounded-full shrink-0 ${runtimeStatus.tone === 'neutral'
+                            ? 'bg-muted-foreground/50'
+                            : runtimeStatus.tone === 'success'
+                              ? 'bg-green-500'
+                              : runtimeStatus.tone === 'error'
+                                ? 'bg-red-500'
+                                : 'bg-yellow-500'
+                            }`}
+                        />
+                        <span className="text-xs text-muted-foreground">{runtimeStatus.text}</span>
+                      </div>
+                      <Select
+                        value={runtimeExecutionMode}
+                        onValueChange={(value) => setRuntimeExecutionMode(value as RuntimeExecutionMode)}
+                      >
+                        <SelectTrigger id="runtime-mode" className="w-full mt-1">
+                          <SelectValue placeholder="Select mode" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="remote">Remote (Recommended)</SelectItem>
+                          <SelectItem value="local_docker">Local Docker</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {runtimeExecutionMode === 'local_docker' && dockerFoundInPath === false ? (
+                    <div className="pt-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          toast.info('Install Docker Desktop manually, then wait. CoreAgent checks every 15 seconds.')
+                        }}
+                      >
+                        Install
+                      </Button>
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
 

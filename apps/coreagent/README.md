@@ -71,7 +71,8 @@ pnpm install
 ```bash
 cp .env.example .env
 cp apps/server/.env.example apps/server/.env
-# Edit .env and apps/server/.env with your project credentials
+cp apps/runner/.env.example apps/runner/.env
+# Edit .env, apps/server/.env, and apps/runner/.env with your project credentials
 ```
 
 ### Environment Variables (Expected Values)
@@ -79,9 +80,13 @@ cp apps/server/.env.example apps/server/.env
 Env templates:
 - Root app env template: `.env.example`
 - Registry service env template: `apps/server/.env.example`
+- Runtime runner env template: `apps/runner/.env.example`
 
 `apps/server` loads env from:
 - `apps/server/.env` only
+
+`apps/runner` loads env from:
+- `apps/runner/.env` only
 
 For optional variables, leave them unset or blank. If you set a value, it must be valid (for example, real URL format for `*_URL` fields).
 
@@ -103,6 +108,12 @@ Registry server runtime (`apps/server`, optional with defaults shown):
 - `ARTIFACT_MAX_BYTES`: default `10485760` (10 MB upload cap per artifact)
 - `ENABLE_HEURISTIC_ARTIFACT_SCANNER`: default `false` (`true` enables lightweight content signature checks)
 - `APP_RUNTIME_VERSION`: optional app semver used for publish-time compatibility guardrails
+- `ENABLE_RUNTIME_QUEUE`: default `false`; set `true` to enqueue runtime runs to Redis/BullMQ
+- `REDIS_URL`: Redis connection for queue/events (local: `redis://127.0.0.1:6379`, Upstash: `rediss://...`)
+- `RUNTIME_RUN_QUEUE_NAME`: default `runtime-runs`
+- `RUNTIME_RUN_MAX_ATTEMPTS`: default `3`; queue retry attempts for transient runtime failures
+- `RUNTIME_RUN_RETRY_BACKOFF_MS`: default `1000`; exponential retry backoff base delay
+- `ENABLE_RUNTIME_REDIS_CACHE`: default `true`; set `false` if managed Redis drops idle cache connections and you want Postgres-only runtime state reads/writes
 
 Registry JWT auth (multi-user, app-backed):
 
@@ -153,7 +164,7 @@ Admin publish flow (Phase 3):
 
 ### Phase 3 Local E2E (Registry + App)
 
-1. Apply latest DB migrations in Supabase (including `017_skills_registry_service.sql`).
+1. Apply latest DB migrations in Supabase (including `backend_runtime_env_events.sql`).
 2. Configure env files with at least:
    - `DATABASE_URL`
    - `SUPABASE_URL`

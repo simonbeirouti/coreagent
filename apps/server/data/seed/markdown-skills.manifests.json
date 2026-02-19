@@ -203,5 +203,87 @@
       "healthcheck": {},
       "heartbeat_policy": {}
     }
+  },
+  {
+    "skillId": "coreagent.py.deep_analysis",
+    "implementationKey": "coreagent.py.deep_analysis",
+    "name": "Python Deep Analysis",
+    "description": "Installs numpy at runtime and computes descriptive statistics for deeper numeric analysis.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "run.sh",
+    "artifactPath": "../skills/command/python-deep-analysis/run.sh",
+    "riskLevel": "moderate",
+    "source": "coreagent_python_starter",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "network.http",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {
+          "domains": ["pypi.org", "files.pythonhosted.org"]
+        }
+      },
+      {
+        "permissionKey": "process.exec",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "values": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "object" },
+        "insight": { "type": "string" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.py.deep_analysis",
+      "name": "Python Deep Analysis",
+      "version": "1.0.0",
+      "description": "Installs numpy at runtime and computes descriptive statistics for deeper numeric analysis.",
+      "entrypoint": "run.sh",
+      "runtime": "command",
+      "runtime_profile": "python",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "values": { "type": "array", "items": { "type": "number" } }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "network.http",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {
+            "domains": ["pypi.org", "files.pythonhosted.org"]
+          }
+        },
+        {
+          "permission_key": "process.exec",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "dependencies": ["numpy"],
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
   }
 ]

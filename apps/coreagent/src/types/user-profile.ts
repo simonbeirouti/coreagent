@@ -5,6 +5,8 @@ export type LanguageCode = 'en' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'ru' | 'zh'
 export interface UserPreferences {
   communication_style?: 'concise' | 'balanced' | 'detailed';
   timezone?: string;
+  runtime_execution_mode?: 'remote' | 'local_docker';
+  runtime_local_image?: string;
   [key: string]: unknown;
 }
 

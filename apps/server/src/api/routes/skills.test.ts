@@ -117,6 +117,24 @@ describe("skills registry routes", () => {
     expect(body.diagnostics.metrics.publish.total).toBeGreaterThanOrEqual(0);
   });
 
+  it("returns runtime health payload when database is not configured", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/runtime/health"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      service: "skills-runtime",
+      checks: {
+        database: "unconfigured"
+      }
+    });
+  });
+
   it("lists skills", async () => {
     const app = buildApp(testEnv);
     appsToClose.push(app);

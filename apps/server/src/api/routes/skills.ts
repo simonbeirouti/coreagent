@@ -5,6 +5,7 @@ import { z } from "zod";
 import { CatalogService } from "../../services/catalog-service.js";
 import type { MetricsService } from "../../services/metrics-service.js";
 import type { InMemoryRateLimiter } from "../../services/rate-limiter.js";
+import { ensureRuntimeEnvironmentReady } from "../../services/runtime-environment-builder.js";
 import type { SkillRepository } from "../../repositories/skill-repository.js";
 import type { AppEnv } from "../../security/env.js";
 import { resolveUserIdFromRequest } from "../../security/request-auth.js";
@@ -497,11 +498,12 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
     }
 
     const versionLookup = body.version
-      ? await options.dbPool.query<{ skillVersionId: string; version: string }>(
+      ? await options.dbPool.query<{ skillVersionId: string; version: string; digest: string }>(
           `
             SELECT
               sv.id::text AS "skillVersionId",
-              sv.version
+              sv.version,
+              sv.digest
             FROM skill_versions sv
             WHERE sv.skill_ref_id = $1::uuid
               AND sv.version = $2::text
@@ -511,11 +513,12 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
           `,
           [skill.skillRefId, body.version]
         )
-      : await options.dbPool.query<{ skillVersionId: string; version: string }>(
+      : await options.dbPool.query<{ skillVersionId: string; version: string; digest: string }>(
           `
             SELECT
               sv.id::text AS "skillVersionId",
-              sv.version
+              sv.version,
+              sv.digest
             FROM skill_versions sv
             WHERE sv.skill_ref_id = $1::uuid
               AND sv.policy_status = 'approved'
@@ -551,7 +554,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
           $2::uuid,
           $3::uuid,
           'catalog',
-          'installed',
+          'resolving',
           $4::bool,
           $5::jsonb,
           NOW(),
@@ -560,7 +563,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
         ON CONFLICT (user_id, skill_ref_id)
         DO UPDATE SET
           pinned_version_id = EXCLUDED.pinned_version_id,
-          install_state = 'installed',
+          install_state = 'resolving',
           auto_update = EXCLUDED.auto_update,
           install_config = EXCLUDED.install_config,
           last_error = NULL,
@@ -575,13 +578,44 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
       return reply.code(500).send({ message: "Failed to install skill." });
     }
 
+    let runtimeEnvironmentId: string;
+    try {
+      const runtimeEnvironment = await ensureRuntimeEnvironmentReady({
+        dbPool: options.dbPool,
+        skillRefId: skill.skillRefId,
+        skillVersionId: version.skillVersionId,
+        skillId,
+        version: version.version,
+        digest: version.digest,
+        source: "install_flow",
+        installId
+      });
+      runtimeEnvironmentId = runtimeEnvironment.runtimeEnvironmentId;
+    } catch (error) {
+      request.log.error({ error, skillId, version: version.version }, "failed to initialize runtime environment");
+      return reply.code(500).send({ message: "Failed to initialize runtime environment." });
+    }
+
+    await options.dbPool.query(
+      `
+        UPDATE skill_installs
+        SET
+          install_state = 'ready',
+          updated_at = NOW()
+        WHERE id = $1::uuid
+      `,
+      [installId]
+    );
+
     return {
       data: {
         installId,
         skillId,
         version: version.version,
         implementationKey: skill.implementationKey,
-        installed: true
+        installed: true,
+        installState: "ready",
+        runtimeEnvironmentId
       }
     };
   });
@@ -664,7 +698,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
         UPDATE skill_installs si
         SET
           pinned_version_id = $3::uuid,
-          install_state = 'installed',
+          install_state = 'ready',
           last_error = NULL,
           updated_at = NOW()
         FROM skills s
@@ -686,7 +720,8 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
         installId: row.installId,
         skillId,
         version: body.version,
-        pinned: true
+        pinned: true,
+        installState: "ready"
       }
     };
   });
@@ -738,7 +773,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
         FROM skill_installs si
         WHERE si.user_id = $1::uuid
           AND si.skill_ref_id = $2::uuid
-          AND si.install_state = 'installed'
+          AND si.install_state IN ('installed', 'ready')
         LIMIT 1
       `,
       [user.userId, skill.skillRefId]

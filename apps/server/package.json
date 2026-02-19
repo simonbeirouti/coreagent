@@ -37,8 +37,10 @@
   "dependencies": {
     "@fastify/compress": "^8.1.0",
     "@fastify/cors": "^11.1.0",
+    "bullmq": "^5.69.3",
     "dotenv": "^17.2.4",
     "fastify": "^5.6.1",
+    "ioredis": "^5.9.3",
     "jose": "^6.1.0",
     "pg": "^8.16.3",
     "zod": "^4.3.6"
