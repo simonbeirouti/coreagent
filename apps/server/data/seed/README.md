@@ -13,7 +13,7 @@ This folder contains starter manifests for markdown-based skills that can be pub
 From repo root:
 
 ```bash
-ADMIN_API_TOKEN=<token> ENABLE_ADMIN_API=true pnpm --dir server seed:open-skills
+ADMIN_API_TOKEN=<token> ENABLE_ADMIN_API=true pnpm --filter server seed:open-skills
 ```
 
 Optional overrides:
@@ -23,4 +23,4 @@ SKILLS_REGISTRY_BASE_URL=http://127.0.0.1:4010
 OPEN_SKILLS_MANIFEST_PATH=data/seed/markdown-skills.manifests.json
 ```
 
-Each manifest points to a local markdown artifact under `server/data/skills/markdown/...`.
+Each manifest points to a local markdown artifact under `apps/server/data/skills/markdown/...`.

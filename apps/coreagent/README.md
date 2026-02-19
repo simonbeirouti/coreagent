@@ -70,18 +70,18 @@ pnpm install
 ### 2. Environment Setup
 ```bash
 cp .env.example .env
-cp server/.env.example server/.env
-# Edit .env and server/.env with your project credentials
+cp apps/server/.env.example apps/server/.env
+# Edit .env and apps/server/.env with your project credentials
 ```
 
 ### Environment Variables (Expected Values)
 
 Env templates:
 - Root app env template: `.env.example`
-- Registry service env template: `server/.env.example`
+- Registry service env template: `apps/server/.env.example`
 
-`/server` loads env from:
-- `server/.env` only
+`apps/server` loads env from:
+- `apps/server/.env` only
 
 For optional variables, leave them unset or blank. If you set a value, it must be valid (for example, real URL format for `*_URL` fields).
 
@@ -92,7 +92,7 @@ Core app values (required):
 - `SUPABASE_URL`: `https://<project-ref>.supabase.co`
 - `DATABASE_URL`: Postgres connection string for your project
 
-Registry server runtime (`/server`, optional with defaults shown):
+Registry server runtime (`apps/server`, optional with defaults shown):
 
 - `HOST`: default `127.0.0.1` (use `0.0.0.0` only if remote/device access is needed)
 - `PORT`: default `4010`
@@ -136,10 +136,9 @@ Optional script-only value:
 
 ### Skills Registry Service (Local)
 ```bash
-cd server
-pnpm dev         # run registry service in watch mode
-pnpm test        # run route/auth test suite
-pnpm check       # typecheck + lint + tests
+pnpm --filter server dev         # run registry service in watch mode
+pnpm --filter server test        # run route/auth test suite
+pnpm --filter server check       # typecheck + lint + tests
 ```
 
 User-scoped registry routes require:
@@ -162,9 +161,9 @@ Admin publish flow (Phase 3):
    - `ADMIN_API_TOKEN=<token>`
    - `SIGNING_SECRET=<long-random-secret>`
    - set app/shared values in `.env`
-   - set registry-only values in `server/.env` (recommended)
+   - set registry-only values in `apps/server/.env` (recommended)
 3. Start registry service:
-   - `pnpm -C server dev:admin`
+   - `pnpm --filter server dev:admin`
 4. Start the app:
    - `pnpm run tauri dev`
 5. Upload artifact:

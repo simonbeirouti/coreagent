@@ -3,14 +3,14 @@ name: Skills Registry CI
 on:
   pull_request:
     paths:
-      - "server/**"
+      - "apps/server/**"
       - "supabase/migrations/**"
       - ".github/workflows/skills-registry-ci.yml"
   push:
     branches:
       - main
     paths:
-      - "server/**"
+      - "apps/server/**"
       - "supabase/migrations/**"
       - ".github/workflows/skills-registry-ci.yml"
 
@@ -32,7 +32,7 @@ jobs:
           version: 10.8.0
 
       - name: Install server dependencies
-        run: pnpm install --frozen-lockfile --dir server
+        run: pnpm install --frozen-lockfile
 
       - name: Run server CI checks
-        run: pnpm --dir server check:ci
+        run: pnpm --filter server check:ci

@@ -16,10 +16,11 @@
     "test:changed": "vitest related --run",
     "test:watch": "vitest",
     "lint": "eslint .",
+    "check-types": "tsc --noEmit -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "validate:migrations": "node scripts/validate-migrations.mjs",
-    "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "check:quick": "pnpm typecheck && pnpm test:routes",
+    "check": "pnpm check-types && pnpm lint && pnpm test",
+    "check:quick": "pnpm check-types && pnpm test:routes",
     "check:ci": "pnpm check && pnpm validate:migrations && pnpm build"
   },
   "keywords": [
