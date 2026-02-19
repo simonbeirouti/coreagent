@@ -1,12 +1,15 @@
+use crate::ability_service::AbilityService;
+use crate::ai_client::StreamEvent;
 use crate::entities::agents::{self};
 use crate::user_profile_service::UserProfileService;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use chrono;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+};
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
-use crate::ai_client::StreamEvent;
 use tokio::time::{timeout, Duration};
+use uuid::Uuid;
 
 // Agent data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +52,13 @@ pub struct UpdateAgentRequest {
     pub behavioral_constraints: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimeCapability {
+    pub implementation_key: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+}
+
 // Convert SeaORM model to our AgentData struct
 impl From<agents::Model> for AgentData {
     fn from(model: agents::Model) -> Self {
@@ -75,13 +85,47 @@ pub struct AgentService;
 impl AgentService {
     const STREAMING_TIMEOUT_SECONDS: u64 = 90;
 
+    fn merge_constraints_with_runtime_tools(
+        base_constraints: Option<&serde_json::Value>,
+        runtime_tools: &[AgentRuntimeCapability],
+    ) -> Option<serde_json::Value> {
+        if runtime_tools.is_empty() {
+            return base_constraints.cloned();
+        }
+        let mut merged = base_constraints
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert(
+                "runtime_tools".to_string(),
+                serde_json::to_value(runtime_tools).unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
+        Some(merged)
+    }
+
+    pub async fn resolve_enabled_tools(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+    ) -> Result<Vec<AgentRuntimeCapability>, String> {
+        let tools = AbilityService::resolve_agent_runtime_tools(db, agent_id).await?;
+        Ok(tools
+            .into_iter()
+            .map(|tool| AgentRuntimeCapability {
+                implementation_key: tool.implementation_key,
+                enabled: tool.enabled,
+                config: tool.config,
+            })
+            .collect())
+    }
+
     /// Create a new agent
     pub async fn create_agent(
         db: &DatabaseConnection,
         request: CreateAgentRequest,
     ) -> Result<AgentData, String> {
-        let user_id = Uuid::parse_str(&request.user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_id =
+            Uuid::parse_str(&request.user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         // Validate provider type
         if !["openai", "anthropic"].contains(&request.provider_type.as_str()) {
@@ -106,10 +150,15 @@ impl AgentService {
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
 
-        let agent = agent.insert(db).await
+        let agent = agent
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to create agent: {}", e))?;
 
-        println!("[AGENT] Created agent: {} for user: {}", agent.name, agent.user_id);
+        println!(
+            "[AGENT] Created agent: {} for user: {}",
+            agent.name, agent.user_id
+        );
         Ok(agent.into())
     }
 
@@ -118,8 +167,7 @@ impl AgentService {
         db: &DatabaseConnection,
         user_id: String,
     ) -> Result<Vec<AgentData>, String> {
-        let user_id = Uuid::parse_str(&user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_id = Uuid::parse_str(&user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         let agents = agents::Entity::find()
             .filter(agents::Column::UserId.eq(user_id))
@@ -128,17 +176,18 @@ impl AgentService {
             .map_err(|e| format!("Failed to list agents: {}", e))?;
 
         let agents: Vec<AgentData> = agents.into_iter().map(|a| a.into()).collect();
-        println!("[AGENT] Listed {} agents for user: {}", agents.len(), user_id);
+        println!(
+            "[AGENT] Listed {} agents for user: {}",
+            agents.len(),
+            user_id
+        );
         Ok(agents)
     }
 
     /// Get a specific agent
-    pub async fn get_agent(
-        db: &DatabaseConnection,
-        agent_id: String,
-    ) -> Result<AgentData, String> {
-        let agent_id = Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+    pub async fn get_agent(db: &DatabaseConnection, agent_id: String) -> Result<AgentData, String> {
+        let agent_id =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let agent = agents::Entity::find_by_id(agent_id)
             .one(db)
@@ -155,8 +204,8 @@ impl AgentService {
         agent_id: String,
         updates: UpdateAgentRequest,
     ) -> Result<AgentData, String> {
-        let agent_id = Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_id =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let mut agent: agents::ActiveModel = agents::Entity::find_by_id(agent_id)
             .one(db)
@@ -199,7 +248,9 @@ impl AgentService {
 
         agent.updated_at = Set(chrono::Utc::now().into());
 
-        let agent = agent.update(db).await
+        let agent = agent
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update agent: {}", e))?;
 
         println!("[AGENT] Updated agent: {}", agent.name);
@@ -207,12 +258,9 @@ impl AgentService {
     }
 
     /// Delete an agent
-    pub async fn delete_agent(
-        db: &DatabaseConnection,
-        agent_id: String,
-    ) -> Result<(), String> {
-        let agent_id = Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+    pub async fn delete_agent(db: &DatabaseConnection, agent_id: String) -> Result<(), String> {
+        let agent_id =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let result = agents::Entity::delete_by_id(agent_id)
             .exec(db)
@@ -237,8 +285,8 @@ impl AgentService {
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
         // Get agent details from database
-        let agent_uuid = Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_uuid =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let agent = agents::Entity::find_by_id(agent_uuid)
             .one(db)
@@ -246,13 +294,24 @@ impl AgentService {
             .map_err(|e| format!("Failed to get agent: {}", e))?
             .ok_or_else(|| format!("Agent not found: {}", agent_id))?;
 
-        println!("[AGENT] Agent {} processing message with {} history items", agent.name, history.len());
+        println!(
+            "[AGENT] Agent {} processing message with {} history items",
+            agent.name,
+            history.len()
+        );
 
         // Fetch user profile for personalized context
-        let user_profile = UserProfileService::get_or_create_profile(
-            db,
-            agent.user_id.to_string()
-        ).await.ok();
+        let user_profile = UserProfileService::get_or_create_profile(db, agent.user_id.to_string())
+            .await
+            .ok();
+
+        let runtime_tools = Self::resolve_enabled_tools(db, agent.id)
+            .await
+            .unwrap_or_default();
+        let merged_constraints = Self::merge_constraints_with_runtime_tools(
+            agent.behavioral_constraints.as_ref(),
+            &runtime_tools,
+        );
 
         // Call AI client with agent's configuration and user profile
         let response = ai_client
@@ -263,7 +322,7 @@ impl AgentService {
                 &agent.persona,
                 agent.mission.as_deref(),
                 agent.values.as_deref(),
-                agent.behavioral_constraints.as_ref(),
+                merged_constraints.as_ref(),
                 user_profile.as_ref(),
                 history,
                 &message,
@@ -271,7 +330,11 @@ impl AgentService {
             )
             .await?;
 
-        println!("[AGENT] Agent {} generated response ({} chars)", agent.name, response.len());
+        println!(
+            "[AGENT] Agent {} generated response ({} chars)",
+            agent.name,
+            response.len()
+        );
         Ok(response)
     }
 
@@ -285,8 +348,8 @@ impl AgentService {
         on_event: Channel<StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
-        let agent_id = uuid::Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_id =
+            uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         // Fetch agent configuration
         let agent = crate::entities::agents::Entity::find_by_id(agent_id)
@@ -298,8 +361,21 @@ impl AgentService {
         println!("[AGENT] Sending streaming message to agent: {}", agent.name);
 
         // Fetch user profile for personalization (optional)
-        let user_profile = crate::user_profile_service::UserProfileService::get_profile(db, agent.user_id.to_string())
-            .await.ok().flatten();
+        let user_profile = crate::user_profile_service::UserProfileService::get_profile(
+            db,
+            agent.user_id.to_string(),
+        )
+        .await
+        .ok()
+        .flatten();
+
+        let runtime_tools = Self::resolve_enabled_tools(db, agent.id)
+            .await
+            .unwrap_or_default();
+        let merged_constraints = Self::merge_constraints_with_runtime_tools(
+            agent.behavioral_constraints.as_ref(),
+            &runtime_tools,
+        );
 
         // Call AI client with agent's configuration and user profile (streaming)
         let timeout_result = timeout(
@@ -311,7 +387,7 @@ impl AgentService {
                 &agent.persona,
                 agent.mission.as_deref(),
                 agent.values.as_deref(),
-                agent.behavioral_constraints.as_ref(),
+                merged_constraints.as_ref(),
                 user_profile.as_ref(),
                 history,
                 &message,
@@ -339,7 +415,11 @@ impl AgentService {
             }
         };
 
-        println!("[AGENT] Agent {} generated streaming response ({} chars)", agent.name, response.len());
+        println!(
+            "[AGENT] Agent {} generated streaming response ({} chars)",
+            agent.name,
+            response.len()
+        );
         Ok(response)
     }
 }

@@ -23,11 +23,33 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 
-const SIDEBAR_STORAGE_KEY = "sidebar_state"
+const SIDEBAR_COOKIE_NAME = "sidebar_state"
+const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = "16rem"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+function getSidebarCookieState(defaultOpen: boolean): boolean {
+  if (typeof document === "undefined") {
+    return defaultOpen
+  }
+
+  const cookieValue = document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith(`${SIDEBAR_COOKIE_NAME}=`))
+    ?.split("=")[1]
+
+  if (cookieValue === "true") {
+    return true
+  }
+
+  if (cookieValue === "false") {
+    return false
+  }
+
+  return defaultOpen
+}
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -51,7 +73,7 @@ function useSidebar() {
 }
 
 function SidebarProvider({
-  defaultOpen = true,
+  defaultOpen = false,
   open: openProp,
   onOpenChange: setOpenProp,
   className,
@@ -68,10 +90,7 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(() => {
-    const stored = localStorage.getItem(SIDEBAR_STORAGE_KEY)
-    return stored !== null ? JSON.parse(stored) : defaultOpen
-  })
+  const [_open, _setOpen] = React.useState(defaultOpen)
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -82,8 +101,8 @@ function SidebarProvider({
         _setOpen(openState)
       }
 
-      // This sets the localStorage to keep the sidebar state.
-      localStorage.setItem(SIDEBAR_STORAGE_KEY, JSON.stringify(openState))
+      // This sets the cookie to keep the sidebar state.
+      document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`
     },
     [setOpenProp, open]
   )
@@ -108,6 +127,14 @@ function SidebarProvider({
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [toggleSidebar])
+
+  // Hydration-safe cookie restore for uncontrolled sidebar state.
+  React.useEffect(() => {
+    if (openProp !== undefined) {
+      return
+    }
+    _setOpen(getSidebarCookieState(defaultOpen))
+  }, [defaultOpen, openProp])
 
   // We add a state so that we can do data-state="expanded" or "collapsed".
   // This makes it easier to style the sidebar with Tailwind classes.
@@ -139,7 +166,7 @@ function SidebarProvider({
             } as React.CSSProperties
           }
           className={cn(
-            "group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex min-h-svh w-full",
+            "group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex h-svh w-full overflow-hidden",
             className
           )}
           {...props}

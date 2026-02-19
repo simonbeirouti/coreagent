@@ -23,8 +23,10 @@ impl AuthState {
 
     pub fn set_session(&self, session: SessionData) {
         let mut s = self.session.lock().unwrap();
-        println!("[AUTH] Session stored for user: {} (expires: {})", 
-                 session.user_id, session.expires_at);
+        println!(
+            "[AUTH] Session stored for user: {} (expires: {})",
+            session.user_id, session.expires_at
+        );
         *s = Some(session);
     }
 

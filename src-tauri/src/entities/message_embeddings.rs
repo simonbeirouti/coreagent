@@ -33,4 +33,3 @@ impl Related<super::messages::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-

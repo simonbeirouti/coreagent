@@ -1,0 +1,207 @@
+[
+  {
+    "skillId": "coreagent.md.research_brief",
+    "implementationKey": "coreagent.md.research_brief",
+    "name": "Research Brief Composer",
+    "description": "Converts raw notes into concise, decision-ready research briefs.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "SKILL.md",
+    "artifactPath": "../skills/markdown/research-brief/SKILL.md",
+    "riskLevel": "low",
+    "source": "coreagent_markdown_starter",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "notes.read",
+        "required": false,
+        "riskLevel": "low",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "topic": { "type": "string" },
+        "notes": { "type": "string" },
+        "audience": { "type": "string" },
+        "depth": { "type": "string" }
+      },
+      "required": ["topic"]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string" },
+        "findings": { "type": "array" },
+        "recommendations": { "type": "array" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.md.research_brief",
+      "name": "Research Brief Composer",
+      "version": "1.0.0",
+      "description": "Converts raw notes into concise, decision-ready research briefs.",
+      "entrypoint": "SKILL.md",
+      "runtime": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "topic": { "type": "string" },
+          "notes": { "type": "string" },
+          "audience": { "type": "string" },
+          "depth": { "type": "string" }
+        },
+        "required": ["topic"]
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "notes.read",
+          "required": false,
+          "risk_level": "low",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  },
+  {
+    "skillId": "coreagent.md.decision_log",
+    "implementationKey": "coreagent.md.decision_log",
+    "name": "Decision Log Writer",
+    "description": "Creates structured decision records with rationale, tradeoffs, and rollback criteria.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "SKILL.md",
+    "artifactPath": "../skills/markdown/decision-log/SKILL.md",
+    "riskLevel": "low",
+    "source": "coreagent_markdown_starter",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "notes.read",
+        "required": false,
+        "riskLevel": "low",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "decision_title": { "type": "string" },
+        "context": { "type": "string" },
+        "options_considered": { "type": "array" },
+        "selected_option": { "type": "string" }
+      },
+      "required": ["decision_title", "selected_option"]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "decision": { "type": "string" },
+        "tradeoffs": { "type": "array" },
+        "validation_plan": { "type": "array" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.md.decision_log",
+      "name": "Decision Log Writer",
+      "version": "1.0.0",
+      "description": "Creates structured decision records with rationale, tradeoffs, and rollback criteria.",
+      "entrypoint": "SKILL.md",
+      "runtime": "command",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "notes.read",
+          "required": false,
+          "risk_level": "low",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  },
+  {
+    "skillId": "coreagent.md.registry_operator",
+    "implementationKey": "coreagent.md.registry_operator",
+    "name": "Registry Operator Assistant",
+    "description": "Guides users through discover/install/assign/validate registry workflows safely.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "SKILL.md",
+    "artifactPath": "../skills/markdown/registry-operator/SKILL.md",
+    "riskLevel": "low",
+    "source": "coreagent_markdown_starter",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "registry.read",
+        "required": false,
+        "riskLevel": "low",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "goal": { "type": "string" },
+        "skill_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "required": ["goal"]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "action_plan": { "type": "array" },
+        "commands": { "type": "array" },
+        "failure_handling": { "type": "array" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.md.registry_operator",
+      "name": "Registry Operator Assistant",
+      "version": "1.0.0",
+      "description": "Guides users through discover/install/assign/validate registry workflows safely.",
+      "entrypoint": "SKILL.md",
+      "runtime": "command",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "registry.read",
+          "required": false,
+          "risk_level": "low",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  }
+]

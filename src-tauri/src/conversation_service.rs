@@ -1,13 +1,17 @@
+use crate::ability_service::AbilityService;
+use crate::agent_service::{AgentRuntimeCapability, AgentService};
 use crate::entities::conversations::{self};
 use crate::entities::messages::{self};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveValue, QueryOrder, QuerySelect};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use chrono;
-use crate::ability_service::AbilityService;
 use crate::feedback_service::FeedbackService;
 use crate::input_sanitizer::sanitize_message;
 use crate::memory_service::MemoryService;
+use chrono;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // Conversation data structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,10 +77,23 @@ impl From<messages::Model> for MessageData {
 pub struct ConversationService;
 
 impl ConversationService {
+    fn ability_enabled(runtime_tools: &[AgentRuntimeCapability], implementation_key: &str) -> bool {
+        if runtime_tools.is_empty() {
+            return true;
+        }
+        runtime_tools
+            .iter()
+            .find(|tool| tool.implementation_key == implementation_key)
+            .map(|tool| tool.enabled)
+            .unwrap_or(true)
+    }
+
     fn spawn_message_quality_scoring(db: &DatabaseConnection, message_id: Uuid) {
         let db_for_task = db.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(err) = FeedbackService::score_assistant_message_quality(&db_for_task, message_id).await {
+            if let Err(err) =
+                FeedbackService::score_assistant_message_quality(&db_for_task, message_id).await
+            {
                 eprintln!(
                     "[CONVERSATION] Failed background message quality scoring for message {}: {}",
                     message_id, err
@@ -90,11 +107,11 @@ impl ConversationService {
         db: &DatabaseConnection,
         request: CreateConversationRequest,
     ) -> Result<ConversationData, String> {
-        let agent_id = Uuid::parse_str(&request.agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_id =
+            Uuid::parse_str(&request.agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
-        let user_id = Uuid::parse_str(&request.user_id)
-            .map_err(|e| format!("Invalid user ID: {}", e))?;
+        let user_id =
+            Uuid::parse_str(&request.user_id).map_err(|e| format!("Invalid user ID: {}", e))?;
 
         let conversation = conversations::ActiveModel {
             id: ActiveValue::Set(Uuid::new_v4()),
@@ -105,10 +122,15 @@ impl ConversationService {
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
 
-        let conversation = conversation.insert(db).await
+        let conversation = conversation
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to create conversation: {}", e))?;
 
-        println!("[CONVERSATION] Created conversation: {} for agent: {}", conversation.id, agent_id);
+        println!(
+            "[CONVERSATION] Created conversation: {} for agent: {}",
+            conversation.id, agent_id
+        );
         Ok(conversation.into())
     }
 
@@ -117,8 +139,8 @@ impl ConversationService {
         db: &DatabaseConnection,
         agent_id: String,
     ) -> Result<Vec<ConversationData>, String> {
-        let agent_id = Uuid::parse_str(&agent_id)
-            .map_err(|e| format!("Invalid agent ID: {}", e))?;
+        let agent_id =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
 
         let conversations = conversations::Entity::find()
             .filter(conversations::Column::AgentId.eq(agent_id))
@@ -127,8 +149,13 @@ impl ConversationService {
             .await
             .map_err(|e| format!("Failed to list conversations: {}", e))?;
 
-        let conversations: Vec<ConversationData> = conversations.into_iter().map(|c| c.into()).collect();
-        println!("[CONVERSATION] Listed {} conversations for agent: {}", conversations.len(), agent_id);
+        let conversations: Vec<ConversationData> =
+            conversations.into_iter().map(|c| c.into()).collect();
+        println!(
+            "[CONVERSATION] Listed {} conversations for agent: {}",
+            conversations.len(),
+            agent_id
+        );
         Ok(conversations)
     }
 
@@ -165,7 +192,11 @@ impl ConversationService {
             .map_err(|e| format!("Failed to get messages: {}", e))?;
 
         let messages: Vec<MessageData> = messages.into_iter().map(|m| m.into()).collect();
-        println!("[CONVERSATION] Retrieved {} messages for conversation: {}", messages.len(), conversation_id);
+        println!(
+            "[CONVERSATION] Retrieved {} messages for conversation: {}",
+            messages.len(),
+            conversation_id
+        );
         Ok(messages)
     }
 
@@ -181,8 +212,8 @@ impl ConversationService {
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
         // Sanitize the user input
-        let sanitized_content = sanitize_message(&content)
-            .map_err(|e| format!("Input validation failed: {}", e))?;
+        let sanitized_content =
+            sanitize_message(&content).map_err(|e| format!("Input validation failed: {}", e))?;
 
         // First, verify the conversation exists and get the agent
         let conversation = conversations::Entity::find_by_id(conversation_id)
@@ -198,7 +229,7 @@ impl ConversationService {
             .one(db)
             .await
             .map_err(|e| format!("Failed to find last message: {}", e))?;
-        
+
         let parent_id = last_message.map(|m| m.id);
 
         // Create user message with parent_id
@@ -214,7 +245,9 @@ impl ConversationService {
             parent_id: ActiveValue::Set(parent_id),
         };
 
-        user_message.insert(db).await
+        user_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save user message: {}", e))?;
 
         // Fetch conversation history (last 20 messages for context)
@@ -238,7 +271,10 @@ impl ConversationService {
             history.pop();
         }
 
-        println!("[CONVERSATION] Processing message with {} history items", history.len());
+        println!(
+            "[CONVERSATION] Processing message with {} history items",
+            history.len()
+        );
 
         // Add semantic memory context if available (best-effort).
         let mut final_prompt = content.clone();
@@ -266,15 +302,25 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with conversation history
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent(
+        let ai_response = AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
             history,
             image_base64,
             ai_client,
-        ).await?;
+        )
+        .await?;
 
         // Create assistant message with parent_id pointing to the user message
         let assistant_message = messages::ActiveModel {
@@ -288,21 +334,31 @@ impl ConversationService {
             parent_id: ActiveValue::Set(Some(user_message_id)),
         };
 
-        let saved_message = assistant_message.insert(db).await
+        let saved_message = assistant_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
         Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
-        let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
-        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content).await;
+        let _ =
+            MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content)
+                .await;
+        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content)
+            .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
         conversation_model.updated_at = Set(chrono::Utc::now().into());
-        conversation_model.update(db).await
+        conversation_model
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
 
-        println!("[CONVERSATION] Added message to conversation: {}", conversation_id);
+        println!(
+            "[CONVERSATION] Added message to conversation: {}",
+            conversation_id
+        );
         Ok(saved_message.into())
     }
 
@@ -319,8 +375,8 @@ impl ConversationService {
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
         // Sanitize the user input
-        let sanitized_content = sanitize_message(&content)
-            .map_err(|e| format!("Input validation failed: {}", e))?;
+        let sanitized_content =
+            sanitize_message(&content).map_err(|e| format!("Input validation failed: {}", e))?;
 
         // First, verify the conversation exists and get the agent
         let conversation = conversations::Entity::find_by_id(conversation_id)
@@ -336,7 +392,7 @@ impl ConversationService {
             .one(db)
             .await
             .map_err(|e| format!("Failed to find last message: {}", e))?;
-        
+
         let parent_id = last_message.map(|m| m.id);
 
         // Create user message with parent_id
@@ -352,7 +408,9 @@ impl ConversationService {
             parent_id: ActiveValue::Set(parent_id),
         };
 
-        user_message.insert(db).await
+        user_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save user message: {}", e))?;
 
         // Fetch conversation history (last 20 messages for context)
@@ -376,7 +434,10 @@ impl ConversationService {
             history.pop();
         }
 
-        println!("[CONVERSATION] Processing streaming message with {} history items", history.len());
+        println!(
+            "[CONVERSATION] Processing streaming message with {} history items",
+            history.len()
+        );
 
         // Add semantic memory context if available (best-effort).
         let mut final_prompt = content.clone();
@@ -404,8 +465,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with conversation history (streaming)
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+        let ai_response = AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -413,7 +483,8 @@ impl ConversationService {
             image_base64,
             on_event,
             ai_client,
-        ).await?;
+        )
+        .await?;
 
         // Create assistant message with parent_id pointing to the user message
         let assistant_message = messages::ActiveModel {
@@ -427,21 +498,31 @@ impl ConversationService {
             parent_id: ActiveValue::Set(Some(user_message_id)),
         };
 
-        let saved_message = assistant_message.insert(db).await
+        let saved_message = assistant_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
         Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
-        let _ = MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content).await;
-        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content).await;
+        let _ =
+            MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content)
+                .await;
+        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content)
+            .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
         conversation_model.updated_at = Set(chrono::Utc::now().into());
-        conversation_model.update(db).await
+        conversation_model
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
 
-        println!("[CONVERSATION] Added streaming message to conversation: {}", conversation_id);
+        println!(
+            "[CONVERSATION] Added streaming message to conversation: {}",
+            conversation_id
+        );
         Ok(saved_message.into())
     }
 
@@ -454,20 +535,26 @@ impl ConversationService {
         let conversation_id = Uuid::parse_str(&conversation_id)
             .map_err(|e| format!("Invalid conversation ID: {}", e))?;
 
-        let mut conversation: conversations::ActiveModel = conversations::Entity::find_by_id(conversation_id)
-            .one(db)
-            .await
-            .map_err(|e| format!("Failed to find conversation: {}", e))?
-            .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?
-            .into();
+        let mut conversation: conversations::ActiveModel =
+            conversations::Entity::find_by_id(conversation_id)
+                .one(db)
+                .await
+                .map_err(|e| format!("Failed to find conversation: {}", e))?
+                .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?
+                .into();
 
         conversation.title = Set(title);
         conversation.updated_at = Set(chrono::Utc::now().into());
 
-        let conversation = conversation.update(db).await
+        let conversation = conversation
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation: {}", e))?;
 
-        println!("[CONVERSATION] Updated conversation title: {}", conversation_id);
+        println!(
+            "[CONVERSATION] Updated conversation title: {}",
+            conversation_id
+        );
         Ok(conversation.into())
     }
 
@@ -492,36 +579,49 @@ impl ConversationService {
         );
 
         // Use a lightweight model for title generation
-        let title = ai_client.get_completion(
-            "openai", // Default to OpenAI for title generation
-            "gpt-4o-mini", // Use cheaper model for this simple task
-            "Title Generator", // Dummy agent name
-            "You are a helpful assistant that generates concise conversation titles.", // Simple persona
-            None, // No mission
-            None, // No values
-            None, // No constraints
-            None, // No user profile needed
-            vec![], // No conversation history needed
-            &title_prompt,
-        ).await
-        .map_err(|e| format!("Failed to generate title: {}", e))?
-        .trim()
-        .to_string();
+        let title = ai_client
+            .get_completion(
+                "openai",          // Default to OpenAI for title generation
+                "gpt-4o-mini",     // Use cheaper model for this simple task
+                "Title Generator", // Dummy agent name
+                "You are a helpful assistant that generates concise conversation titles.", // Simple persona
+                None,   // No mission
+                None,   // No values
+                None,   // No constraints
+                None,   // No user profile needed
+                vec![], // No conversation history needed
+                &title_prompt,
+            )
+            .await
+            .map_err(|e| format!("Failed to generate title: {}", e))?
+            .trim()
+            .to_string();
 
         // Ensure title is reasonable length (2-5 words)
         let word_count = title.split_whitespace().count();
         if !(2..=5).contains(&word_count) {
-            println!("[CONVERSATION] Generated title '{}' has {} words, using default", title, word_count);
+            println!(
+                "[CONVERSATION] Generated title '{}' has {} words, using default",
+                title, word_count
+            );
             // Fallback to a generic title if AI generated something too long/short
             let fallback_title = if first_message.len() > 50 {
                 format!("{}...", &first_message[..47])
             } else {
                 first_message.clone()
             };
-            return Self::update_conversation_title(db, conversation_id.to_string(), Some(fallback_title)).await;
+            return Self::update_conversation_title(
+                db,
+                conversation_id.to_string(),
+                Some(fallback_title),
+            )
+            .await;
         }
 
-        println!("[CONVERSATION] Generated title '{}' for conversation {}", title, conversation_id);
+        println!(
+            "[CONVERSATION] Generated title '{}' for conversation {}",
+            title, conversation_id
+        );
         Self::update_conversation_title(db, conversation_id.to_string(), Some(title)).await
     }
 
@@ -552,8 +652,8 @@ impl ConversationService {
         db: &DatabaseConnection,
         message_id: String,
     ) -> Result<Vec<Uuid>, String> {
-        let message_id = Uuid::parse_str(&message_id)
-            .map_err(|e| format!("Invalid message ID: {}", e))?;
+        let message_id =
+            Uuid::parse_str(&message_id).map_err(|e| format!("Invalid message ID: {}", e))?;
 
         // Find the message to delete
         let message = messages::Entity::find_by_id(message_id)
@@ -607,8 +707,8 @@ impl ConversationService {
         image_base64: Option<String>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<(MessageData, MessageData), String> {
-        let message_id = Uuid::parse_str(&message_id)
-            .map_err(|e| format!("Invalid message ID: {}", e))?;
+        let message_id =
+            Uuid::parse_str(&message_id).map_err(|e| format!("Invalid message ID: {}", e))?;
 
         // Sanitize the new content
         let sanitized_content = sanitize_message(&new_content)
@@ -631,7 +731,12 @@ impl ConversationService {
             .one(db)
             .await
             .map_err(|e| format!("Failed to find conversation: {}", e))?
-            .ok_or_else(|| format!("Conversation not found: {}", original_message.conversation_id))?;
+            .ok_or_else(|| {
+                format!(
+                    "Conversation not found: {}",
+                    original_message.conversation_id
+                )
+            })?;
 
         // Create new user message as a sibling (same parent_id as original)
         let new_user_message_id = Uuid::new_v4();
@@ -648,18 +753,20 @@ impl ConversationService {
             parent_id: ActiveValue::Set(original_message.parent_id), // Same parent = sibling branch
         };
 
-        let saved_user_message = new_user_message.insert(db).await
+        let saved_user_message = new_user_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save new user message: {}", e))?;
 
         // Build history up to (but not including) the original message's parent
         // This gives us the conversation context up to the branch point
         let mut history: Vec<(String, String)> = Vec::new();
-        
+
         if let Some(parent_id) = original_message.parent_id {
             // Walk up the tree to build history
             let mut current_id = Some(parent_id);
             let mut history_messages = Vec::new();
-            
+
             while let Some(id) = current_id {
                 if let Some(msg) = messages::Entity::find_by_id(id)
                     .one(db)
@@ -672,13 +779,16 @@ impl ConversationService {
                     break;
                 }
             }
-            
+
             // Reverse to get chronological order
             history_messages.reverse();
             history = history_messages;
         }
 
-        println!("[CONVERSATION] Edit message: built {} history items for branch", history.len());
+        println!(
+            "[CONVERSATION] Edit message: built {} history items for branch",
+            history.len()
+        );
 
         // Add semantic memory context if available (best-effort).
         let mut final_prompt = new_content.clone();
@@ -706,15 +816,25 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with the history up to the branch point
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent(
+        let ai_response = AgentService::send_message_to_agent(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
             history,
             image_base64,
             ai_client,
-        ).await?;
+        )
+        .await?;
 
         // Create assistant response as child of new user message
         let new_assistant_message = messages::ActiveModel {
@@ -728,21 +848,38 @@ impl ConversationService {
             parent_id: ActiveValue::Set(Some(new_user_message_id)),
         };
 
-        let saved_assistant_message = new_assistant_message.insert(db).await
+        let saved_assistant_message = new_assistant_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
         Self::spawn_message_quality_scoring(db, saved_assistant_message.id);
 
         // Embed branch user + assistant messages (best-effort).
-        let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
-        let _ = MemoryService::embed_message_content(db, saved_assistant_message.id, &saved_assistant_message.content).await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            new_user_message_id,
+            &sanitized_content.content,
+        )
+        .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            saved_assistant_message.id,
+            &saved_assistant_message.content,
+        )
+        .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
         conversation_model.updated_at = Set(chrono::Utc::now().into());
-        conversation_model.update(db).await
+        conversation_model
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
 
-        println!("[CONVERSATION] Created edit branch from message {}", message_id);
+        println!(
+            "[CONVERSATION] Created edit branch from message {}",
+            message_id
+        );
         Ok((saved_user_message.into(), saved_assistant_message.into()))
     }
 
@@ -755,8 +892,8 @@ impl ConversationService {
         on_event: crate::ai_client::Channel<crate::ai_client::StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<(MessageData, MessageData), String> {
-        let message_id = Uuid::parse_str(&message_id)
-            .map_err(|e| format!("Invalid message ID: {}", e))?;
+        let message_id =
+            Uuid::parse_str(&message_id).map_err(|e| format!("Invalid message ID: {}", e))?;
 
         // Sanitize the new content
         let sanitized_content = sanitize_message(&new_content)
@@ -779,7 +916,12 @@ impl ConversationService {
             .one(db)
             .await
             .map_err(|e| format!("Failed to find conversation: {}", e))?
-            .ok_or_else(|| format!("Conversation not found: {}", original_message.conversation_id))?;
+            .ok_or_else(|| {
+                format!(
+                    "Conversation not found: {}",
+                    original_message.conversation_id
+                )
+            })?;
 
         // Create new user message as a sibling (same parent_id as original)
         let new_user_message_id = Uuid::new_v4();
@@ -796,16 +938,18 @@ impl ConversationService {
             parent_id: ActiveValue::Set(original_message.parent_id), // Same parent = sibling branch
         };
 
-        let saved_user_message = new_user_message.insert(db).await
+        let saved_user_message = new_user_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save new user message: {}", e))?;
 
         // Build history up to (but not including) the original message's parent
         let mut history: Vec<(String, String)> = Vec::new();
-        
+
         if let Some(parent_id) = original_message.parent_id {
             let mut current_id = Some(parent_id);
             let mut history_messages = Vec::new();
-            
+
             while let Some(id) = current_id {
                 if let Some(msg) = messages::Entity::find_by_id(id)
                     .one(db)
@@ -818,12 +962,15 @@ impl ConversationService {
                     break;
                 }
             }
-            
+
             history_messages.reverse();
             history = history_messages;
         }
 
-        println!("[CONVERSATION] Edit message streaming: built {} history items for branch", history.len());
+        println!(
+            "[CONVERSATION] Edit message streaming: built {} history items for branch",
+            history.len()
+        );
 
         // Add semantic memory context if available (best-effort).
         let mut final_prompt = new_content.clone();
@@ -851,8 +998,17 @@ impl ConversationService {
             }
         }
 
+        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
+            .await
+            .unwrap_or_default();
+        let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
+            image_base64
+        } else {
+            None
+        };
+
         // Get AI response with streaming
-        let ai_response = crate::agent_service::AgentService::send_message_to_agent_streaming(
+        let ai_response = AgentService::send_message_to_agent_streaming(
             db,
             conversation.agent_id.to_string(),
             final_prompt,
@@ -860,7 +1016,8 @@ impl ConversationService {
             image_base64,
             on_event,
             ai_client,
-        ).await?;
+        )
+        .await?;
 
         // Create assistant response as child of new user message
         let new_assistant_message = messages::ActiveModel {
@@ -874,21 +1031,38 @@ impl ConversationService {
             parent_id: ActiveValue::Set(Some(new_user_message_id)),
         };
 
-        let saved_assistant_message = new_assistant_message.insert(db).await
+        let saved_assistant_message = new_assistant_message
+            .insert(db)
+            .await
             .map_err(|e| format!("Failed to save assistant message: {}", e))?;
         Self::spawn_message_quality_scoring(db, saved_assistant_message.id);
 
         // Embed branch user + assistant messages (best-effort).
-        let _ = MemoryService::embed_message_content(db, new_user_message_id, &sanitized_content.content).await;
-        let _ = MemoryService::embed_message_content(db, saved_assistant_message.id, &saved_assistant_message.content).await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            new_user_message_id,
+            &sanitized_content.content,
+        )
+        .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            saved_assistant_message.id,
+            &saved_assistant_message.content,
+        )
+        .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
         conversation_model.updated_at = Set(chrono::Utc::now().into());
-        conversation_model.update(db).await
+        conversation_model
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
 
-        println!("[CONVERSATION] Created edit branch (streaming) from message {}", message_id);
+        println!(
+            "[CONVERSATION] Created edit branch (streaming) from message {}",
+            message_id
+        );
         Ok((saved_user_message.into(), saved_assistant_message.into()))
     }
 
@@ -950,14 +1124,18 @@ impl ConversationService {
                 parent_id: ActiveValue::Set(last_message_id),
             };
 
-            let saved = message.insert(db).await
+            let saved = message
+                .insert(db)
+                .await
                 .map_err(|e| format!("Failed to save transcript entry: {}", e))?;
             if saved.role == "assistant" {
                 Self::spawn_message_quality_scoring(db, saved.id);
             }
-            
+
             saved_messages.push(saved.into());
-            let _ = MemoryService::embed_message_content(db, new_message_id, &sanitized_text_content).await;
+            let _ =
+                MemoryService::embed_message_content(db, new_message_id, &sanitized_text_content)
+                    .await;
             // Chain: next message's parent is this message
             last_message_id = Some(new_message_id);
         }
@@ -965,7 +1143,9 @@ impl ConversationService {
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
         conversation_model.updated_at = Set(chrono::Utc::now().into());
-        conversation_model.update(db).await
+        conversation_model
+            .update(db)
+            .await
             .map_err(|e| format!("Failed to update conversation timestamp: {}", e))?;
 
         // Track core voice abilities based on transcript roles (best-effort).
@@ -988,7 +1168,11 @@ impl ConversationService {
             .await;
         }
 
-        println!("[CONVERSATION] Saved {} voice transcript entries to conversation: {}", saved_messages.len(), conversation_id);
+        println!(
+            "[CONVERSATION] Saved {} voice transcript entries to conversation: {}",
+            saved_messages.len(),
+            conversation_id
+        );
         Ok(saved_messages)
     }
 }
@@ -999,4 +1183,29 @@ pub struct TranscriptEntry {
     pub role: String,
     pub text: String,
     pub timestamp: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConversationService;
+    use crate::agent_service::AgentRuntimeCapability;
+    use serde_json::json;
+
+    #[test]
+    fn ability_enabled_defaults_true_when_runtime_list_missing() {
+        assert!(ConversationService::ability_enabled(&[], "vision_analysis"));
+    }
+
+    #[test]
+    fn ability_enabled_respects_runtime_flag() {
+        let tools = vec![AgentRuntimeCapability {
+            implementation_key: "vision_analysis".to_string(),
+            enabled: false,
+            config: json!({}),
+        }];
+        assert!(!ConversationService::ability_enabled(
+            &tools,
+            "vision_analysis"
+        ));
+    }
 }

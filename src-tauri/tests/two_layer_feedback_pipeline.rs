@@ -44,7 +44,10 @@ async fn feedback_write_read_reconcile_and_adaptation_cycle_smoke() -> Result<()
     let rating_count = ratings_row
         .try_get::<i64>("", "rating_count")
         .map_err(|e| format!("Failed decoding rating_count: {e}"))?;
-    assert!(rating_count >= 2, "expected >=2 dimension ratings, got {rating_count}");
+    assert!(
+        rating_count >= 2,
+        "expected >=2 dimension ratings, got {rating_count}"
+    );
 
     let reconciliation_row = db
         .query_one(Statement::from_sql_and_values(
@@ -85,7 +88,9 @@ async fn feedback_write_read_reconcile_and_adaptation_cycle_smoke() -> Result<()
     .await?;
     let assistant_dimensions = dimensions
         .get(&fixture.assistant_message_id.to_string())
-        .ok_or_else(|| "missing assistant message dimensions in conversation payload".to_string())?;
+        .ok_or_else(|| {
+            "missing assistant message dimensions in conversation payload".to_string()
+        })?;
     assert!(assistant_dimensions.contains_key("tone"));
 
     let cycle = FeedbackService::run_adaptation_cycle(&db, fixture.agent_id).await?;

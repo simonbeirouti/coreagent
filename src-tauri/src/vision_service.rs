@@ -1,10 +1,15 @@
 use async_openai::{
-    types::chat::{CreateChatCompletionRequestArgs, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart, ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartImage, ImageUrl, ImageDetail},
-    Client as OpenAIClient,
     config::OpenAIConfig,
+    types::chat::{
+        ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+        ChatCompletionRequestMessageContentPartText, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+        CreateChatCompletionRequestArgs, ImageDetail, ImageUrl,
+    },
+    Client as OpenAIClient,
 };
-use base64::{Engine as _, engine::general_purpose};
-use image::{ImageFormat, DynamicImage};
+use base64::{engine::general_purpose, Engine as _};
+use image::{DynamicImage, ImageFormat};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -46,8 +51,7 @@ impl VisionService {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     pub async fn capture_screenshot(&self) -> Result<ScreenshotResult, String> {
         // Use xcap to capture screenshot
-        let screens = xcap::Monitor::all()
-            .map_err(|e| format!("Failed to get monitors: {}", e))?;
+        let screens = xcap::Monitor::all().map_err(|e| format!("Failed to get monitors: {}", e))?;
 
         if screens.is_empty() {
             return Err("No monitors found".to_string());
@@ -55,7 +59,8 @@ impl VisionService {
 
         // Capture the primary screen (first monitor)
         let screen = &screens[0];
-        let image = screen.capture_image()
+        let image = screen
+            .capture_image()
             .map_err(|e| format!("Failed to capture screenshot: {}", e))?;
 
         // Convert to RGB format for processing
@@ -63,7 +68,8 @@ impl VisionService {
 
         // Encode as PNG
         let mut png_bytes = Vec::new();
-        dynamic_image.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        dynamic_image
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
             .map_err(|e| format!("Failed to encode PNG: {}", e))?;
 
         // Convert to base64
@@ -98,16 +104,18 @@ impl VisionService {
             content: ChatCompletionRequestUserMessageContent::Array(vec![
                 ChatCompletionRequestUserMessageContentPart::Text(
                     ChatCompletionRequestMessageContentPartText {
-                        text: prompt.unwrap_or_else(|| "What's in this image? Describe it in detail.".to_string()),
-                    }
+                        text: prompt.unwrap_or_else(|| {
+                            "What's in this image? Describe it in detail.".to_string()
+                        }),
+                    },
                 ),
                 ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: ImageUrl {
                             url: image_url,
                             detail: Some(ImageDetail::Low), // Use low detail for faster processing
-                        }
-                    }
+                        },
+                    },
                 ),
             ]),
             name: None,
@@ -115,16 +123,18 @@ impl VisionService {
 
         let request = CreateChatCompletionRequestArgs::default()
             .model("gpt-4o")
-            .messages(vec![
-                ChatCompletionRequestMessage::User(user_message)
-            ])
+            .messages(vec![ChatCompletionRequestMessage::User(user_message)])
             .max_tokens(500u32)
             .temperature(0.7f32)
             .build()
             .map_err(|e| format!("Failed to build vision request: {}", e))?;
 
         // Call OpenAI Vision API
-        let response = self.openai_client.chat().create(request).await
+        let response = self
+            .openai_client
+            .chat()
+            .create(request)
+            .await
             .map_err(|e| format!("Vision API error: {}", e))?;
 
         if let Some(choice) = response.choices.first() {
@@ -143,7 +153,8 @@ impl VisionService {
         prompt: Option<String>,
     ) -> Result<String, String> {
         // Decode base64 to bytes
-        let image_data = general_purpose::STANDARD.decode(image_base64)
+        let image_data = general_purpose::STANDARD
+            .decode(image_base64)
             .map_err(|e| format!("Invalid base64 image data: {}", e))?;
 
         self.analyze_image(image_data, prompt).await
@@ -160,7 +171,8 @@ impl VisionService {
     ) -> Result<String, String> {
         let upload_url = format!("{}/storage/v1/object/{}/{}", supabase_url, bucket, path);
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&upload_url)
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "image/png")
@@ -172,7 +184,10 @@ impl VisionService {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(format!("Upload failed with status {}: {}", status, error_text));
+            return Err(format!(
+                "Upload failed with status {}: {}",
+                status, error_text
+            ));
         }
 
         Ok(path.to_string())

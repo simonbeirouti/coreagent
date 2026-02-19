@@ -1,8 +1,8 @@
-use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, QueryFilter, QueryOrder, Set, Statement,
-};
 use chrono::Datelike;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend,
+    DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, Statement,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -130,7 +130,12 @@ impl FeedbackService {
     fn adaptation_enabled() -> bool {
         std::env::var("ADAPTATION_AUTO")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true)
     }
 
@@ -214,7 +219,14 @@ impl FeedbackService {
             "type": "heuristic",
             "source_fields": ["assistant_content", "parent_content"],
         });
-        (tone, verbosity, helpfulness, accuracy, confidence, rationale)
+        (
+            tone,
+            verbosity,
+            helpfulness,
+            accuracy,
+            confidence,
+            rationale,
+        )
     }
 
     async fn resolve_agent_id_for_message(
@@ -303,7 +315,9 @@ impl FeedbackService {
         dimension_ratings: &HashMap<String, String>,
     ) -> Result<(), String> {
         for (dimension_key, rating_key) in dimension_ratings {
-            let Some(dimension) = Self::parse_dimension(dimension_key) else { continue };
+            let Some(dimension) = Self::parse_dimension(dimension_key) else {
+                continue;
+            };
             let normalized_rating = match rating_key.trim().to_ascii_lowercase().as_str() {
                 "up" => "up",
                 "down" => "down",
@@ -371,19 +385,24 @@ impl FeedbackService {
         if let Some(row) = label_row {
             let tone = row
                 .try_get::<f64>("", "tone_score")
-                .map_err(|e| format!("Failed decoding label tone_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding label tone_score: {e}"))?
+                as f32;
             let verbosity = row
                 .try_get::<f64>("", "verbosity_score")
-                .map_err(|e| format!("Failed decoding label verbosity_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding label verbosity_score: {e}"))?
+                as f32;
             let helpfulness = row
                 .try_get::<f64>("", "helpfulness_score")
-                .map_err(|e| format!("Failed decoding label helpfulness_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding label helpfulness_score: {e}"))?
+                as f32;
             let accuracy = row
                 .try_get::<f64>("", "accuracy_score")
-                .map_err(|e| format!("Failed decoding label accuracy_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding label accuracy_score: {e}"))?
+                as f32;
             let confidence = row
                 .try_get::<f64>("", "confidence")
-                .map_err(|e| format!("Failed decoding label confidence: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding label confidence: {e}"))?
+                as f32;
             effective.insert("tone".to_string(), tone);
             effective.insert("verbosity".to_string(), verbosity);
             effective.insert("helpfulness".to_string(), helpfulness);
@@ -406,7 +425,9 @@ impl FeedbackService {
                 vec![message_id.into()],
             ))
             .await
-            .map_err(|e| format!("Failed loading user dimension ratings for reconciliation: {e}"))?;
+            .map_err(|e| {
+                format!("Failed loading user dimension ratings for reconciliation: {e}")
+            })?;
 
         let mut user_count = 0_i32;
         for row in user_rows {
@@ -519,9 +540,9 @@ impl FeedbackService {
         if role != "assistant" {
             return Ok(());
         }
-        let assistant_content: String = row
-            .try_get("", "assistant_content")
-            .map_err(|e| format!("Failed decoding assistant_content for orchestrator scoring: {e}"))?;
+        let assistant_content: String = row.try_get("", "assistant_content").map_err(|e| {
+            format!("Failed decoding assistant_content for orchestrator scoring: {e}")
+        })?;
         let parent_content: String = row
             .try_get("", "parent_content")
             .map_err(|e| format!("Failed decoding parent_content for orchestrator scoring: {e}"))?;
@@ -581,7 +602,9 @@ impl FeedbackService {
                 vec![message_id.into()],
             ))
             .await
-            .map_err(|e| format!("Failed to load message context for feedback classification: {e}"))?
+            .map_err(|e| {
+                format!("Failed to load message context for feedback classification: {e}")
+            })?
             .ok_or_else(|| "Message not found while classifying feedback".to_string())?;
         let assistant_content: String = row
             .try_get("", "assistant_content")
@@ -707,7 +730,10 @@ impl FeedbackService {
             proactivity -= 0.02;
             matched.push("concise");
         }
-        if Self::contains_any(keyword_space, &["detailed", "thorough", "comprehensive", "deep"]) {
+        if Self::contains_any(
+            keyword_space,
+            &["detailed", "thorough", "comprehensive", "deep"],
+        ) {
             verbosity += 0.18;
             helpfulness += 0.05;
             matched.push("detailed");
@@ -717,21 +743,33 @@ impl FeedbackService {
             verbosity -= 0.05;
             matched.push("formal");
         }
-        if Self::contains_any(keyword_space, &["friendly", "supportive", "coach", "mentor", "empathetic"]) {
+        if Self::contains_any(
+            keyword_space,
+            &["friendly", "supportive", "coach", "mentor", "empathetic"],
+        ) {
             empathy += 0.16;
             helpfulness += 0.10;
             matched.push("empathetic");
         }
-        if Self::contains_any(keyword_space, &["creative", "brainstorm", "innovative", "ideation"]) {
+        if Self::contains_any(
+            keyword_space,
+            &["creative", "brainstorm", "innovative", "ideation"],
+        ) {
             creativity += 0.18;
             proactivity += 0.06;
             matched.push("creative");
         }
-        if Self::contains_any(keyword_space, &["proactive", "initiative", "anticipate", "ownership"]) {
+        if Self::contains_any(
+            keyword_space,
+            &["proactive", "initiative", "anticipate", "ownership"],
+        ) {
             proactivity += 0.16;
             matched.push("proactive");
         }
-        if Self::contains_any(keyword_space, &["analytical", "precise", "accuracy", "rigorous"]) {
+        if Self::contains_any(
+            keyword_space,
+            &["analytical", "precise", "accuracy", "rigorous"],
+        ) {
             formality += 0.08;
             proactivity += 0.08;
             creativity -= 0.04;
@@ -925,12 +963,14 @@ impl FeedbackService {
         let user_id =
             Uuid::parse_str(&request.user_id).map_err(|e| format!("Invalid user_id: {e}"))?;
         let agent_id = Self::resolve_agent_id_for_message(db, message_id).await?;
-        let normalized_category = Self::normalize_feedback_category(request.feedback_category.clone());
+        let normalized_category =
+            Self::normalize_feedback_category(request.feedback_category.clone());
         let notes_for_quality = request.notes.clone();
         let effective_category = if normalized_category.is_some() {
             normalized_category
         } else {
-            let (assistant_content, parent_content) = Self::load_feedback_context(db, message_id).await?;
+            let (assistant_content, parent_content) =
+                Self::load_feedback_context(db, message_id).await?;
             let inferred = Self::infer_feedback_category(
                 &request.feedback_type,
                 request.notes.as_deref(),
@@ -1025,45 +1065,44 @@ impl FeedbackService {
             WHERE agent_id = $1::uuid
         "#;
 
-        let decode_row =
-            |row: sea_orm::QueryResult| -> Result<TraitStateData, String> {
-                Ok(TraitStateData {
-                    agent_id: row
-                        .try_get("", "agent_id")
-                        .map_err(|e| format!("Failed to decode trait_state.agent_id: {e}"))?,
-                    helpfulness: row
-                        .try_get::<f64>("", "helpfulness")
-                        .map_err(|e| format!("Failed to decode trait_state.helpfulness: {e}"))?
-                        as f32,
-                    formality: row
-                        .try_get::<f64>("", "formality")
-                        .map_err(|e| format!("Failed to decode trait_state.formality: {e}"))?
-                        as f32,
-                    verbosity: row
-                        .try_get::<f64>("", "verbosity")
-                        .map_err(|e| format!("Failed to decode trait_state.verbosity: {e}"))?
-                        as f32,
-                    proactivity: row
-                        .try_get::<f64>("", "proactivity")
-                        .map_err(|e| format!("Failed to decode trait_state.proactivity: {e}"))?
-                        as f32,
-                    creativity: row
-                        .try_get::<f64>("", "creativity")
-                        .map_err(|e| format!("Failed to decode trait_state.creativity: {e}"))?
-                        as f32,
-                    empathy: row
-                        .try_get::<f64>("", "empathy")
-                        .map_err(|e| format!("Failed to decode trait_state.empathy: {e}"))?
-                        as f32,
-                    adaptation_enabled: row
-                        .try_get("", "adaptation_enabled")
-                        .map_err(|e| format!("Failed to decode trait_state.adaptation_enabled: {e}"))?,
-                    updated_at: row
-                        .try_get::<chrono::DateTime<chrono::FixedOffset>>("", "updated_at")
-                        .map_err(|e| format!("Failed to decode trait_state.updated_at: {e}"))?
-                        .with_timezone(&chrono::Utc),
-                })
-            };
+        let decode_row = |row: sea_orm::QueryResult| -> Result<TraitStateData, String> {
+            Ok(TraitStateData {
+                agent_id: row
+                    .try_get("", "agent_id")
+                    .map_err(|e| format!("Failed to decode trait_state.agent_id: {e}"))?,
+                helpfulness: row
+                    .try_get::<f64>("", "helpfulness")
+                    .map_err(|e| format!("Failed to decode trait_state.helpfulness: {e}"))?
+                    as f32,
+                formality: row
+                    .try_get::<f64>("", "formality")
+                    .map_err(|e| format!("Failed to decode trait_state.formality: {e}"))?
+                    as f32,
+                verbosity: row
+                    .try_get::<f64>("", "verbosity")
+                    .map_err(|e| format!("Failed to decode trait_state.verbosity: {e}"))?
+                    as f32,
+                proactivity: row
+                    .try_get::<f64>("", "proactivity")
+                    .map_err(|e| format!("Failed to decode trait_state.proactivity: {e}"))?
+                    as f32,
+                creativity: row
+                    .try_get::<f64>("", "creativity")
+                    .map_err(|e| format!("Failed to decode trait_state.creativity: {e}"))?
+                    as f32,
+                empathy: row
+                    .try_get::<f64>("", "empathy")
+                    .map_err(|e| format!("Failed to decode trait_state.empathy: {e}"))?
+                    as f32,
+                adaptation_enabled: row
+                    .try_get("", "adaptation_enabled")
+                    .map_err(|e| format!("Failed to decode trait_state.adaptation_enabled: {e}"))?,
+                updated_at: row
+                    .try_get::<chrono::DateTime<chrono::FixedOffset>>("", "updated_at")
+                    .map_err(|e| format!("Failed to decode trait_state.updated_at: {e}"))?
+                    .with_timezone(&chrono::Utc),
+            })
+        };
 
         if let Some(row) = db
             .query_one(Statement::from_sql_and_values(
@@ -1163,7 +1202,10 @@ impl FeedbackService {
             .query_all(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 sql,
-                vec![agent_id.into(), (Self::ADAPTATION_WINDOW_DAYS as i32).into()],
+                vec![
+                    agent_id.into(),
+                    (Self::ADAPTATION_WINDOW_DAYS as i32).into(),
+                ],
             ))
             .await
             .map_err(|e| format!("Failed to load category adaptation signals: {e}"))?;
@@ -1224,16 +1266,20 @@ impl FeedbackService {
             sample_size,
             tone_score: row
                 .try_get::<f64>("", "tone_score")
-                .map_err(|e| format!("Failed decoding dimension signal tone_score: {e}"))? as f32,
+                .map_err(|e| format!("Failed decoding dimension signal tone_score: {e}"))?
+                as f32,
             verbosity_score: row
                 .try_get::<f64>("", "verbosity_score")
-                .map_err(|e| format!("Failed decoding dimension signal verbosity_score: {e}"))? as f32,
+                .map_err(|e| format!("Failed decoding dimension signal verbosity_score: {e}"))?
+                as f32,
             helpfulness_score: row
                 .try_get::<f64>("", "helpfulness_score")
-                .map_err(|e| format!("Failed decoding dimension signal helpfulness_score: {e}"))? as f32,
+                .map_err(|e| format!("Failed decoding dimension signal helpfulness_score: {e}"))?
+                as f32,
             accuracy_score: row
                 .try_get::<f64>("", "accuracy_score")
-                .map_err(|e| format!("Failed decoding dimension signal accuracy_score: {e}"))? as f32,
+                .map_err(|e| format!("Failed decoding dimension signal accuracy_score: {e}"))?
+                as f32,
         }))
     }
 
@@ -1259,13 +1305,12 @@ impl FeedbackService {
             .await
             .map_err(|e| format!("Failed to query latest adaptation cycle: {e}"))?;
 
-        row
-            .map(|r| {
-                r.try_get::<chrono::DateTime<chrono::FixedOffset>>("", "created_at")
-                    .map(|v| v.with_timezone(&chrono::Utc))
-            })
-            .transpose()
-            .map_err(|e| format!("Failed decoding latest adaptation cycle timestamp: {e}"))
+        row.map(|r| {
+            r.try_get::<chrono::DateTime<chrono::FixedOffset>>("", "created_at")
+                .map(|v| v.with_timezone(&chrono::Utc))
+        })
+        .transpose()
+        .map_err(|e| format!("Failed decoding latest adaptation cycle timestamp: {e}"))
     }
 
     async fn persist_adaptation_cycle(
@@ -1379,11 +1424,14 @@ impl FeedbackService {
         };
 
         for (feedback, maybe_message) in all {
-            let Some(message) = maybe_message else { continue };
-            let conversation = crate::entities::conversations::Entity::find_by_id(message.conversation_id)
-                .one(db)
-                .await
-                .map_err(|e| format!("Failed loading conversation for feedback: {e}"))?;
+            let Some(message) = maybe_message else {
+                continue;
+            };
+            let conversation =
+                crate::entities::conversations::Entity::find_by_id(message.conversation_id)
+                    .one(db)
+                    .await
+                    .map_err(|e| format!("Failed loading conversation for feedback: {e}"))?;
             if let Some(conversation) = conversation {
                 if conversation.agent_id == agent_id {
                     match feedback.feedback_type.as_str() {
@@ -1416,7 +1464,9 @@ impl FeedbackService {
 
         let mut feedback_map = HashMap::new();
         for (feedback, maybe_message) in rows {
-            let Some(message) = maybe_message else { continue };
+            let Some(message) = maybe_message else {
+                continue;
+            };
             if message.conversation_id == conversation_id {
                 feedback_map.insert(message.id.to_string(), feedback.feedback_type);
             }
@@ -1463,9 +1513,7 @@ impl FeedbackService {
             let rating: String = row
                 .try_get("", "rating")
                 .map_err(|e| format!("Failed decoding conversation dimension rating: {e}"))?;
-            out.entry(message_id)
-                .or_default()
-                .insert(dimension, rating);
+            out.entry(message_id).or_default().insert(dimension, rating);
         }
         Ok(out)
     }
@@ -1489,21 +1537,27 @@ impl FeedbackService {
         let mut month_counts: HashMap<(i32, u32), (i64, i64)> = HashMap::new();
 
         for (feedback, maybe_message) in all {
-            let Some(message) = maybe_message else { continue };
-
-            let conversation_matches = if let Some(cached) = conversation_belongs_to_agent.get(&message.conversation_id) {
-                *cached
-            } else {
-                let conversation = crate::entities::conversations::Entity::find_by_id(message.conversation_id)
-                    .one(db)
-                    .await
-                    .map_err(|e| format!("Failed loading conversation for monthly feedback: {e}"))?;
-                let matches = conversation
-                    .map(|conv| conv.agent_id == agent_id)
-                    .unwrap_or(false);
-                conversation_belongs_to_agent.insert(message.conversation_id, matches);
-                matches
+            let Some(message) = maybe_message else {
+                continue;
             };
+
+            let conversation_matches =
+                if let Some(cached) = conversation_belongs_to_agent.get(&message.conversation_id) {
+                    *cached
+                } else {
+                    let conversation =
+                        crate::entities::conversations::Entity::find_by_id(message.conversation_id)
+                            .one(db)
+                            .await
+                            .map_err(|e| {
+                                format!("Failed loading conversation for monthly feedback: {e}")
+                            })?;
+                    let matches = conversation
+                        .map(|conv| conv.agent_id == agent_id)
+                        .unwrap_or(false);
+                    conversation_belongs_to_agent.insert(message.conversation_id, matches);
+                    matches
+                };
 
             if !conversation_matches {
                 continue;
@@ -1688,7 +1742,8 @@ impl FeedbackService {
             }
 
             let formality_old = trait_state.formality;
-            let formality_new = apply_delta(formality_old, (score * (step * 0.5)).clamp(-step, step));
+            let formality_new =
+                apply_delta(formality_old, (score * (step * 0.5)).clamp(-step, step));
             if (formality_new - formality_old).abs() >= 0.01 {
                 next_traits["formality"] = serde_json::json!(formality_new);
                 applied_changes.insert(
@@ -1746,7 +1801,8 @@ impl FeedbackService {
         };
         if let Some(score) = accuracy_signal {
             let proactivity_old = trait_state.proactivity;
-            let proactivity_new = apply_delta(proactivity_old, (score * (step * 0.75)).clamp(-step, step));
+            let proactivity_new =
+                apply_delta(proactivity_old, (score * (step * 0.75)).clamp(-step, step));
             if (proactivity_new - proactivity_old).abs() >= 0.01 {
                 next_traits["proactivity"] = serde_json::json!(proactivity_new);
                 applied_changes.insert(
@@ -1762,7 +1818,8 @@ impl FeedbackService {
             }
 
             let creativity_old = trait_state.creativity;
-            let creativity_new = apply_delta(creativity_old, (score * (step * 0.5)).clamp(-step, step));
+            let creativity_new =
+                apply_delta(creativity_old, (score * (step * 0.5)).clamp(-step, step));
             if (creativity_new - creativity_old).abs() >= 0.01 {
                 next_traits["creativity"] = serde_json::json!(creativity_new);
                 applied_changes.insert(
@@ -1785,8 +1842,13 @@ impl FeedbackService {
             let scaled_step = step * Self::AUTO_CATEGORY_FALLBACK_FACTOR;
 
             let helpfulness_old = trait_state.helpfulness;
-            let helpfulness_new = apply_delta(helpfulness_old, (score * scaled_step).clamp(-scaled_step, scaled_step));
-            if (helpfulness_new - helpfulness_old).abs() >= 0.01 && !applied_changes.contains_key("helpfulness") {
+            let helpfulness_new = apply_delta(
+                helpfulness_old,
+                (score * scaled_step).clamp(-scaled_step, scaled_step),
+            );
+            if (helpfulness_new - helpfulness_old).abs() >= 0.01
+                && !applied_changes.contains_key("helpfulness")
+            {
                 next_traits["helpfulness"] = serde_json::json!(helpfulness_new);
                 applied_changes.insert(
                     "helpfulness".to_string(),
@@ -1805,7 +1867,9 @@ impl FeedbackService {
                 proactivity_old,
                 (score * (scaled_step * 0.75)).clamp(-scaled_step, scaled_step),
             );
-            if (proactivity_new - proactivity_old).abs() >= 0.01 && !applied_changes.contains_key("proactivity") {
+            if (proactivity_new - proactivity_old).abs() >= 0.01
+                && !applied_changes.contains_key("proactivity")
+            {
                 next_traits["proactivity"] = serde_json::json!(proactivity_new);
                 applied_changes.insert(
                     "proactivity".to_string(),
@@ -1821,7 +1885,11 @@ impl FeedbackService {
         }
 
         let applied_changes_value = serde_json::Value::Object(applied_changes.clone());
-        let status = if applied_changes.is_empty() { "skipped" } else { "applied" };
+        let status = if applied_changes.is_empty() {
+            "skipped"
+        } else {
+            "applied"
+        };
         let reason = if applied_changes.is_empty() {
             Some("no_significant_signal")
         } else {
@@ -1889,12 +1957,30 @@ impl FeedbackService {
                 update_sql,
                 vec![
                     agent_id.into(),
-                    next_traits["helpfulness"].as_f64().unwrap_or(trait_state.helpfulness as f64).into(),
-                    next_traits["formality"].as_f64().unwrap_or(trait_state.formality as f64).into(),
-                    next_traits["verbosity"].as_f64().unwrap_or(trait_state.verbosity as f64).into(),
-                    next_traits["proactivity"].as_f64().unwrap_or(trait_state.proactivity as f64).into(),
-                    next_traits["creativity"].as_f64().unwrap_or(trait_state.creativity as f64).into(),
-                    next_traits["empathy"].as_f64().unwrap_or(trait_state.empathy as f64).into(),
+                    next_traits["helpfulness"]
+                        .as_f64()
+                        .unwrap_or(trait_state.helpfulness as f64)
+                        .into(),
+                    next_traits["formality"]
+                        .as_f64()
+                        .unwrap_or(trait_state.formality as f64)
+                        .into(),
+                    next_traits["verbosity"]
+                        .as_f64()
+                        .unwrap_or(trait_state.verbosity as f64)
+                        .into(),
+                    next_traits["proactivity"]
+                        .as_f64()
+                        .unwrap_or(trait_state.proactivity as f64)
+                        .into(),
+                    next_traits["creativity"]
+                        .as_f64()
+                        .unwrap_or(trait_state.creativity as f64)
+                        .into(),
+                    next_traits["empathy"]
+                        .as_f64()
+                        .unwrap_or(trait_state.empathy as f64)
+                        .into(),
                     cycle.id.into(),
                 ],
             ))
@@ -1926,10 +2012,9 @@ impl FeedbackService {
                     created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 };
 
-                model
-                    .insert(db)
-                    .await
-                    .map_err(|e| format!("Failed to persist personality adjustment {trait_name}: {e}"))?;
+                model.insert(db).await.map_err(|e| {
+                    format!("Failed to persist personality adjustment {trait_name}: {e}")
+                })?;
             }
 
             if let Some(agent) = agents::Entity::find_by_id(agent_id)
@@ -1949,10 +2034,9 @@ impl FeedbackService {
                 let mut active: agents::ActiveModel = agent.into();
                 active.behavioral_constraints = Set(Some(constraints));
                 active.updated_at = Set(chrono::Utc::now().into());
-                active
-                    .update(db)
-                    .await
-                    .map_err(|e| format!("Failed to persist adaptive traits into agent constraints: {e}"))?;
+                active.update(db).await.map_err(|e| {
+                    format!("Failed to persist adaptive traits into agent constraints: {e}")
+                })?;
             }
         }
 
@@ -2149,4 +2233,3 @@ mod tests {
         assert!(negative_lean < 0.0);
     }
 }
-

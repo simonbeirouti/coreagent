@@ -1,0 +1,337 @@
+openapi: 3.1.0
+info:
+  title: CoreAgent Skills Registry API
+  version: 1.0.0
+  description: |
+    User-scoped endpoints require `Authorization: Bearer <JWT>`.
+servers:
+  - url: http://localhost:4010
+paths:
+  /health:
+    get:
+      summary: Service health
+      responses:
+        "200":
+          description: Health payload
+  /ready:
+    get:
+      summary: Service readiness
+      responses:
+        "200":
+          description: Service is ready
+        "503":
+          description: Service is not ready
+  /diagnostics:
+    get:
+      summary: Service diagnostics and metrics snapshot
+      responses:
+        "200":
+          description: Diagnostics payload
+  /v1/skills:
+    get:
+      summary: List skills
+      parameters:
+        - in: query
+          name: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Skills list
+        "429":
+          description: Rate limit exceeded
+  /v1/skills/installed:
+    get:
+      summary: List installed skills for a user
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Installed skills list
+        "401":
+          description: Missing or invalid JWT
+        "503":
+          description: Server not configured
+  /v1/skills/{skillId}:
+    get:
+      summary: Get skill details
+      parameters:
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Skill details
+        "404":
+          description: Not found
+        "429":
+          description: Rate limit exceeded
+  /v1/skills/{skillId}/versions/{version}:
+    get:
+      summary: Get a specific skill version
+      parameters:
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: version
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Skill version details
+        "404":
+          description: Not found
+        "429":
+          description: Rate limit exceeded
+  /v1/advisories:
+    get:
+      summary: List advisories
+      responses:
+        "200":
+          description: Advisories list
+        "429":
+          description: Rate limit exceeded
+  /v1/advisories/feed:
+    get:
+      summary: Advisory feed with incremental cursor sync
+      parameters:
+        - in: query
+          name: cursor
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: Advisory feed page with next cursor and hasMore flag
+        "429":
+          description: Rate limit exceeded
+  /v1/skills/{skillId}/install:
+    post:
+      summary: Install skill for user
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Installed
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Skill or version not found
+        "503":
+          description: Server not configured
+    delete:
+      summary: Uninstall skill for user
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Uninstalled
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Install not found
+        "503":
+          description: Server not configured
+  /v1/skills/{skillId}/install/pin:
+    post:
+      summary: Pin installed skill to a specific version
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pinned
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Version or install not found
+        "503":
+          description: Server not configured
+  /v1/skills/{skillId}/assign:
+    post:
+      summary: Assign installed skill to an agent via agent_abilities
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Assigned
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Skill/install/agent not found
+        "409":
+          description: Ability mapping missing
+        "503":
+          description: Server not configured
+  /v1/runtime/skills/{skillId}/versions/{version}/handshake:
+    get:
+      summary: Runtime handshake contract for installed skill version
+      description: |
+        Returns install metadata, artifact digest/signature, compatibility envelope,
+        permission list, and force-disable signal derived from revocation/advisories.
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: version
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Runtime handshake payload
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Skill version not found
+        "503":
+          description: Server not configured
+  /v1/agents/{agentId}/skills:
+    get:
+      summary: List skills currently assigned to an agent
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: agentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Agent skills list
+        "401":
+          description: Missing or invalid JWT
+        "404":
+          description: Agent not found
+        "503":
+          description: Server not configured
+  /v1/admin/skills/publish:
+    post:
+      summary: Publish or update a skill version
+      description: |
+        Requires an artifact digest from `/v1/admin/artifacts/upload` (or external `artifactUri`).
+        Signature metadata is generated by the registry.
+      parameters:
+        - in: header
+          name: x-admin-token
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Published
+        "401":
+          description: Invalid token
+        "404":
+          description: Admin API disabled
+        "503":
+          description: Server not configured
+  /v1/admin/artifacts/upload:
+    post:
+      summary: Upload skill artifact to immutable digest storage
+      parameters:
+        - in: header
+          name: x-admin-token
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Uploaded
+        "400":
+          description: Invalid payload
+        "401":
+          description: Invalid token
+        "404":
+          description: Admin API disabled
+  /v1/admin/skills/{skillId}/versions/{version}/revoke:
+    post:
+      summary: Revoke a skill version
+      parameters:
+        - in: header
+          name: x-admin-token
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: skillId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: version
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revoked
+        "401":
+          description: Invalid token
+        "404":
+          description: Not found or admin API disabled
+        "503":
+          description: Server not configured

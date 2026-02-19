@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, QueryFilter, Set, Statement,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend,
+    DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -21,6 +21,29 @@ pub struct AgentAbilityData {
     pub success_count: i32,
     pub proficiency: f64,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentToolSettingData {
+    pub agent_id: Uuid,
+    pub ability_id: Uuid,
+    pub ability_name: String,
+    pub description: Option<String>,
+    pub implementation_key: String,
+    pub category: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+    pub parameters_schema: serde_json::Value,
+    pub is_mandatory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimeTool {
+    pub implementation_key: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,10 +95,23 @@ struct SkillDefinition<'a> {
 pub struct AbilityService;
 
 impl AbilityService {
+    const CORE_TOOL_KEYS: [&'static str; 5] = [
+        "memory_retrieval",
+        "vision_screenshot",
+        "vision_analysis",
+        "audio_transcription",
+        "voice_synthesis",
+    ];
+
     fn identity_trends_enabled() -> bool {
         std::env::var("IDENTITY_TRENDS")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true)
     }
 
@@ -136,7 +172,12 @@ impl AbilityService {
                 ],
             ))
             .await
-            .map_err(|e| format!("Failed persisting skill rating snapshot {}: {e}", rating.skill_key))?;
+            .map_err(|e| {
+                format!(
+                    "Failed persisting skill rating snapshot {}: {e}",
+                    rating.skill_key
+                )
+            })?;
         }
         Ok(())
     }
@@ -146,6 +187,97 @@ impl AbilityService {
             return 0.0;
         }
         (success_count as f64 / usage_count as f64).clamp(0.0, 1.0)
+    }
+
+    fn is_core_category(category: &str) -> bool {
+        matches!(category, "memory" | "perception" | "communication")
+    }
+
+    fn value_matches_schema_type(value: &serde_json::Value, expected_type: &str) -> bool {
+        match expected_type {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "null" => value.is_null(),
+            _ => true,
+        }
+    }
+
+    fn validate_value_against_schema(
+        value: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(schema_obj) = schema.as_object() else {
+            return Ok(());
+        };
+
+        if let Some(expected_type) = schema_obj.get("type").and_then(|v| v.as_str()) {
+            if !Self::value_matches_schema_type(value, expected_type) {
+                return Err(format!("Expected value type '{expected_type}'"));
+            }
+        }
+
+        if let Some(enum_values) = schema_obj.get("enum").and_then(|v| v.as_array()) {
+            if !enum_values.iter().any(|candidate| candidate == value) {
+                return Err("Value is not one of the allowed enum entries".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_config_against_schema(
+        config: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(schema_obj) = schema.as_object() else {
+            return Ok(());
+        };
+        if schema_obj.is_empty() {
+            return Ok(());
+        }
+
+        if let Some("object") = schema_obj.get("type").and_then(|v| v.as_str()) {
+            if !config.is_object() {
+                return Err("Config must be a JSON object".to_string());
+            }
+        }
+
+        let config_obj = config
+            .as_object()
+            .ok_or_else(|| "Config must be a JSON object".to_string())?;
+
+        if let Some(required) = schema_obj.get("required").and_then(|v| v.as_array()) {
+            for field in required.iter().filter_map(|v| v.as_str()) {
+                if !config_obj.contains_key(field) {
+                    return Err(format!("Missing required config field '{field}'"));
+                }
+            }
+        }
+
+        let properties = schema_obj
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let allow_additional = schema_obj
+            .get("additionalProperties")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        for (key, value) in config_obj {
+            if let Some(property_schema) = properties.get(key) {
+                Self::validate_value_against_schema(value, property_schema)
+                    .map_err(|err| format!("Invalid config field '{key}': {err}"))?;
+            } else if !allow_additional {
+                return Err(format!("Unknown config field '{key}'"));
+            }
+        }
+
+        Ok(())
     }
 
     fn skill_definitions<'a>() -> Vec<SkillDefinition<'a>> {
@@ -252,10 +384,9 @@ impl AbilityService {
         feedback_score: f32,
         confidence_score: f32,
     ) -> f32 {
-        let base =
-            (0.6 * quality_score.clamp(0.0, 1.0))
-                + (0.2 * engagement_score.clamp(0.0, 1.0))
-                + (0.2 * feedback_score.clamp(0.0, 1.0));
+        let base = (0.6 * quality_score.clamp(0.0, 1.0))
+            + (0.2 * engagement_score.clamp(0.0, 1.0))
+            + (0.2 * feedback_score.clamp(0.0, 1.0));
         let confidence_multiplier = 0.7 + 0.3 * confidence_score.clamp(0.0, 1.0);
         (100.0 * base * confidence_multiplier).clamp(0.0, 100.0)
     }
@@ -329,6 +460,157 @@ impl AbilityService {
         Ok(())
     }
 
+    async fn find_ability_by_implementation_key(
+        db: &DatabaseConnection,
+        implementation_key: &str,
+    ) -> Result<abilities::Model, String> {
+        abilities::Entity::find()
+            .filter(abilities::Column::ImplementationKey.eq(implementation_key))
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to find ability {implementation_key}: {e}"))?
+            .ok_or_else(|| format!("Ability not found: {implementation_key}"))
+    }
+
+    async fn ensure_agent_ability_row(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+        ability_id: Uuid,
+    ) -> Result<agent_abilities::Model, String> {
+        let existing = agent_abilities::Entity::find()
+            .filter(agent_abilities::Column::AgentId.eq(agent_id))
+            .filter(agent_abilities::Column::AbilityId.eq(ability_id))
+            .one(db)
+            .await
+            .map_err(|e| format!("Failed to query agent ability: {e}"))?;
+
+        if let Some(row) = existing {
+            return Ok(row);
+        }
+
+        let model = agent_abilities::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            agent_id: ActiveValue::Set(agent_id),
+            ability_id: ActiveValue::Set(ability_id),
+            acquired_at: ActiveValue::Set(chrono::Utc::now().into()),
+            usage_count: ActiveValue::Set(0),
+            success_count: ActiveValue::Set(0),
+            proficiency: ActiveValue::Set(0.0),
+            last_used_at: ActiveValue::Set(None),
+            enabled: ActiveValue::Set(true),
+            config: ActiveValue::Set(serde_json::json!({})),
+        };
+
+        model
+            .insert(db)
+            .await
+            .map_err(|e| format!("Failed creating agent ability row: {e}"))
+    }
+
+    fn to_tool_setting(
+        agent_id: Uuid,
+        ability: &abilities::Model,
+        row: &agent_abilities::Model,
+    ) -> AgentToolSettingData {
+        let is_mandatory = Self::is_core_category(&ability.category);
+        AgentToolSettingData {
+            agent_id,
+            ability_id: ability.id,
+            ability_name: ability.name.clone(),
+            description: ability.description.clone(),
+            implementation_key: ability.implementation_key.clone(),
+            category: ability.category.clone(),
+            enabled: if is_mandatory { true } else { row.enabled },
+            config: row.config.clone(),
+            parameters_schema: ability.parameters_schema.clone(),
+            is_mandatory,
+        }
+    }
+
+    pub async fn list_agent_tool_settings(
+        db: &DatabaseConnection,
+        agent_id: String,
+    ) -> Result<Vec<AgentToolSettingData>, String> {
+        let agent_id = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+
+        let abilities = abilities::Entity::find()
+            .filter(abilities::Column::ImplementationKey.is_in(Self::CORE_TOOL_KEYS))
+            .order_by_asc(abilities::Column::Name)
+            .all(db)
+            .await
+            .map_err(|e| format!("Failed loading abilities: {e}"))?;
+
+        let mut out = Vec::with_capacity(abilities.len());
+        for ability in abilities {
+            let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+            out.push(Self::to_tool_setting(agent_id, &ability, &row));
+        }
+
+        Ok(out)
+    }
+
+    pub async fn set_agent_ability_enabled(
+        db: &DatabaseConnection,
+        agent_id: String,
+        implementation_key: String,
+        enabled: bool,
+    ) -> Result<AgentToolSettingData, String> {
+        let agent_id = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let ability = Self::find_ability_by_implementation_key(db, &implementation_key).await?;
+        if Self::is_core_category(&ability.category) && !enabled {
+            return Err(format!(
+                "Abilities in category '{}' are core and cannot be disabled",
+                ability.category
+            ));
+        }
+        let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+
+        let mut active: agent_abilities::ActiveModel = row.into();
+        active.enabled = Set(enabled);
+        let updated = active
+            .update(db)
+            .await
+            .map_err(|e| format!("Failed updating ability enabled state: {e}"))?;
+
+        Ok(Self::to_tool_setting(agent_id, &ability, &updated))
+    }
+
+    pub async fn update_agent_ability_config(
+        db: &DatabaseConnection,
+        agent_id: String,
+        implementation_key: String,
+        config: serde_json::Value,
+    ) -> Result<AgentToolSettingData, String> {
+        let agent_id = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let ability = Self::find_ability_by_implementation_key(db, &implementation_key).await?;
+        Self::validate_config_against_schema(&config, &ability.parameters_schema)?;
+
+        let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+        let mut active: agent_abilities::ActiveModel = row.into();
+        active.config = Set(config);
+        let updated = active
+            .update(db)
+            .await
+            .map_err(|e| format!("Failed updating ability config: {e}"))?;
+
+        Ok(Self::to_tool_setting(agent_id, &ability, &updated))
+    }
+
+    pub async fn resolve_agent_runtime_tools(
+        db: &DatabaseConnection,
+        agent_id: Uuid,
+    ) -> Result<Vec<AgentRuntimeTool>, String> {
+        let settings = Self::list_agent_tool_settings(db, agent_id.to_string()).await?;
+        Ok(settings
+            .into_iter()
+            .map(|setting| AgentRuntimeTool {
+                implementation_key: setting.implementation_key,
+                enabled: setting.enabled,
+                config: setting.config,
+            })
+            .collect())
+    }
+
     pub async fn track_ability_usage(
         db: &DatabaseConnection,
         agent_id: Uuid,
@@ -379,6 +661,8 @@ impl AbilityService {
                     success_count: ActiveValue::Set(success_count),
                     proficiency: ActiveValue::Set(proficiency),
                     last_used_at: ActiveValue::Set(Some(chrono::Utc::now().into())),
+                    enabled: ActiveValue::Set(true),
+                    config: ActiveValue::Set(serde_json::json!({})),
                 };
                 model
                     .insert(db)
@@ -408,17 +692,25 @@ impl AbilityService {
                 .await
                 .map_err(|e| format!("Failed fetching ability details: {e}"))?;
             if let Some(ability) = ability {
+                let implementation_key = ability.implementation_key.clone();
+                let category = ability.category.clone();
                 results.push(AgentAbilityData {
                     id: link.id,
                     agent_id: link.agent_id,
                     ability_id: link.ability_id,
                     ability_name: ability.name,
-                    implementation_key: ability.implementation_key,
-                    category: ability.category,
+                    implementation_key: implementation_key.clone(),
+                    category: category.clone(),
                     usage_count: link.usage_count,
                     success_count: link.success_count,
                     proficiency: link.proficiency,
                     last_used_at: link.last_used_at.map(|v| v.into()),
+                    enabled: if Self::is_core_category(&category) {
+                        true
+                    } else {
+                        link.enabled
+                    },
+                    config: link.config,
                 });
             }
         }
@@ -431,14 +723,17 @@ impl AbilityService {
         db: &DatabaseConnection,
         agent_id: String,
     ) -> Result<Vec<SkillPerformanceRatingData>, String> {
-        let agent_uuid = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
-        let abilities = Self::list_agent_abilities(db, agent_id.clone()).await.unwrap_or_else(|err| {
-            eprintln!(
-                "[RATING] Failed to load agent abilities for {}: {}",
-                agent_id, err
-            );
-            Vec::new()
-        });
+        let agent_uuid =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let abilities = Self::list_agent_abilities(db, agent_id.clone())
+            .await
+            .unwrap_or_else(|err| {
+                eprintln!(
+                    "[RATING] Failed to load agent abilities for {}: {}",
+                    agent_id, err
+                );
+                Vec::new()
+            });
         let ability_map: HashMap<String, AgentAbilityData> = abilities
             .into_iter()
             .map(|ability| (ability.implementation_key.clone(), ability))
@@ -488,8 +783,12 @@ impl AbilityService {
             let usage_count = ability_usage_count.max(perception_usage_count);
             let engagement_score = Self::normalize_usage(usage_count);
             let confidence_score = Self::confidence_from_usage(usage_count);
-            let rating =
-                Self::compute_rating(quality_score, engagement_score, feedback_score, confidence_score);
+            let rating = Self::compute_rating(
+                quality_score,
+                engagement_score,
+                feedback_score,
+                confidence_score,
+            );
 
             ratings.push(SkillPerformanceRatingData {
                 skill_key: definition.skill_key.to_string(),
@@ -522,7 +821,8 @@ impl AbilityService {
         agent_id: String,
         days: i32,
     ) -> Result<Vec<SkillRatingTrendSeries>, String> {
-        let agent_uuid = Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
+        let agent_uuid =
+            Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?;
         let days = days.clamp(1, 90);
         let sql = r#"
             SELECT
@@ -560,19 +860,24 @@ impl AbilityService {
                 .map_err(|e| format!("Failed decoding trend skill_name: {e}"))?;
             let rating = row
                 .try_get::<f64>("", "rating")
-                .map_err(|e| format!("Failed decoding trend rating: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend rating: {e}"))?
+                as f32;
             let quality_score = row
                 .try_get::<f64>("", "quality_score")
-                .map_err(|e| format!("Failed decoding trend quality_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend quality_score: {e}"))?
+                as f32;
             let engagement_score = row
                 .try_get::<f64>("", "engagement_score")
-                .map_err(|e| format!("Failed decoding trend engagement_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend engagement_score: {e}"))?
+                as f32;
             let feedback_score = row
                 .try_get::<f64>("", "feedback_score")
-                .map_err(|e| format!("Failed decoding trend feedback_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend feedback_score: {e}"))?
+                as f32;
             let confidence_score = row
                 .try_get::<f64>("", "confidence_score")
-                .map_err(|e| format!("Failed decoding trend confidence_score: {e}"))? as f32;
+                .map_err(|e| format!("Failed decoding trend confidence_score: {e}"))?
+                as f32;
             let usage_count = row
                 .try_get::<i32>("", "usage_count")
                 .map_err(|e| format!("Failed decoding trend usage_count: {e}"))?;
@@ -580,13 +885,14 @@ impl AbilityService {
                 .try_get("", "snapshot_at")
                 .map_err(|e| format!("Failed decoding trend snapshot_at: {e}"))?;
 
-            let entry = grouped
-                .entry(skill_key.clone())
-                .or_insert_with(|| SkillRatingTrendSeries {
-                    skill_key: skill_key.clone(),
-                    skill_name: skill_name.clone(),
-                    points: Vec::new(),
-                });
+            let entry =
+                grouped
+                    .entry(skill_key.clone())
+                    .or_insert_with(|| SkillRatingTrendSeries {
+                        skill_key: skill_key.clone(),
+                        skill_name: skill_name.clone(),
+                        points: Vec::new(),
+                    });
             entry.points.push(SkillRatingTrendPoint {
                 timestamp,
                 rating,
@@ -607,6 +913,7 @@ impl AbilityService {
 #[cfg(test)]
 mod tests {
     use super::AbilityService;
+    use serde_json::json;
 
     #[test]
     fn proficiency_handles_zero_usage() {
@@ -639,5 +946,49 @@ mod tests {
         assert!((0.0..=100.0).contains(&low));
         assert!((0.0..=100.0).contains(&high));
     }
-}
 
+    #[test]
+    fn config_validation_accepts_valid_payload() {
+        let schema = json!({
+            "type": "object",
+            "required": ["detail"],
+            "additionalProperties": false,
+            "properties": {
+                "detail": { "type": "string", "enum": ["low", "high"] },
+                "max_tokens": { "type": "integer" }
+            }
+        });
+        let config = json!({
+            "detail": "low",
+            "max_tokens": 256
+        });
+        let result = AbilityService::validate_config_against_schema(&config, &schema);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_validation_rejects_unknown_or_missing_fields() {
+        let schema = json!({
+            "type": "object",
+            "required": ["detail"],
+            "additionalProperties": false,
+            "properties": {
+                "detail": { "type": "string", "enum": ["low", "high"] }
+            }
+        });
+        let missing_required = json!({});
+        let unknown_field = json!({"detail": "low", "foo": true});
+        assert!(
+            AbilityService::validate_config_against_schema(&missing_required, &schema).is_err()
+        );
+        assert!(AbilityService::validate_config_against_schema(&unknown_field, &schema).is_err());
+    }
+
+    #[test]
+    fn core_categories_are_mandatory() {
+        assert!(AbilityService::is_core_category("memory"));
+        assert!(AbilityService::is_core_category("perception"));
+        assert!(AbilityService::is_core_category("communication"));
+        assert!(!AbilityService::is_core_category("automation"));
+    }
+}

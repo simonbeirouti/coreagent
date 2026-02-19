@@ -56,7 +56,10 @@ async fn failure_path_is_predictable_and_system_remains_writable() -> Result<(),
     let count = row
         .try_get::<i64>("", "n")
         .map_err(|e| format!("Failed decoding reconciliation count: {e}"))?;
-    assert_eq!(count, 1, "expected reconciliation row to exist after recovery write");
+    assert_eq!(
+        count, 1,
+        "expected reconciliation row to exist after recovery write"
+    );
 
     cleanup_fixture(&db, &fixture).await;
     Ok(())

@@ -15,6 +15,8 @@ pub struct Model {
     pub success_count: i32,
     pub proficiency: f64,
     pub last_used_at: Option<DateTimeWithTimeZone>,
+    pub enabled: bool,
+    pub config: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -50,4 +52,3 @@ impl Related<super::abilities::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
-

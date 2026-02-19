@@ -24,6 +24,9 @@ export const userProfileKeys = {
 export const abilityKeys = {
   all: ['abilities'] as const,
   agent: (agentId: string) => [...abilityKeys.all, 'agent', agentId] as const,
+  toolSettings: (agentId: string) => [...abilityKeys.all, 'tool-settings', agentId] as const,
+  agentRegistrySkills: (agentId: string) =>
+    [...abilityKeys.all, 'agent-registry-skills', agentId] as const,
   skillRatings: (agentId: string) => [...abilityKeys.all, 'skill-ratings', agentId] as const,
   skillTrends: (agentId: string, days: number) =>
     [...abilityKeys.all, 'skill-trends', agentId, days] as const,
@@ -55,4 +58,26 @@ export const memoryKeys = {
 export const perceptionKeys = {
   all: ['perception-stats'] as const,
   stats: (agentId: string) => [...perceptionKeys.all, agentId] as const,
+};
+
+export const orchestrationKeys = {
+  all: ['orchestration'] as const,
+  runs: (agentId: string) => [...orchestrationKeys.all, 'runs', agentId] as const,
+  run: (runId: string) => [...orchestrationKeys.all, 'run', runId] as const,
+  tasks: (runId: string) => [...orchestrationKeys.all, 'tasks', runId] as const,
+  diagnostics: (runId: string) => [...orchestrationKeys.all, 'diagnostics', runId] as const,
+  delegations: (agentId: string) => [...orchestrationKeys.all, 'delegations', agentId] as const,
+  memories: (runId: string, viewerAgentId: string, scopeFilter = 'all') =>
+    [...orchestrationKeys.all, 'memories', runId, viewerAgentId, scopeFilter] as const,
+};
+
+export const registryKeys = {
+  all: ['registry'] as const,
+  skills: (query = '') => [...registryKeys.all, 'skills', query] as const,
+  skill: (skillId: string) => [...registryKeys.all, 'skill', skillId] as const,
+  skillVersion: (skillId: string, version: string) =>
+    [...registryKeys.all, 'skill-version', skillId, version] as const,
+  installed: () => [...registryKeys.all, 'installed'] as const,
+  advisories: (cursor = '', limit = 50) =>
+    [...registryKeys.all, 'advisories', cursor, limit] as const,
 };
