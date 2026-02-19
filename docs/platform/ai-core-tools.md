@@ -1,11 +1,11 @@
 # CoreAgent AI Core Tools
 
 ## Document Status
-- Last Updated: 2026-02-17
+- Last Updated: 2026-02-18
 - Scope: Unified tools reference across current app behavior + Phase 3 orchestration + skills-registry integration
 
 ## Purpose
-Core tools are runtime capabilities that let agents perceive context, retain memory, communicate, and execute delegated work safely. This document is the single source of truth for tool classes, lifecycle, runtime enforcement, and operational rules.
+Core tools are runtime capabilities that let agents perceive context, retain memory, communicate, and execute delegated work safely. This document is the technical reference for tool classes, lifecycle, runtime enforcement, and operational rules.
 
 ## Related Specs
 - `/Users/simonbeirouti/Developer/ai/coreagent/prd.md`
@@ -144,22 +144,3 @@ Operational targets:
 - Registry-managed tools should show lifecycle/enforcement state (`installed`, `pinned`, `revoked`, `force_disabled`, `sync_stale`).
 - Disabled reasons should be explicit for policy, compatibility, and advisory blocks.
 
-## Implementation TODO Checklist
-- [x] Add `skills_registry_client.rs` with typed request/response contracts for catalog, install, assign, handshake, and advisory feed endpoints.
-- [x] Add Tauri commands for registry skill lifecycle operations and register them in `tauri::generate_handler!`.
-- [x] Add registry auth header injection using in-memory `AuthState` session token only.
-- [ ] Add startup skills bootstrap flow (installed skills sync + diagnostics status).
-- [ ] Add advisory sync loop with cursor checkpoint persistence and retry/backoff.
-- [x] Add runtime handshake gate for all registry-managed tool executions.
-- [x] Add compatibility and `forceDisable.required` hard-block checks before execution.
-- [ ] Add permission broker for world-action categories (`network`, `filesystem`, `browser`, `process`) with deny-by-default behavior.
-- [ ] Add structured audit events for each registry-managed invocation (agent, skill, version, scope, outcome).
-- [x] Add UI source markers (`core` vs `registry-managed`) and lifecycle/status badges.
-- [x] Add explicit disabled-reason messaging in agent tools UI for policy/compatibility/advisory blocks.
-- [ ] Add orchestration capability prechecks for required ability keys on delegation and reassignment paths.
-- [ ] Add degraded-mode handling: core tools continue, registry installs/updates blocked, registry tools marked `sync_stale`.
-- [ ] Add observability metrics for install/assign/handshake/advisory propagation and blocked executions.
-- [ ] Add unit tests for handshake decision logic and permission broker policy.
-- [ ] Add integration tests for install -> assign -> runtime validate -> execute path.
-- [ ] Add security tests for revocation enforcement, permission escalation denial, and token redaction in logs/errors.
-- [ ] Add resilience tests for registry outage recovery and advisory sync restart behavior.
