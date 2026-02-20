@@ -8,8 +8,10 @@ import Docker, { type Container, type ContainerCreateOptions } from "dockerode";
 import type { RunnerEnv } from "./env.js";
 import type { RuntimeRunJobData } from "./worker.js";
 
-type LocalDockerExecutionResult = {
-  executionMode: "local_docker";
+export type DockerExecutionMode = "remote" | "local_docker";
+
+type DockerExecutionResultBase = {
+  executionMode: DockerExecutionMode;
   image: string;
   containerId: string;
   exitCode: number;
@@ -22,6 +24,14 @@ type LocalDockerExecutionResult = {
   };
 };
 
+type LocalDockerExecutionResult = DockerExecutionResultBase & {
+  executionMode: "local_docker";
+};
+
+type RemoteDockerExecutionResult = DockerExecutionResultBase & {
+  executionMode: "remote";
+};
+
 type LocalDockerExecutionOptions = {
   onLog?: (message: string, stream: "stdout" | "stderr") => Promise<void> | void;
 };
@@ -32,9 +42,30 @@ type PreparedArtifact = {
   cleanup: () => Promise<void>;
 };
 
+const BUILTIN_PROFILE_IMAGES: Record<string, string> = {
+  default: "node:20-alpine",
+  node: "node:20-alpine",
+  python: "python:3.12-alpine",
+  rust: "rust:1.83-alpine"
+};
+const CANONICAL_RUNTIME_PROFILE_ALIASES: Record<string, string> = {
+  js: "node",
+  javascript: "node",
+  nodejs: "node",
+  py: "python",
+  python3: "python",
+  rs: "rust"
+};
+const CANONICAL_BUILTIN_PROFILE_KEYS = new Set(Object.keys(BUILTIN_PROFILE_IMAGES));
+
 function normalizeRuntimeProfile(value: string | null | undefined): string {
   const normalized = (value ?? "").trim().toLowerCase();
   return normalized.length > 0 ? normalized : "default";
+}
+
+function canonicalizeRuntimeProfile(value: string | null | undefined): string {
+  const normalized = normalizeRuntimeProfile(value);
+  return CANONICAL_RUNTIME_PROFILE_ALIASES[normalized] ?? normalized;
 }
 
 function parseImageProfileMap(value: string): Map<string, string> {
@@ -49,7 +80,7 @@ function parseImageProfileMap(value: string): Map<string, string> {
     if (separatorIndex <= 0 || separatorIndex >= entry.length - 1) {
       continue;
     }
-    const profile = normalizeRuntimeProfile(entry.slice(0, separatorIndex));
+    const profile = canonicalizeRuntimeProfile(entry.slice(0, separatorIndex));
     const image = entry.slice(separatorIndex + 1).trim();
     if (image.length === 0) {
       continue;
@@ -60,24 +91,100 @@ function parseImageProfileMap(value: string): Map<string, string> {
   return map;
 }
 
-function resolveLocalDockerImage(job: RuntimeRunJobData, env: RunnerEnv): string {
-  const profile = normalizeRuntimeProfile(job.skillRuntime.runtimeProfile);
-  const profileMap = parseImageProfileMap(env.RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES);
+function inferRuntimeProfileFromSkillId(skillId: string): string | null {
+  const normalized = skillId.trim().toLowerCase();
+  if (normalized.startsWith("coreagent.py.")) {
+    return "python";
+  }
+  if (normalized.startsWith("coreagent.rs.")) {
+    return "rust";
+  }
+  if (normalized.startsWith("coreagent.js.")) {
+    return "node";
+  }
+  return null;
+}
 
+function resolveRuntimeProfile(job: RuntimeRunJobData): string {
+  const declaredProfile = canonicalizeRuntimeProfile(job.skillRuntime.runtimeProfile);
+  const inferredProfile =
+    declaredProfile === "default" ? inferRuntimeProfileFromSkillId(job.skillId) : null;
+  return canonicalizeRuntimeProfile(inferredProfile ?? declaredProfile);
+}
+
+function jobRequestsNetworkAccess(job: RuntimeRunJobData): boolean {
+  return job.requestedPermissions.some((permission) => {
+    const key = permission.permissionKey.toLowerCase();
+    return key.startsWith("network") || key.includes("http");
+  });
+}
+
+export function shouldDisableDockerNetwork(job: RuntimeRunJobData, env: RunnerEnv): boolean {
+  if (!env.RUNTIME_LOCAL_DOCKER_NETWORK_DISABLED) {
+    return false;
+  }
+  return !jobRequestsNetworkAccess(job);
+}
+
+export function collectRuntimeDockerImages(env: RunnerEnv): string[] {
+  const profileMap = parseImageProfileMap(env.RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES);
+  const canonicalImages = Object.keys(BUILTIN_PROFILE_IMAGES).map((profile) =>
+    profileMap.get(profile) ??
+    BUILTIN_PROFILE_IMAGES[profile] ??
+    profileMap.get("default") ??
+    env.RUNTIME_LOCAL_DOCKER_IMAGE ??
+    BUILTIN_PROFILE_IMAGES.default
+  );
+  const customProfileImages = [...profileMap.entries()]
+    .filter(([profile]) => !CANONICAL_BUILTIN_PROFILE_KEYS.has(profile))
+    .map(([, image]) => image);
+  const images = [...canonicalImages, ...customProfileImages]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return [...new Set(images)];
+}
+
+export async function prepareLocalDockerImages(env: RunnerEnv): Promise<string[]> {
+  const docker = new Docker();
+  await docker.ping();
+  const images = collectRuntimeDockerImages(env);
+  for (const image of images) {
+    await ensureImage(docker, image);
+  }
+  return images;
+}
+
+function resolveDockerImage(job: RuntimeRunJobData, env: RunnerEnv): string {
+  const profile = resolveRuntimeProfile(job);
+  const profileMap = parseImageProfileMap(env.RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES);
   return (
     profileMap.get(profile) ??
+    BUILTIN_PROFILE_IMAGES[profile] ??
     profileMap.get("default") ??
-    env.RUNTIME_LOCAL_DOCKER_IMAGE
+    env.RUNTIME_LOCAL_DOCKER_IMAGE ??
+    BUILTIN_PROFILE_IMAGES.default
   );
 }
 
-function ensureSafeRelativePath(value: string): string {
+export function resolveDockerImageForJob(job: RuntimeRunJobData, env: RunnerEnv): string {
+  return resolveDockerImage(job, env);
+}
+
+function getExecutionErrorPrefix(mode: DockerExecutionMode): string {
+  return mode === "remote" ? "REMOTE_DOCKER" : "LOCAL_DOCKER";
+}
+
+function createExecutionError(mode: DockerExecutionMode, kind: "DENY" | "FAILED" | "TIMEOUT", message: string): Error {
+  return new Error(`${getExecutionErrorPrefix(mode)}_${kind}:${message}`);
+}
+
+function ensureSafeRelativePath(value: string, mode: DockerExecutionMode): string {
   const normalized = value.trim();
   if (normalized.length === 0) {
-    throw new Error("LOCAL_DOCKER_FAILED:Entrypoint cannot be empty.");
+    throw createExecutionError(mode, "FAILED", "Entrypoint cannot be empty.");
   }
   if (isAbsolute(normalized) || normalized.includes("..")) {
-    throw new Error("LOCAL_DOCKER_FAILED:Entrypoint must be a safe relative path.");
+    throw createExecutionError(mode, "FAILED", "Entrypoint must be a safe relative path.");
   }
   return normalized;
 }
@@ -110,11 +217,11 @@ function parseArtifactDigest(uri: string): string | null {
   return match?.[1]?.toLowerCase() ?? null;
 }
 
-async function resolveArtifactBytes(uri: string, env: RunnerEnv): Promise<Buffer> {
+async function resolveArtifactBytes(uri: string, env: RunnerEnv, mode: DockerExecutionMode): Promise<Buffer> {
   if (uri.startsWith("http://") || uri.startsWith("https://")) {
     const response = await fetch(uri);
     if (!response.ok) {
-      throw new Error(`LOCAL_DOCKER_FAILED:Failed to download artifact (${response.status}).`);
+      throw createExecutionError(mode, "FAILED", `Failed to download artifact (${response.status}).`);
     }
     return Buffer.from(await response.arrayBuffer());
   }
@@ -131,15 +238,19 @@ async function resolveArtifactBytes(uri: string, env: RunnerEnv): Promise<Buffer
     return readFile(path);
   }
 
-  throw new Error(`LOCAL_DOCKER_FAILED:Unsupported artifact URI scheme "${uri}".`);
+  throw createExecutionError(mode, "FAILED", `Unsupported artifact URI scheme "${uri}".`);
 }
 
-async function prepareArtifactWorkspace(job: RuntimeRunJobData, env: RunnerEnv): Promise<PreparedArtifact> {
+async function prepareArtifactWorkspace(
+  job: RuntimeRunJobData,
+  env: RunnerEnv,
+  mode: DockerExecutionMode
+): Promise<PreparedArtifact> {
   if (job.skillRuntime.runtimeType !== "command") {
-    throw new Error(`LOCAL_DOCKER_FAILED:Unsupported local_docker runtime type "${job.skillRuntime.runtimeType}".`);
+    throw createExecutionError(mode, "FAILED", `Unsupported runtime type "${job.skillRuntime.runtimeType}".`);
   }
   if (!job.skillRuntime.artifactUri) {
-    throw new Error("LOCAL_DOCKER_FAILED:Skill artifact URI is required for local_docker execution.");
+    throw createExecutionError(mode, "FAILED", "Skill artifact URI is required for Docker execution.");
   }
 
   const hostWorkdir = await mkdtemp(join(tmpdir(), "coreagent-runtime-"));
@@ -148,11 +259,11 @@ async function prepareArtifactWorkspace(job: RuntimeRunJobData, env: RunnerEnv):
   };
 
   try {
-    const artifactBytes = await resolveArtifactBytes(job.skillRuntime.artifactUri, env);
-    const safeEntrypoint = ensureSafeRelativePath(job.skillRuntime.entrypoint);
+    const artifactBytes = await resolveArtifactBytes(job.skillRuntime.artifactUri, env, mode);
+    const safeEntrypoint = ensureSafeRelativePath(job.skillRuntime.entrypoint, mode);
     const entrypointHostPath = resolve(hostWorkdir, safeEntrypoint);
     if (!entrypointHostPath.startsWith(hostWorkdir)) {
-      throw new Error("LOCAL_DOCKER_FAILED:Entrypoint escaped workspace bounds.");
+      throw createExecutionError(mode, "FAILED", "Entrypoint escaped workspace bounds.");
     }
     await mkdir(dirname(entrypointHostPath), { recursive: true });
     await writeFile(entrypointHostPath, artifactBytes, { mode: 0o755 });
@@ -232,45 +343,72 @@ async function removeContainer(container: Container): Promise<void> {
   }
 }
 
-export async function executeLocalDockerRun(
+async function executeDockerRun(
   job: RuntimeRunJobData,
   env: RunnerEnv,
+  mode: DockerExecutionMode,
   options?: LocalDockerExecutionOptions
-): Promise<LocalDockerExecutionResult> {
-  if (!env.RUNTIME_ENABLE_LOCAL_DOCKER) {
-    throw new Error("LOCAL_DOCKER_DENY:Local Docker execution mode is disabled.");
+): Promise<DockerExecutionResultBase> {
+  if (mode === "local_docker" && !env.RUNTIME_ENABLE_LOCAL_DOCKER) {
+    throw createExecutionError(mode, "DENY", "Local Docker execution mode is disabled.");
+  }
+  if (mode === "remote" && !env.RUNTIME_ENABLE_REMOTE_DOCKER) {
+    throw createExecutionError(mode, "DENY", "Remote Docker execution mode is disabled.");
   }
 
+  const errorPrefix = getExecutionErrorPrefix(mode);
   const docker = new Docker();
-  await docker.ping();
-  const selectedImage = resolveLocalDockerImage(job, env);
-
-  if (env.RUNTIME_LOCAL_DOCKER_PULL_IF_MISSING) {
-    await ensureImage(docker, selectedImage);
-  }
-
-  const workspace = await prepareArtifactWorkspace(job, env);
-  const containerCmd = ["/bin/sh", "-lc", `chmod +x "${workspace.containerEntrypoint}" && "${workspace.containerEntrypoint}"`];
-
-  const createOptions: ContainerCreateOptions = {
-    Image: selectedImage,
-    Cmd: containerCmd,
-    WorkingDir: "/workspace",
-    AttachStdout: true,
-    AttachStderr: true,
-    HostConfig: {
-      AutoRemove: false,
-      ReadonlyRootfs: true,
-      Binds: [`${workspace.hostWorkdir}:/workspace:ro`],
-      Memory: env.RUNTIME_LOCAL_DOCKER_MEMORY_MB * 1024 * 1024,
-      CpuShares: env.RUNTIME_LOCAL_DOCKER_CPU_SHARES,
-      ...(env.RUNTIME_LOCAL_DOCKER_NETWORK_DISABLED ? { NetworkMode: "none" } : {})
-    }
-  };
-
-  const container = await docker.createContainer(createOptions);
+  const runtimeProfile = resolveRuntimeProfile(job);
+  const selectedImage = resolveDockerImage(job, env);
+  const disableNetwork = shouldDisableDockerNetwork(job, env);
+  let workspace: PreparedArtifact | null = null;
+  let container: Container | null = null;
   let timedOut = false;
   try {
+    await docker.ping();
+    if (mode === "local_docker" || env.RUNTIME_LOCAL_DOCKER_PULL_IF_MISSING) {
+      await ensureImage(docker, selectedImage);
+    }
+
+    workspace = await prepareArtifactWorkspace(job, env, mode);
+    const containerCmd = ["/bin/sh", "-c", workspace.containerEntrypoint];
+
+    const containerEnv = [
+      "PATH=/usr/local/cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "TMPDIR=/tmp",
+      "PIP_CACHE_DIR=/tmp/pip-cache",
+      "XDG_CACHE_HOME=/tmp/.cache",
+      "COREAGENT_TMP_DIR=/tmp",
+      "CARGO_HOME=/tmp/coreagent_cargo_home"
+    ];
+    if (runtimeProfile === "rust") {
+      containerEnv.push("RUSTUP_HOME=/tmp/coreagent_rustup_home");
+      containerEnv.push("RUSTUP_TOOLCHAIN=stable");
+    }
+
+    const createOptions: ContainerCreateOptions = {
+      Image: selectedImage,
+      Cmd: containerCmd,
+      WorkingDir: "/workspace",
+      Env: containerEnv,
+      AttachStdout: true,
+      AttachStderr: true,
+      HostConfig: {
+        AutoRemove: false,
+        ReadonlyRootfs: true,
+        Binds: [`${workspace.hostWorkdir}:/workspace:ro`],
+        Tmpfs: {
+          "/tmp": "rw,exec,size=268435456",
+          "/var/tmp": "rw,exec,size=268435456",
+          "/root/.cache": "rw,size=134217728"
+        },
+        Memory: env.RUNTIME_LOCAL_DOCKER_MEMORY_MB * 1024 * 1024,
+        CpuShares: env.RUNTIME_LOCAL_DOCKER_CPU_SHARES,
+        ...(disableNetwork ? { NetworkMode: "none" } : {})
+      }
+    };
+
+    container = await docker.createContainer(createOptions);
     await container.start();
 
     const logStream = await container.logs({
@@ -293,7 +431,7 @@ export async function executeLocalDockerRun(
       new Promise<never>((_, reject) => {
         setTimeout(() => {
           timedOut = true;
-          reject(new Error("LOCAL_DOCKER_TIMEOUT:Local docker execution exceeded timeout."));
+          reject(createExecutionError(mode, "TIMEOUT", "Docker execution exceeded timeout."));
         }, timeoutMs);
       })
     ]);
@@ -304,11 +442,11 @@ export async function executeLocalDockerRun(
 
     const exitCode = waitResult.StatusCode ?? 0;
     if (exitCode !== 0) {
-      throw new Error(`LOCAL_DOCKER_FAILED:Container exited with status ${exitCode}. ${rawStderr.trim()}`);
+      throw createExecutionError(mode, "FAILED", `Container exited with status ${exitCode}. ${rawStderr.trim()}`);
     }
 
     return {
-      executionMode: "local_docker",
+      executionMode: mode,
       image: selectedImage,
       containerId: container.id,
       exitCode,
@@ -321,7 +459,7 @@ export async function executeLocalDockerRun(
       }
     };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("LOCAL_DOCKER_TIMEOUT:")) {
+    if (error instanceof Error && error.message.startsWith(`${errorPrefix}_TIMEOUT:`) && container) {
       try {
         await container.kill();
       } catch {
@@ -329,10 +467,30 @@ export async function executeLocalDockerRun(
       }
       throw error;
     }
-    const message = error instanceof Error ? error.message : "Unknown local docker failure.";
-    throw new Error(message.startsWith("LOCAL_DOCKER_") ? message : `LOCAL_DOCKER_FAILED:${message}`);
+    const message = error instanceof Error ? error.message : "Unknown Docker execution failure.";
+    throw new Error(message.startsWith(`${errorPrefix}_`) ? message : `${errorPrefix}_FAILED:${message}`);
   } finally {
-    await removeContainer(container);
-    await workspace.cleanup();
+    if (container) {
+      await removeContainer(container);
+    }
+    if (workspace) {
+      await workspace.cleanup();
+    }
   }
+}
+
+export async function executeLocalDockerRun(
+  job: RuntimeRunJobData,
+  env: RunnerEnv,
+  options?: LocalDockerExecutionOptions
+): Promise<LocalDockerExecutionResult> {
+  return executeDockerRun(job, env, "local_docker", options) as Promise<LocalDockerExecutionResult>;
+}
+
+export async function executeRemoteDockerRun(
+  job: RuntimeRunJobData,
+  env: RunnerEnv,
+  options?: LocalDockerExecutionOptions
+): Promise<RemoteDockerExecutionResult> {
+  return executeDockerRun(job, env, "remote", options) as Promise<RemoteDockerExecutionResult>;
 }

@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { useAgent } from '@/hooks/useAgents';
 import { useConversations, useCreateConversation, useMessages, useSendMessage, useSendMessageStreaming, useGenerateConversationTitle, useDeleteConversation, useDeleteMessage, useEditMessageStreaming } from '@/hooks/useConversations';
 import { useAuth } from '@/hooks/use-auth';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { MessageSquare, Send, Plus, X, Image as ImageIcon, Loader2, MoreHorizontal, Pencil, Trash2, ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,13 +37,196 @@ import { ScreenshotButton } from '@/components/perception/screenshot-button';
 import { AttachButton } from '@/components/perception/attach-button';
 import { MessageFeedback } from '@/components/feedback/message-feedback';
 import { MarkdownContent } from '@/components/ui/markdown-content';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { useConversationDimensionFeedback } from '@/hooks/useFeedback';
+import { useAgentRegistrySkills, useAgentToolSettings } from '@/hooks/useAbilities';
+import { useVision } from '@/hooks/usePerception';
+import { useInstalledSkills } from '@/hooks/useRegistrySkills';
 import { getScreenshotSignedUrl } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
+import { invoke } from '@tauri-apps/api/core';
 
 // Maximum message length (matches backend validation)
 const MAX_MESSAGE_LENGTH = 32000;
+const CORE_RUNTIME_TOOLS = new Set([
+  'conversation',
+  'memory_retrieval',
+  'vision_screenshot',
+  'vision_analysis',
+  'audio_transcription',
+  'voice_synthesis',
+]);
+const DIRECT_TOOL_INTENT_VERBS = [
+  'run',
+  'execute',
+  'launch',
+  'start',
+  'trigger',
+] as const;
+const RUNTIME_TOOL_CONTEXT_START = '[RuntimeToolContext]';
+const RUNTIME_TOOL_CONTEXT_END = '[/RuntimeToolContext]';
+const DIRECT_TOOL_RESULT_CONTEXT_START = '[DirectToolResultContext]';
+const DIRECT_TOOL_RESULT_CONTEXT_END = '[/DirectToolResultContext]';
+
+function slugifySlashToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-_]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function parseDirectToolInput(argsText: string): Record<string, unknown> {
+  if (!argsText) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(argsText) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { input: parsed };
+  } catch {
+    return { query: argsText };
+  }
+}
+
+type SlashCommand = {
+  id: string;
+  commandToken: string;
+  label: string;
+  insertText: string;
+  description: string;
+  implementationKey: string;
+  skillId?: string;
+  executionMode: 'agent_runtime' | 'registry_direct';
+  kind: 'runtime' | 'screenshot';
+};
+
+type DirectRuntimeToolRunResult = {
+  implementationKey: string;
+  skillId: string;
+  version: string;
+  executionMode: 'remote' | 'local_docker';
+  runId: string;
+  status: string;
+  output?: Record<string, unknown> | null;
+  error?: Record<string, unknown> | null;
+  logMessages: string[];
+};
+
+type DirectRuntimeToolProgressEvent = {
+  clientRunId: string;
+  implementationKey: string;
+  runId?: string | null;
+  status?: string | null;
+  message: string;
+  sequence: number;
+  timestampMs: number;
+};
+
+type DirectToolTimelineEntry = {
+  id: string;
+  message: string;
+  level: 'info' | 'success' | 'error';
+  timestampMs: number;
+  sequence?: number;
+};
+
+type DirectToolRunStatus = 'running' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+
+type DirectToolRunViewModel = {
+  clientRunId: string;
+  startedAtMs: number;
+  implementationKey: string;
+  skillId?: string;
+  version?: string;
+  executionMode?: 'remote' | 'local_docker';
+  runId?: string;
+  status: DirectToolRunStatus;
+  timeline: DirectToolTimelineEntry[];
+  output?: Record<string, unknown> | null;
+  error?: Record<string, unknown> | null;
+};
+
+function inferTimelineLevel(message: string, status?: string | null): DirectToolTimelineEntry['level'] {
+  const normalized = `${status ?? ''} ${message}`.toLowerCase();
+  if (
+    normalized.includes('failed') ||
+    normalized.includes('error') ||
+    normalized.includes('timed_out') ||
+    normalized.includes('cancelled')
+  ) {
+    return 'error';
+  }
+  if (normalized.includes('succeeded') || normalized.includes('success')) {
+    return 'success';
+  }
+  return 'info';
+}
+
+function appendUniqueTimelineEntries(
+  existing: DirectToolTimelineEntry[],
+  incoming: DirectToolTimelineEntry[]
+): DirectToolTimelineEntry[] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set(existing.map((entry) => entry.id));
+  const next = [...existing];
+  for (const entry of incoming) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    next.push(entry);
+  }
+  return next.sort((a, b) => {
+    const aSeq = a.sequence ?? Number.POSITIVE_INFINITY;
+    const bSeq = b.sequence ?? Number.POSITIVE_INFINITY;
+    if (aSeq !== bSeq) {
+      return aSeq - bSeq;
+    }
+    return a.timestampMs - b.timestampMs;
+  });
+}
+
+function formatToolRunLabel(implementationKey: string): string {
+  const shortKey = implementationKey.split('.').pop() || implementationKey;
+  return shortKey.replace(/[_-]+/g, ' ').trim();
+}
+
+function shouldAttachRuntimeToolContext(content: string): boolean {
+  if (/\b(tool|tools|skill|skills|ability|abilities|command|commands)\b/i.test(content)) {
+    return true;
+  }
+
+  const actionPattern = new RegExp(`\\b(?:${DIRECT_TOOL_INTENT_VERBS.join('|')})\\b`, 'i');
+  return actionPattern.test(content);
+}
+
+function toRuntimeToolContext(tools: SlashCommand[]): string {
+  if (tools.length === 0) {
+    return '';
+  }
+
+  const catalog = tools
+    .map((tool) => {
+      const shortKey = tool.implementationKey.split('.').pop() || tool.implementationKey;
+      const readableName = shortKey.replace(/[_-]+/g, ' ').trim();
+      return `- ${readableName}: ${tool.description}`;
+    })
+    .join('\n');
+
+  return [
+    RUNTIME_TOOL_CONTEXT_START,
+    'Semantic tool intent catalog for disambiguation only.',
+    'When calling tools, use only exact tool/function names already exposed by runtime.',
+    'Never invent tool names, and do not retry a failing tool more than once.',
+    catalog,
+    RUNTIME_TOOL_CONTEXT_END,
+  ].join('\n');
+}
 
 // Helper to extract storage path from message content (new format)
 function extractStoragePath(content: string): string | null {
@@ -62,7 +246,91 @@ function getTextContent(content: string): string {
     .replace(/\[Screenshot:path:[^\]]+\]\n?/g, '') // New path format
     .replace(/\[Screenshot: https?:\/\/[^\]]+\]\n?/g, '') // Legacy URL format
     .replace(/\[Image Description: [\s\S]*?\]\n?/g, '') // Image description (for AI, not display)
+    .replace(/\[RuntimeToolContext\][\s\S]*?\[\/RuntimeToolContext\]\n?/g, '') // Runtime tool context (for AI, not display)
+    .replace(/\[DirectToolResultContext\][\s\S]*?\[\/DirectToolResultContext\]\n?/g, '') // Direct tool result context (for AI, not display)
     .trim();
+}
+
+function isDirectToolResultContextContent(content: string): boolean {
+  return (
+    content.includes(DIRECT_TOOL_RESULT_CONTEXT_START) &&
+    content.includes(DIRECT_TOOL_RESULT_CONTEXT_END)
+  );
+}
+
+function parseDirectToolRunStatus(value: string | null | undefined): DirectToolRunStatus {
+  const normalized = (value ?? '').trim().toLowerCase();
+  if (
+    normalized === 'running' ||
+    normalized === 'succeeded' ||
+    normalized === 'failed' ||
+    normalized === 'timed_out' ||
+    normalized === 'cancelled'
+  ) {
+    return normalized;
+  }
+  return 'running';
+}
+
+function safeParseObjectJson(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parsePersistedDirectToolRun(message: Message): DirectToolRunViewModel | null {
+  if (message.role !== 'user') return null;
+  const match = message.content.match(
+    /\[DirectToolResultContext\]([\s\S]*?)\[\/DirectToolResultContext\]/
+  );
+  if (!match?.[1]) return null;
+  const block = match[1];
+  const tool = block.match(/^\s*Tool:\s*(.+)$/m)?.[1]?.trim();
+  if (!tool) return null;
+  const runId = block.match(/^\s*Run ID:\s*(.+)$/m)?.[1]?.trim();
+  const statusValue = block.match(/^\s*Status:\s*(.+)$/m)?.[1]?.trim();
+  const executionMode = block.match(/^\s*Execution mode:\s*(.+)$/m)?.[1]?.trim();
+  const outputJson = safeParseObjectJson(
+    block.match(/Tool output JSON:\s*([\s\S]*?)\nTool error JSON:/)?.[1]?.trim() ?? null
+  );
+  const errorJson = safeParseObjectJson(
+    block
+      .match(
+        /Tool error JSON:\s*([\s\S]*?)\nPlease provide a concise user-facing response based on this tool result\./
+      )
+      ?.[1]
+      ?.trim() ?? null
+  );
+  const status = parseDirectToolRunStatus(statusValue);
+  const startedAtMs = Date.parse(message.created_at) || Date.now();
+  const completedMessage = `Run completed with status ${status}.`;
+  return {
+    clientRunId: `persisted-${runId || message.id}`,
+    startedAtMs,
+    implementationKey: tool,
+    runId: runId || undefined,
+    status,
+    executionMode:
+      executionMode === 'remote' || executionMode === 'local_docker' ? executionMode : undefined,
+    output: outputJson,
+    error: errorJson,
+    timeline: [
+      {
+        id: `persisted-${message.id}-completed`,
+        message: completedMessage,
+        level: inferTimelineLevel(completedMessage, status),
+        timestampMs: startedAtMs,
+        sequence: Number.MAX_SAFE_INTEGER,
+      },
+    ],
+  };
 }
 
 // Cache for signed URLs to avoid regenerating on every render
@@ -166,6 +434,98 @@ function MessageImage({ content }: { content: string }) {
   );
 }
 
+function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
+  const latestEntry = run.timeline[run.timeline.length - 1];
+  const statusToneClass =
+    run.status === 'succeeded'
+      ? 'text-green-700 dark:text-green-400'
+      : run.status === 'failed' || run.status === 'timed_out' || run.status === 'cancelled'
+      ? 'text-destructive'
+      : 'text-muted-foreground';
+  const statusLabel =
+    run.status === 'running' ? 'Running' : run.status.replace(/_/g, ' ');
+
+  return (
+    <Card className="min-w-1/2 p-0 bg-muted border-border/80">
+      <CardContent className="p-3">
+        <Accordion type="single" collapsible>
+          <AccordionItem value={`run-${run.clientRunId}`} className="border-b-0">
+            <AccordionTrigger className="py-1 hover:no-underline">
+              <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  {run.status === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  <span className="truncate text-sm font-medium">
+                    {formatToolRunLabel(run.implementationKey)}
+                  </span>
+                  <span className={cn('text-xs capitalize', statusToneClass)}>{statusLabel}</span>
+                </div>
+                {latestEntry ? (
+                  <div className="truncate text-xs text-muted-foreground">
+                    {latestEntry.message}
+                  </div>
+                ) : null}
+              </div>
+            </AccordionTrigger>
+            <AccordionContent className="pt-1">
+              <div className="space-y-2">
+                {run.executionMode ? (
+                  <div className="text-xs text-muted-foreground">
+                    execution mode: <span className="font-medium">{run.executionMode}</span>
+                  </div>
+                ) : null}
+                {run.runId ? (
+                  <div className="text-xs text-muted-foreground">
+                    run id: <span className="font-medium">{run.runId}</span>
+                  </div>
+                ) : null}
+                <div className="space-y-1.5 rounded-md border bg-background p-2">
+                  {run.timeline.length > 0 ? (
+                    run.timeline.map((entry) => (
+                      <div key={entry.id} className="text-xs">
+                        <span
+                          className={cn(
+                            'mr-2 font-medium',
+                            entry.level === 'error'
+                              ? 'text-destructive'
+                              : entry.level === 'success'
+                              ? 'text-green-700 dark:text-green-400'
+                              : 'text-muted-foreground'
+                          )}
+                        >
+                          {new Date(entry.timestampMs).toLocaleTimeString()}
+                        </span>
+                        <span>{entry.message}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-xs text-muted-foreground">Waiting for runner updates...</div>
+                  )}
+                </div>
+                {run.output ? (
+                  <div className="space-y-1">
+                    <div className="text-xs font-medium">Output</div>
+                    <pre className="max-h-48 overflow-auto rounded-md border bg-background p-2 text-[11px]">
+                      {JSON.stringify(run.output, null, 2)}
+                    </pre>
+                  </div>
+                ) : null}
+                {run.error ? (
+                  <div className="space-y-1">
+                    <div className="text-xs font-medium text-destructive">Error</div>
+                    <pre className="max-h-56 overflow-auto rounded-md border border-destructive/40 bg-background p-2 text-[11px]">
+                      {JSON.stringify(run.error, null, 2)}
+                    </pre>
+                  </div>
+                ) : null}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      </CardContent>
+    </Card>
+  );
+}
+
 export const Route = createFileRoute('/agents/$agentId/chat')({
   validateSearch: (search: Record<string, unknown>) => ({
     conversationId:
@@ -182,6 +542,10 @@ function AgentChatPage() {
   const userId = user?.id || '';
   
   const { data: agent, isLoading: agentLoading } = useAgent(agentId);
+  const { data: toolSettings = [] } = useAgentToolSettings(agentId);
+  const { data: agentRegistrySkills = [] } = useAgentRegistrySkills(agentId);
+  const { data: installedSkills = [] } = useInstalledSkills();
+  const { captureScreen } = useVision(agentId);
   const { data: conversations, isLoading: conversationsLoading } = useConversations(agentId);
   const createConversation = useCreateConversation();
   const sendMessage = useSendMessage();
@@ -215,6 +579,9 @@ function AgentChatPage() {
     signedUrl?: string; // Temporary signed URL for immediate display
   } | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isDirectToolRunning, setIsDirectToolRunning] = useState(false);
+  const [directToolRuns, setDirectToolRuns] = useState<DirectToolRunViewModel[]>([]);
+  const [showSlashCommands, setShowSlashCommands] = useState(false);
 
   // Message branching state
   const [branchSelections, setBranchSelections] = useState<BranchSelections>({});
@@ -226,16 +593,241 @@ function AgentChatPage() {
   const { data: feedbackByMessage = {} } = useConversationDimensionFeedback(activeConversationId || '', userId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
+  const prevToolRunsSignalRef = useRef<string>('');
 
   // Compute visible thread based on branch selections
   const visibleMessages = messages ? resolveVisibleThread(messages, branchSelections) : [];
+  const displayMessages = useMemo(
+    () =>
+      visibleMessages.filter(
+        (message) =>
+          !(message.role === 'user' && isDirectToolResultContextContent(message.content))
+      ),
+    [visibleMessages]
+  );
+  const persistedToolRuns = useMemo(
+    () =>
+      visibleMessages
+        .map((message) => parsePersistedDirectToolRun(message))
+        .filter((run): run is DirectToolRunViewModel => run !== null),
+    [visibleMessages]
+  );
+  const allToolRuns = useMemo(() => {
+    const liveRunIds = new Set(directToolRuns.map((run) => run.runId).filter(Boolean));
+    const liveRunKeys = new Set(
+      directToolRuns.map((run) => `${run.implementationKey}:${run.startedAtMs}`)
+    );
+    const hydratedRuns = persistedToolRuns.filter((run) => {
+      if (run.runId && liveRunIds.has(run.runId)) {
+        return false;
+      }
+      return !liveRunKeys.has(`${run.implementationKey}:${run.startedAtMs}`);
+    });
+    return [...hydratedRuns, ...directToolRuns];
+  }, [persistedToolRuns, directToolRuns]);
   const branchInfoMap = messages ? getBranchInfo(messages, branchSelections) : new Map<string, BranchInfo>();
+  const chatTimelineItems = useMemo(() => {
+    const messageItems = displayMessages.map((message, index) => ({
+      kind: 'message' as const,
+      id: `message-${message.id}`,
+      timestampMs: Date.parse(message.created_at) || 0,
+      index,
+      message,
+    }));
+    const runItems = allToolRuns.map((run, index) => ({
+      kind: 'run' as const,
+      id: `run-${run.clientRunId}`,
+      timestampMs: run.startedAtMs || run.timeline[0]?.timestampMs || Number.MAX_SAFE_INTEGER,
+      index,
+      run,
+    }));
+    return [...messageItems, ...runItems].sort((a, b) => {
+      if (a.timestampMs !== b.timestampMs) {
+        return a.timestampMs - b.timestampMs;
+      }
+      if (a.kind !== b.kind) {
+        return a.kind === 'message' ? 1 : -1;
+      }
+      return a.index - b.index;
+    });
+  }, [displayMessages, allToolRuns]);
+  const runtimeSlashCommands = useMemo<SlashCommand[]>(() => {
+    return toolSettings
+      .filter((tool) => tool.enabled && !CORE_RUNTIME_TOOLS.has(tool.implementation_key))
+      .map((tool) => {
+        const commandToken = tool.implementation_key.toLowerCase();
+        return {
+          id: tool.implementation_key,
+          commandToken,
+          label: `/${commandToken}`,
+          insertText: `/${commandToken} `,
+          description: tool.description || `Run ${tool.ability_name}`,
+          implementationKey: tool.implementation_key,
+          executionMode: 'agent_runtime' as const,
+          kind: 'runtime' as const,
+        };
+      });
+  }, [toolSettings]);
+  const registrySlashCommands = useMemo<SlashCommand[]>(() => {
+    return agentRegistrySkills
+      .filter((skill) => skill.enabled)
+      .map((skill) => {
+        const commandToken = skill.implementationKey.toLowerCase();
+        return {
+          id: `registry:${skill.implementationKey}`,
+          commandToken,
+          label: `/${commandToken}`,
+          insertText: `/${commandToken} `,
+          description: `Run assigned skill ${skill.name}`,
+          implementationKey: skill.implementationKey,
+          skillId: skill.skillId,
+          executionMode: 'registry_direct' as const,
+          kind: 'runtime' as const,
+        };
+      });
+  }, [agentRegistrySkills]);
+  const installedSlashCommands = useMemo<SlashCommand[]>(() => {
+    return installedSkills
+      .filter((skill) => ['installed', 'ready'].includes(skill.installState))
+      .map((skill) => {
+        const commandToken = skill.implementationKey.toLowerCase();
+        return {
+          id: `installed:${skill.skillId}`,
+          commandToken,
+          label: `/${commandToken}`,
+          insertText: `/${commandToken} `,
+          description: `Run installed skill ${skill.name}`,
+          implementationKey: skill.implementationKey,
+          skillId: skill.skillId,
+          executionMode: 'registry_direct' as const,
+          kind: 'runtime' as const,
+        };
+      });
+  }, [installedSkills]);
+  const slashCommands = useMemo<SlashCommand[]>(() => {
+    const byImplementationKey = new Map<string, SlashCommand>();
+    for (const command of [
+      ...runtimeSlashCommands,
+      ...registrySlashCommands,
+      ...installedSlashCommands,
+    ]) {
+      if (!byImplementationKey.has(command.implementationKey)) {
+        byImplementationKey.set(command.implementationKey, command);
+      }
+    }
+
+    const usedTokens = new Set<string>(['screenshot']);
+    const uniqueRuntimeCommands = Array.from(byImplementationKey.values()).map((command) => {
+      const baseToken =
+        command.commandToken ||
+        slugifySlashToken(command.implementationKey.split('.').pop() || command.implementationKey);
+      let token = baseToken;
+      let suffix = 2;
+      while (usedTokens.has(token)) {
+        token = `${baseToken}-${suffix}`;
+        suffix += 1;
+      }
+      usedTokens.add(token);
+      return {
+        ...command,
+        commandToken: token,
+        label: `/${token}`,
+        insertText: `/${token} `,
+      };
+    });
+
+    return [
+      {
+        id: 'screenshot',
+        commandToken: 'screenshot',
+        label: '/screenshot',
+        insertText: '/screenshot ',
+        description: 'Capture and attach a screenshot',
+        implementationKey: 'vision_screenshot',
+        executionMode: 'agent_runtime',
+        kind: 'screenshot' as const,
+      },
+      ...uniqueRuntimeCommands,
+    ];
+  }, [runtimeSlashCommands, registrySlashCommands, installedSlashCommands]);
+  const slashQuery = messageInput.startsWith('/') ? messageInput.slice(1).toLowerCase() : '';
+  const filteredSlashCommands = useMemo(() => {
+    if (!slashQuery) return slashCommands;
+    return slashCommands.filter((cmd) =>
+      cmd.label.slice(1).toLowerCase().includes(slashQuery) ||
+      cmd.description.toLowerCase().includes(slashQuery)
+    );
+  }, [slashCommands, slashQuery]);
+
+  useEffect(() => {
+    setShowSlashCommands(messageInput.startsWith('/') && !messageInput.slice(1).includes(' '));
+  }, [messageInput]);
+
+  useEffect(() => {
+    let dispose: UnlistenFn | null = null;
+    let cancelled = false;
+
+    listen<DirectRuntimeToolProgressEvent>('direct-runtime-tool-progress', (event) => {
+      if (cancelled) return;
+      const payload = event.payload;
+
+      setDirectToolRuns((prev) => {
+        const index = prev.findIndex((run) => run.clientRunId === payload.clientRunId);
+        const timelineEntry: DirectToolTimelineEntry = {
+          id: `${payload.clientRunId}-progress-${payload.sequence}`,
+          message: payload.message,
+          level: inferTimelineLevel(payload.message, payload.status),
+          timestampMs: payload.timestampMs || Date.now(),
+          sequence: payload.sequence,
+        };
+
+        if (index === -1) {
+          return [
+            ...prev,
+            {
+              clientRunId: payload.clientRunId,
+              startedAtMs: timelineEntry.timestampMs,
+              implementationKey: payload.implementationKey,
+              runId: payload.runId ?? undefined,
+              status: (payload.status as DirectToolRunStatus) || 'running',
+              timeline: [timelineEntry],
+            },
+          ];
+        }
+
+        const next = [...prev];
+        const target = next[index];
+        next[index] = {
+          ...target,
+          implementationKey: payload.implementationKey || target.implementationKey,
+          runId: payload.runId ?? target.runId,
+          status: (payload.status as DirectToolRunStatus) || target.status,
+          timeline: appendUniqueTimelineEntries(target.timeline, [timelineEntry]),
+        };
+        return next;
+      });
+    })
+      .then((unlisten) => {
+        dispose = unlisten;
+      })
+      .catch((error) => {
+        console.error('Failed to subscribe to direct runtime tool progress:', error);
+      });
+
+    return () => {
+      cancelled = true;
+      if (dispose) {
+        dispose();
+      }
+    };
+  }, []);
 
   // Reset branch selections when switching conversations
   useEffect(() => {
     setBranchSelections({});
     setEditingMessageId(null);
     setEditContent('');
+    setDirectToolRuns([]);
   }, [activeConversationId]);
 
   // Reset local state when switching agents
@@ -278,6 +870,21 @@ function AgentChatPage() {
     }
   }, [sendMessageStreaming.streamingContent, sendMessageStreaming.isStreaming]);
 
+  // Auto-scroll when live tool runs are appended/updated.
+  useEffect(() => {
+    const signal = directToolRuns
+      .map((run) => `${run.clientRunId}:${run.timeline.length}:${run.status}`)
+      .join('|');
+    if (!signal) {
+      prevToolRunsSignalRef.current = '';
+      return;
+    }
+    if (signal !== prevToolRunsSignalRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      prevToolRunsSignalRef.current = signal;
+    }
+  }, [directToolRuns]);
+
 
   const handleStartNewConversation = () => {
     // Prevent switching while a message is actively streaming
@@ -293,75 +900,271 @@ function AgentChatPage() {
     setPendingScreenshot(null);
   };
 
+  const sendPreparedMessage = async (content: string, imageBase64?: string) => {
+    if (!content.trim()) return;
+    if (!activeConversationId) {
+      const newConversation = await createConversation.mutateAsync({
+        agent_id: agentId,
+        user_id: userId,
+        title: `Chat with ${agent?.name || 'Agent'}`,
+      });
+      setActiveConversationId(newConversation.id);
+      setIsComposingNewConversation(false);
+      await sendMessageStreaming.sendMessage({
+        conversation_id: newConversation.id,
+        content,
+        image_base64: imageBase64,
+      });
+      generateConversationTitle.mutate({
+        conversationId: newConversation.id,
+        firstMessage: content,
+      });
+      return;
+    }
+
+    await sendMessageStreaming.sendMessage({
+      conversation_id: activeConversationId,
+      content,
+      image_base64: imageBase64,
+    });
+  };
+
+  const runtimeDirectCommands = useMemo(
+    () => slashCommands.filter((entry) => entry.kind === 'runtime'),
+    [slashCommands]
+  );
+  const runtimeToolContext = useMemo(
+    () => toRuntimeToolContext(runtimeDirectCommands),
+    [runtimeDirectCommands]
+  );
+
+  const executeDirectRuntimeTool = useCallback(
+    async (tool: SlashCommand, parsedInput: Record<string, unknown>): Promise<boolean> => {
+      const clientRunId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `tool-run-${Date.now()}`;
+      const startedAt = Date.now();
+
+      setDirectToolRuns((prev) => [
+        ...prev,
+        {
+          clientRunId,
+          startedAtMs: startedAt,
+          implementationKey: tool.implementationKey,
+          status: 'running',
+          timeline: [
+            {
+              id: `${clientRunId}-queued`,
+              message: `Queued ${tool.label} with input ${JSON.stringify(parsedInput)}`,
+              level: 'info',
+              timestampMs: startedAt,
+              sequence: -1,
+            },
+          ],
+        },
+      ]);
+      setIsDirectToolRunning(true);
+      try {
+        if (tool.executionMode === 'registry_direct' && !tool.skillId) {
+          throw new Error(`Missing skillId for ${tool.implementationKey}`);
+        }
+        const result =
+          tool.executionMode === 'registry_direct'
+            ? await invoke<DirectRuntimeToolRunResult>('run_registry_skill_direct', {
+                agentId,
+                skillId: tool.skillId!,
+                input: parsedInput,
+                clientRunId,
+              })
+            : await invoke<DirectRuntimeToolRunResult>('run_agent_runtime_tool', {
+                agentId,
+                implementationKey: tool.implementationKey,
+                input: parsedInput,
+                clientRunId,
+              });
+
+        setDirectToolRuns((prev) =>
+          prev.map((run) => {
+            if (run.clientRunId !== clientRunId) return run;
+
+            const appendedTimeline: DirectToolTimelineEntry[] = [];
+            const hasProgressLogs = run.timeline.some(
+              (entry) => entry.id.startsWith(`${clientRunId}-progress-`) && (entry.sequence ?? -1) > 0
+            );
+            if (!hasProgressLogs) {
+              for (const message of result.logMessages) {
+                appendedTimeline.push({
+                  id: `${clientRunId}-log-fallback-${startedAt}-${appendedTimeline.length}`,
+                  message,
+                  level: inferTimelineLevel(message, result.status),
+                  timestampMs: Date.now(),
+                  sequence: appendedTimeline.length + 1,
+                });
+              }
+            }
+
+            return {
+              ...run,
+              implementationKey: result.implementationKey,
+              skillId: result.skillId,
+              version: result.version,
+              executionMode: result.executionMode,
+              runId: result.runId,
+              status: (result.status as DirectToolRunStatus) || 'running',
+              output: result.output ?? null,
+              error: result.error ?? null,
+              timeline: appendUniqueTimelineEntries(run.timeline, [
+                ...appendedTimeline,
+                {
+                  id: `${clientRunId}-completed`,
+                  message: `Run completed with status ${result.status}.`,
+                  level: inferTimelineLevel(`Run completed with status ${result.status}.`, result.status),
+                  timestampMs: Date.now(),
+                  sequence: Number.MAX_SAFE_INTEGER,
+                },
+              ]),
+            };
+          })
+        );
+
+        const followupPrompt = [
+          DIRECT_TOOL_RESULT_CONTEXT_START,
+          `A direct runtime tool run has completed.`,
+          `Tool: ${result.implementationKey}`,
+          `Run ID: ${result.runId}`,
+          `Status: ${result.status}`,
+          `Execution mode: ${result.executionMode}`,
+          `Tool input: ${JSON.stringify(parsedInput)}`,
+          `Tool output JSON: ${JSON.stringify(result.output ?? {}, null, 2)}`,
+          `Tool error JSON: ${JSON.stringify(result.error ?? null, null, 2)}`,
+          `Please provide a concise user-facing response based on this tool result.`,
+          DIRECT_TOOL_RESULT_CONTEXT_END,
+        ].join('\n');
+
+        await sendPreparedMessage(followupPrompt);
+        setMessageInput('');
+        toast.success(`Executed ${tool.label}`);
+        return true;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        setDirectToolRuns((prev) =>
+          prev.map((run) =>
+            run.clientRunId === clientRunId
+              ? {
+                  ...run,
+                  status: 'failed',
+                  timeline: appendUniqueTimelineEntries(run.timeline, [
+                    {
+                      id: `${clientRunId}-failed`,
+                      message: errorMessage,
+                      level: 'error',
+                      timestampMs: Date.now(),
+                      sequence: Number.MAX_SAFE_INTEGER,
+                    },
+                  ]),
+                  error: { message: errorMessage },
+                }
+              : run
+          )
+        );
+        toast.error(errorMessage || `Failed to execute ${tool.label}`);
+        return true;
+      } finally {
+        setIsDirectToolRunning(false);
+      }
+    },
+    [agentId, sendPreparedMessage]
+  );
+
+  const executeSlashCommand = async (rawInput: string): Promise<boolean> => {
+    if (!rawInput.startsWith('/')) return false;
+    const [rawCommand, ...rest] = rawInput.trim().split(/\s+/);
+    const command = rawCommand.slice(1).trim().toLowerCase();
+    if (!command) return false;
+
+    if (command === 'screenshot') {
+      const result = await captureScreen.mutateAsync({
+        autoUpload: true,
+        conversationId: activeConversationId || undefined,
+      });
+      handleScreenshot(result.image_base64, result.storage_path, result.signed_url);
+      if (rest.length > 0) {
+        setMessageInput(rest.join(' '));
+      } else {
+        setMessageInput('');
+      }
+      return true;
+    }
+
+    const tool = slashCommands.find(
+      (entry) => entry.kind === 'runtime' && entry.commandToken === command
+    );
+    if (!tool) {
+      return false;
+    }
+
+    const parsedInput = parseDirectToolInput(rest.join(' ').trim());
+    return executeDirectRuntimeTool(tool, parsedInput);
+  };
+
   const handleSendMessage = async () => {
     if (!messageInput.trim() && !pendingScreenshot) return;
-
-    let finalContent = messageInput.trim();
-    
-    // Store the image base64 before clearing pendingScreenshot
+    const trimmedMessageInput = messageInput.trim();
     const imageBase64 = pendingScreenshot?.base64;
-    
-    // Add screenshot to message if pending (already uploaded)
-    if (pendingScreenshot) {
-      if (pendingScreenshot.storagePath) {
-        // Include the image path for display in the conversation
-        // The actual image data will be passed separately for AI processing
-        finalContent = `[Screenshot:path:${pendingScreenshot.storagePath}]\n${messageInput}`;
-      } else {
-        // Fallback: screenshot wasn't uploaded (user not authenticated?)
-        console.warn('Screenshot was captured but not uploaded to storage');
-      }
-    }
-    
-    if (!finalContent.trim()) return;
-    
-    // Clear input immediately when sending (before waiting for AI response)
-    setMessageInput('');
-    setPendingScreenshot(null);
-    
-    if (!activeConversationId) {
-      // Create a new conversation if none exists
-      try {
-        const newConversation = await createConversation.mutateAsync({
-          agent_id: agentId,
-          user_id: userId,
-          title: `Chat with ${agent?.name || 'Agent'}`,
-        });
-        setActiveConversationId(newConversation.id);
-        setIsComposingNewConversation(false); // Exit composing mode now that we have a real conversation
+    const includeRuntimeToolContext =
+      Boolean(runtimeToolContext) && shouldAttachRuntimeToolContext(trimmedMessageInput);
+    let contentWithoutRuntimeToolContext = trimmedMessageInput;
+    let finalContent = trimmedMessageInput;
 
-        // Send the message to the new conversation with streaming
-        await sendMessageStreaming.sendMessage({
-          conversation_id: newConversation.id,
-          content: finalContent,
-          image_base64: imageBase64,
-        });
+    try {
+      if (trimmedMessageInput.startsWith('/')) {
+        const executed = await executeSlashCommand(trimmedMessageInput);
+        if (executed) return;
+      }
 
-        // Generate a proper title based on the first message (background operation)
-        generateConversationTitle.mutate({
-          conversationId: newConversation.id,
-          firstMessage: finalContent,
-        });
-      } catch (error) {
-        toast.error(sendMessageStreaming.error || 'Failed to send message');
-        console.error('Send message error:', error);
-        // Reset composing state on error so user can try again
-        setIsComposingNewConversation(false);
-        sendMessageStreaming.clearError();
+      if (includeRuntimeToolContext && runtimeToolContext) {
+        finalContent = `${runtimeToolContext}\n${finalContent}`;
       }
-    } else {
-      try {
-        await sendMessageStreaming.sendMessage({
-          conversation_id: activeConversationId,
-          content: finalContent,
-          image_base64: imageBase64,
-        });
-      } catch (error) {
-        toast.error(sendMessageStreaming.error || 'Failed to send message');
-        console.error('Send message error:', error);
-        sendMessageStreaming.clearError();
+      if (pendingScreenshot) {
+        if (pendingScreenshot.storagePath) {
+          contentWithoutRuntimeToolContext = `[Screenshot:path:${pendingScreenshot.storagePath}]\n${contentWithoutRuntimeToolContext}`;
+          finalContent = `[Screenshot:path:${pendingScreenshot.storagePath}]\n${finalContent}`;
+        } else {
+          console.warn('Screenshot was captured but not uploaded to storage');
+        }
       }
+      if (!finalContent.trim()) return;
+
+      setMessageInput('');
+      setPendingScreenshot(null);
+      await sendPreparedMessage(finalContent, imageBase64);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error ?? '');
+      const combinedErrorMessage = `${sendMessageStreaming.error || ''} ${errorMessage}`.toLowerCase();
+      const isToolLoopError = combinedErrorMessage.includes(
+        'tool-call loop exceeded maximum iterations without terminal assistant response'
+      );
+
+      if (includeRuntimeToolContext && isToolLoopError && contentWithoutRuntimeToolContext.trim()) {
+        try {
+          await sendPreparedMessage(contentWithoutRuntimeToolContext, imageBase64);
+          return;
+        } catch (retryError) {
+          console.error('Retry send message error:', retryError);
+        }
+      }
+
+      toast.error(sendMessageStreaming.error || 'Failed to send message');
+      console.error('Send message error:', error);
+      setIsComposingNewConversation(false);
+      sendMessageStreaming.clearError();
     }
+  };
+
+  const handleSelectSlashCommand = (command: SlashCommand) => {
+    setMessageInput(command.insertText);
+    setShowSlashCommands(false);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -638,16 +1441,24 @@ function AgentChatPage() {
                 </div>
               ))}
             </div>
-          ) : ((visibleMessages && visibleMessages.length > 0) || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) ? (
+          ) : ((chatTimelineItems.length > 0) || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) ? (
             <ScrollArea className="h-full">
               <div className="space-y-4 px-4 pt-4">
-                {visibleMessages && visibleMessages.map((message) => {
+                {chatTimelineItems.map((item) => {
+                  if (item.kind === 'run') {
+                    return (
+                      <div key={item.id} className="flex justify-start">
+                        <DirectToolRunCard run={item.run} />
+                      </div>
+                    );
+                  }
+                  const message = item.message;
                   const branchInfo = branchInfoMap.get(message.id);
                   const isEditing = editingMessageId === message.id;
                   const isUserMessage = message.role === 'user';
 
                   return (
-                    <div key={message.id} className="group">
+                    <div key={item.id} className="group">
                       <div
                         className={cn(
                           "flex",
@@ -854,6 +1665,21 @@ function AgentChatPage() {
         {/* Message Input - Show when we have an active conversation or are composing a new one */}
         {(activeConversationId || isComposingNewConversation) && (
           <div className="border-t p-4 shrink-0 bg-background">
+            {showSlashCommands && filteredSlashCommands.length > 0 && (
+              <div className="mx-auto mb-3 max-h-40 overflow-auto">
+                {filteredSlashCommands.map((command) => (
+                  <button
+                    key={command.id}
+                    type="button"
+                    className="mb-1 w-full rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent/60"
+                    onClick={() => handleSelectSlashCommand(command)}
+                  >
+                    <div className="text-sm font-medium">{command.label}</div>
+                    <div className="text-xs text-muted-foreground">{command.description}</div>
+                  </button>
+                ))}
+              </div>
+            )}
             {/* Pending Screenshot Preview */}
             {pendingScreenshot && (
               <div className="mx-auto mb-3 flex items-center gap-2 p-2 bg-muted rounded-md">
@@ -885,18 +1711,18 @@ function AgentChatPage() {
                 agentId={agentId}
                 userId={userId}
                 onTranscription={handleTranscription}
-                disabled={sendMessage.isPending}
+                disabled={sendMessage.isPending || isDirectToolRunning}
                 conversationId={activeConversationId || undefined}
               />
               <ScreenshotButton
                 agentId={agentId}
                 conversationId={activeConversationId || undefined}
                 onScreenshot={handleScreenshot}
-                disabled={sendMessage.isPending}
+                disabled={sendMessage.isPending || isDirectToolRunning}
               />
               <AttachButton
                 onAttach={handleScreenshot}
-                disabled={sendMessage.isPending}
+                disabled={sendMessage.isPending || isDirectToolRunning}
               />
               <div className="relative flex-1">
                 {isTranscribing && (
@@ -915,7 +1741,7 @@ function AgentChatPage() {
                     }}
                     onKeyPress={handleKeyPress}
                     placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
-                    disabled={sendMessage.isPending || sendMessageStreaming.isStreaming}
+                    disabled={sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
                     className={cn("w-full pr-16", isTranscribing && "pl-9")}
                     maxLength={MAX_MESSAGE_LENGTH}
                   />
@@ -930,10 +1756,10 @@ function AgentChatPage() {
               </div>
               <Button
                 onClick={handleSendMessage}
-                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || sendMessageStreaming.isStreaming}
+                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
                 size="icon"
               >
-                <Send className="h-4 w-4" />
+                {isDirectToolRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
             </div>
           </div>

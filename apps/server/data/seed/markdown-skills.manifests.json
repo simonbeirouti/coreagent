@@ -285,5 +285,257 @@
       "healthcheck": {},
       "heartbeat_policy": {}
     }
+  },
+  {
+    "skillId": "coreagent.py.pandas_summary",
+    "implementationKey": "coreagent.py.pandas_summary",
+    "name": "Python Pandas Summary",
+    "description": "Installs pandas at runtime and summarizes row-oriented score data.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "run.sh",
+    "artifactPath": "../skills/command/python-pandas-summary/run.sh",
+    "riskLevel": "moderate",
+    "source": "coreagent_python_runtime_test",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "network.http",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {
+          "domains": ["pypi.org", "files.pythonhosted.org"]
+        }
+      },
+      {
+        "permissionKey": "process.exec",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "team": { "type": "string" },
+              "score": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "object" },
+        "top_rows": { "type": "array" },
+        "note": { "type": "string" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.py.pandas_summary",
+      "name": "Python Pandas Summary",
+      "version": "1.0.0",
+      "description": "Installs pandas at runtime and summarizes row-oriented score data.",
+      "entrypoint": "run.sh",
+      "runtime": "command",
+      "runtime_profile": "python",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "network.http",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {
+            "domains": ["pypi.org", "files.pythonhosted.org"]
+          }
+        },
+        {
+          "permission_key": "process.exec",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "dependencies": ["pandas"],
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  },
+  {
+    "skillId": "coreagent.js.dayjs_timeline",
+    "implementationKey": "coreagent.js.dayjs_timeline",
+    "name": "JS Dayjs Timeline",
+    "description": "Installs dayjs via npm at runtime and generates date timeline offsets.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "run.sh",
+    "artifactPath": "../skills/command/js-dayjs-timeline/run.sh",
+    "riskLevel": "moderate",
+    "source": "coreagent_node_runtime_test",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "network.http",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {
+          "domains": ["registry.npmjs.org"]
+        }
+      },
+      {
+        "permissionKey": "process.exec",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "baseDate": { "type": "string" },
+        "offsetDays": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "timeline": { "type": "array" },
+        "generatedAt": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.js.dayjs_timeline",
+      "name": "JS Dayjs Timeline",
+      "version": "1.0.0",
+      "description": "Installs dayjs via npm at runtime and generates date timeline offsets.",
+      "entrypoint": "run.sh",
+      "runtime": "command",
+      "runtime_profile": "default",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "network.http",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {
+            "domains": ["registry.npmjs.org"]
+          }
+        },
+        {
+          "permission_key": "process.exec",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "dependencies": ["dayjs"],
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  },
+  {
+    "skillId": "coreagent.rs.regex_advisor",
+    "implementationKey": "coreagent.rs.regex_advisor",
+    "name": "Rust Regex Advisor",
+    "description": "Uses cargo at runtime to install regex/serde_json crates and extract identifier matches.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "run.sh",
+    "artifactPath": "../skills/command/rust-regex-advisor/run.sh",
+    "riskLevel": "moderate",
+    "source": "coreagent_rust_runtime_test",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "network.http",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {
+          "domains": ["crates.io", "index.crates.io", "static.crates.io", "github.com"]
+        }
+      },
+      {
+        "permissionKey": "process.exec",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "pattern": { "type": "string" }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "patternUsed": { "type": "string" },
+        "matchCount": { "type": "number" },
+        "matches": { "type": "array" },
+        "advisory": { "type": "string" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.rs.regex_advisor",
+      "name": "Rust Regex Advisor",
+      "version": "1.0.0",
+      "description": "Uses cargo at runtime to install regex/serde_json crates and extract identifier matches.",
+      "entrypoint": "run.sh",
+      "runtime": "command",
+      "runtime_profile": "rust",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        {
+          "permission_key": "network.http",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {
+            "domains": ["crates.io", "index.crates.io", "static.crates.io", "github.com"]
+          }
+        },
+        {
+          "permission_key": "process.exec",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
+      "dependencies": ["regex", "serde_json"],
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
   }
 ]

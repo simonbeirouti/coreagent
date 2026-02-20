@@ -108,13 +108,40 @@ impl AgentService {
         db: &DatabaseConnection,
         agent_id: Uuid,
     ) -> Result<Vec<AgentRuntimeCapability>, String> {
-        let tools = AbilityService::resolve_agent_runtime_tools(db, agent_id).await?;
-        Ok(tools
+        let settings = AbilityService::list_agent_tool_settings(db, agent_id.to_string()).await?;
+        Ok(settings
             .into_iter()
-            .map(|tool| AgentRuntimeCapability {
-                implementation_key: tool.implementation_key,
-                enabled: tool.enabled,
-                config: tool.config,
+            .map(|setting| {
+                let mut config = setting.config;
+                if let Some(config_obj) = config.as_object_mut() {
+                    if config_obj
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        if let Some(description) = setting.description.clone() {
+                            let trimmed = description.trim();
+                            if !trimmed.is_empty() {
+                                config_obj.insert(
+                                    "description".to_string(),
+                                    serde_json::Value::String(trimmed.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    if !config_obj.contains_key("ability_name") {
+                        config_obj.insert(
+                            "ability_name".to_string(),
+                            serde_json::Value::String(setting.ability_name.clone()),
+                        );
+                    }
+                }
+                AgentRuntimeCapability {
+                    implementation_key: setting.implementation_key,
+                    enabled: setting.enabled,
+                    config,
+                }
             })
             .collect())
     }
@@ -282,6 +309,7 @@ impl AgentService {
         message: String,
         history: Vec<(String, String)>, // (role, content) pairs
         image_base64: Option<String>,
+        access_token: Option<&str>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
         // Get agent details from database
@@ -327,6 +355,8 @@ impl AgentService {
                 history,
                 &message,
                 image_base64.as_deref(),
+                Some(&agent.id.to_string()),
+                access_token,
             )
             .await?;
 
@@ -345,6 +375,7 @@ impl AgentService {
         message: String,
         history: Vec<(String, String)>,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
@@ -392,6 +423,8 @@ impl AgentService {
                 history,
                 &message,
                 image_base64.as_deref(),
+                Some(&agent.id.to_string()),
+                access_token,
                 on_event.clone(),
             ),
         )

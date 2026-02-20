@@ -3,7 +3,13 @@ import pino from "pino";
 
 import type { RunnerEnv } from "./env.js";
 import { extractRequestedCredentialScopes, resolveCredentialRequest } from "./credential-broker.js";
-import { executeLocalDockerRun } from "./local-docker.js";
+import {
+  executeLocalDockerRun,
+  executeRemoteDockerRun,
+  prepareLocalDockerImages,
+  resolveDockerImageForJob,
+  shouldDisableDockerNetwork
+} from "./local-docker.js";
 import { evaluatePermissionRequest, type RequestedPermission } from "./permission-broker.js";
 
 export type RuntimeRunJobData = {
@@ -71,31 +77,49 @@ export function createRuntimeWorker(env: RunnerEnv) {
         throw new Error(`CREDENTIAL_BROKER_DENY:${credentialDecision.reason}`);
       }
 
-      if (job.data.executionMode === "local_docker") {
-        const localDockerResult = await executeLocalDockerRun(job.data, env, {
-          onLog: async (message, stream) => {
-            await job.updateProgress({
-              type: "log",
-              message,
-              stream,
-              timestamp: new Date().toISOString()
-            });
-          }
+      const onLog = async (message: string, stream: "stdout" | "stderr") => {
+        await job.updateProgress({
+          type: "log",
+          message,
+          stream,
+          timestamp: new Date().toISOString()
         });
+      };
+
+      if (job.data.executionMode === "local_docker") {
+        const selectedImage = resolveDockerImageForJob(job.data, env);
+        const networkDisabled = shouldDisableDockerNetwork(job.data, env);
+        log.info(
+          {
+            runId: job.data.runId,
+            jobId: job.id,
+            skillId: job.data.skillId,
+            runtimeProfile: job.data.skillRuntime.runtimeProfile ?? null,
+            selectedImage,
+            networkDisabled
+          },
+          "runtime local docker image selected"
+        );
+        const localDockerResult = await executeLocalDockerRun(job.data, env, { onLog });
         return {
           accepted: true,
           runId: job.data.runId,
           requestedCredentialScopes: requestedCredentialScopes.length,
           resolvedCredentialScopes: Object.keys(credentialDecision.resolvedCredentials).length,
+          dockerExecution: localDockerResult,
           localDocker: localDockerResult
         };
       }
+
+      const remoteDockerResult = await executeRemoteDockerRun(job.data, env, { onLog });
 
       return {
         accepted: true,
         runId: job.data.runId,
         requestedCredentialScopes: requestedCredentialScopes.length,
-        resolvedCredentialScopes: Object.keys(credentialDecision.resolvedCredentials).length
+        resolvedCredentialScopes: Object.keys(credentialDecision.resolvedCredentials).length,
+        dockerExecution: remoteDockerResult,
+        remoteDocker: remoteDockerResult
       };
     },
     {
@@ -122,6 +146,19 @@ export function createRuntimeWorker(env: RunnerEnv) {
       "runtime worker ready"
     );
   });
+
+  if (env.RUNTIME_ENABLE_LOCAL_DOCKER) {
+    void prepareLocalDockerImages(env)
+      .then((images) => {
+        log.info({ images }, "runtime local docker images prepared");
+      })
+      .catch((error) => {
+        log.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "runtime local docker image warmup failed; will retry on first run"
+        );
+      });
+  }
 
   worker.on("completed", (job) => {
     log.info(

@@ -298,6 +298,24 @@ export function createRuntimeQueueService(
           });
           return;
         }
+        const remoteDockerDenied = reason.includes("REMOTE_DOCKER_DENY:");
+        if (remoteDockerDenied) {
+          const brokerReason = reason.replace("REMOTE_DOCKER_DENY:", "").trim();
+          await runStore.markFailed(runId, {
+            code: "runtime_remote_docker_denied",
+            message: brokerReason.length > 0 ? brokerReason : "Remote Docker execution was denied."
+          });
+          return;
+        }
+        const remoteDockerFailed = reason.includes("REMOTE_DOCKER_FAILED:");
+        if (remoteDockerFailed) {
+          const failureReason = reason.replace("REMOTE_DOCKER_FAILED:", "").trim();
+          await runStore.markFailed(runId, {
+            code: "runtime_remote_docker_failed",
+            message: failureReason.length > 0 ? failureReason : "Remote Docker execution failed."
+          });
+          return;
+        }
         await runStore.markFailed(runId, {
           code: "runtime_queue_failed",
           message: reason

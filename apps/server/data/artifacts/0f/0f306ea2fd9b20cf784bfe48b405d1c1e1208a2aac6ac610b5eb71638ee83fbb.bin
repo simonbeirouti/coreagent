@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "LOCAL_RUNTIME_MISSING:cargo is required for coreagent.rs.regex_advisor" >&2
+  exit 1
+fi
+
+WORK_DIR="$(mktemp -d /tmp/coreagent-rust-XXXXXX)"
+export CARGO_HOME="/tmp/coreagent_cargo_home"
+export RUSTUP_HOME="/tmp/coreagent_rustup_home"
+mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" "$WORK_DIR/src"
+
+cat > "$WORK_DIR/Cargo.toml" <<'TOML'
+[package]
+name = "runtime_regex_advisor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+serde_json = "1"
+TOML
+
+cat > "$WORK_DIR/src/main.rs" <<'RUST'
+use regex::Regex;
+use serde_json::{json, Value};
+use std::fs;
+
+fn main() {
+    let input = fs::read_to_string("/workspace/input.json").unwrap_or_else(|_| "{}".to_string());
+    let payload: Value = serde_json::from_str(&input).unwrap_or_else(|_| json!({}));
+    let text = payload
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("tickets: CORE-101 CORE-205 CORE-999");
+    let pattern = payload
+        .get("pattern")
+        .and_then(Value::as_str)
+        .unwrap_or(r"CORE-\d+");
+
+    let regex = Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"CORE-\d+").expect("valid fallback regex"));
+    let matches: Vec<String> = regex.find_iter(text).map(|m| m.as_str().to_string()).collect();
+
+    let output = json!({
+        "patternUsed": regex.as_str(),
+        "matchCount": matches.len(),
+        "matches": matches,
+        "advisory": "Extracted ticket-like identifiers using regex crate installed at runtime."
+    });
+
+    println!("{}", output);
+}
+RUST
+
+cargo run --quiet --manifest-path "$WORK_DIR/Cargo.toml"
+rm -rf "$WORK_DIR"

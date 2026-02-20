@@ -11,6 +11,14 @@ For every behavior change, keep tests in lockstep with code:
 - If functionality is removed, remove/adjust obsolete tests in the same change.
 - If behavior changes, update assertions to the new contract (do not keep stale expectations).
 
+## User Story First Workflow
+
+- For every new feature, define explicit user stories before implementation.
+- Each user story must include acceptance criteria and expected user-visible outcomes.
+- Create a test mapping per story in the same change that includes unit/integration coverage for core logic and state transitions.
+- Add Playwright scenario coverage after core functionality is working to verify real interaction flow end-to-end.
+- Do not close a feature unless each shipped story has corresponding automated coverage.
+
 ## Naming And Discoverability
 
 - Test names should mirror symbols/flows they validate (for example `useCreateConversation` in `useConversations.test.ts`).
@@ -23,6 +31,9 @@ For every behavior change, keep tests in lockstep with code:
 - Cover success + failure + edge states (`loading`, `empty`, `error`, and computed summaries where applicable).
 - For mutation hooks, test optimistic update, rollback on error, and reconciliation on success.
 - Assert user-visible outcomes and cache effects, not only that a function was called.
+- Add or extend Playwright specs for user-critical flows touched by the feature.
+- Keep Playwright scenarios aligned to user stories and acceptance criteria, not implementation details.
+- Mock external dependencies where needed to keep e2e behavior deterministic while preserving user-level interaction semantics.
 
 ## Backend Hardening Requirements
 
@@ -33,6 +44,7 @@ For every behavior change, keep tests in lockstep with code:
 
 ## Release Gate For Test Changes
 
-- Run `pnpm test` after test/code updates.
+- Run `pnpm test:frontend:all` after frontend test/code updates.
+- Run `pnpm test` after test/code updates when backend or Rust behavior changed.
 - Run `pnpm run check` before finalizing.
 - Do not leave knowingly flaky tests or warning-heavy false positives in the suite.

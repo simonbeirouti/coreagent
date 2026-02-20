@@ -43,20 +43,24 @@ use orchestration_service::{
     UpsertOrchestrationMemoryRequest,
 };
 use perception_tracker::{PerceptionStat, PerceptionTracker};
+use user_profile_service::UserProfileService;
 use serde::Serialize;
 use sea_orm::{DatabaseConnection, EntityTrait};
+use serde_json::Value;
 use skills_registry_client::{
     AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
-    RegistryAssignResponse, RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails,
-    RegistrySkillSummary, RegistrySkillVersion, RegistryUninstallResponse, RuntimeHandshake,
+    RegistryAssignResponse, RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails, RuntimeRunSummary,
+    RegistrySkillSummary, RegistrySkillVersion, RegistryUninstallResponse, RuntimeExecutionMode, RuntimeHandshake,
+    CreateRuntimeRunInput,
     SkillsRegistryClient,
 };
-use tauri::{ipc::Channel, Manager};
+use tauri::{ipc::Channel, Emitter, Manager};
 use vision_service::{ScreenshotResult, VisionService};
 use std::process::Command;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
+use tokio::time::sleep;
 
 async fn ensure_tool_enabled(
     db: &DatabaseConnection,
@@ -131,6 +135,17 @@ fn semver_outside_range(
     None
 }
 
+fn is_runnable_install_state(state: Option<&str>) -> bool {
+    matches!(state, Some("installed" | "ready"))
+}
+
+fn is_not_found_runtime_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("(404)")
+        || normalized.contains("not found")
+        || normalized.contains("unknown skill")
+}
+
 fn validate_runtime_handshake_response(handshake: &RuntimeHandshake) -> Result<(), String> {
     if handshake.artifact.digest.trim().is_empty() {
         return Err("Registry runtime handshake missing artifact digest.".to_string());
@@ -147,8 +162,8 @@ fn validate_runtime_handshake_response(handshake: &RuntimeHandshake) -> Result<(
     if !handshake.install.installed {
         return Err("Skill runtime blocked: skill is not installed.".to_string());
     }
-    if handshake.install.install_state.as_deref() != Some("installed") {
-        return Err("Skill runtime blocked: install state is not installed.".to_string());
+    if !is_runnable_install_state(handshake.install.install_state.as_deref()) {
+        return Err("Skill runtime blocked: install state is not runnable.".to_string());
     }
     if handshake.force_disable.required {
         return Err(
@@ -190,7 +205,7 @@ async fn enforce_registry_runtime_gate(
         return Ok(());
     };
 
-    if skill.install_state.as_deref() != Some("installed") {
+    if !is_runnable_install_state(skill.install_state.as_deref()) {
         return Err(format!(
             "Skill runtime blocked: registry install state is '{}'.",
             skill.install_state.unwrap_or_else(|| "unknown".to_string())
@@ -203,6 +218,204 @@ async fn enforce_registry_runtime_gate(
         .runtime_handshake(&token, &skill.skill_id, &version)
         .await?;
     validate_runtime_handshake_response(&handshake)
+}
+
+fn execution_mode_from_preferences(preferences: &Value) -> RuntimeExecutionMode {
+    match preferences
+        .get("runtime_execution_mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("remote")
+    {
+        "local_docker" => RuntimeExecutionMode::LocalDocker,
+        _ => RuntimeExecutionMode::Remote,
+    }
+}
+
+async fn resolve_agent_execution_mode(
+    db: &DatabaseConnection,
+    agent_id: &str,
+    auth_state: &AuthState,
+) -> Result<RuntimeExecutionMode, String> {
+    let session = auth_state
+        .get_session()
+        .ok_or_else(|| "No authenticated session found.".to_string())?;
+    let session_user_id = uuid::Uuid::parse_str(&session.user_id)
+        .map_err(|e| format!("Invalid session user ID: {e}"))?;
+
+    let agent = AgentService::get_agent(db, agent_id.to_string()).await?;
+    if agent.user_id != session_user_id {
+        return Err("Agent does not belong to the authenticated user.".to_string());
+    }
+
+    let profile = UserProfileService::get_profile(db, agent.user_id.to_string())
+        .await?
+        .unwrap_or_else(|| user_profile_service::UserProfileData {
+            id: uuid::Uuid::new_v4(),
+            user_id: agent.user_id,
+            preferences: serde_json::json!({}),
+            habits: serde_json::json!({}),
+            work_patterns: serde_json::json!({}),
+            language: "en".to_string(),
+            ai_response_language: "en".to_string(),
+            notifications_enabled: true,
+            analytics_enabled: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+    Ok(execution_mode_from_preferences(&profile.preferences))
+}
+
+async fn run_direct_runtime_skill(
+    client: &SkillsRegistryClient,
+    token: &str,
+    agent_id: String,
+    implementation_key: String,
+    skill_id: String,
+    version: String,
+    input: Option<Value>,
+    execution_mode: RuntimeExecutionMode,
+    app: &tauri::AppHandle,
+    client_run_id: Option<&str>,
+) -> Result<DirectRuntimeToolRunResult, String> {
+    let emit_progress = |message: String,
+                         run_id: Option<String>,
+                         status: Option<String>,
+                         sequence: usize| {
+        if let Some(client_run_id) = client_run_id {
+            let _ = app.emit(
+                "direct-runtime-tool-progress",
+                DirectRuntimeToolProgressEvent {
+                    client_run_id: client_run_id.to_string(),
+                    implementation_key: implementation_key.clone(),
+                    run_id,
+                    status,
+                    message,
+                    sequence,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                },
+            );
+        }
+    };
+
+    let parsed_input = input.unwrap_or_else(|| serde_json::json!({}));
+    let mut resolved_skill_id = skill_id.clone();
+    let mut resolved_version = version.clone();
+    let base_run_input = CreateRuntimeRunInput {
+        skill_id: resolved_skill_id.clone(),
+        version: resolved_version.clone(),
+        agent_id: Some(agent_id),
+        input: parsed_input.clone(),
+        execution_mode,
+        timeout_seconds: 120,
+    };
+    let run = match client
+        .create_runtime_run(token, base_run_input.clone())
+        .await
+    {
+        Ok(run) => run,
+        Err(error) if is_not_found_runtime_error(&error) => {
+            let installed_skills = client.list_installed_skills(token).await?;
+            let mapped = installed_skills
+                .into_iter()
+                .find(|entry| {
+                    entry.implementation_key == implementation_key
+                        && is_runnable_install_state(Some(entry.install_state.as_str()))
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Runtime tool '{implementation_key}' is not mapped to a runnable installed skill."
+                    )
+                })?;
+            let fallback_version = mapped
+                .pinned_version
+                .clone()
+                .unwrap_or_else(|| "latest".to_string());
+            resolved_skill_id = mapped.skill_id.clone();
+            resolved_version = fallback_version.clone();
+            client
+                .create_runtime_run(
+                    token,
+                    CreateRuntimeRunInput {
+                        skill_id: resolved_skill_id.clone(),
+                        version: resolved_version.clone(),
+                        ..base_run_input
+                    },
+                )
+                .await?
+        }
+        Err(error) => return Err(error),
+    };
+
+    emit_progress(
+        format!(
+            "Runtime run job received (skillId={}, executionMode={:?}).",
+            resolved_skill_id, execution_mode
+        ),
+        Some(run.run_id.clone()),
+        Some("running".to_string()),
+        0,
+    );
+
+    let mut cursor = 0usize;
+    let mut log_messages = Vec::new();
+    let mut final_run: RuntimeRunSummary = run.clone();
+    let mut sequence = 1usize;
+    for _ in 0..240 {
+        if let Ok(events) = client
+            .list_runtime_run_events(token, &run.run_id, cursor, 200)
+            .await
+        {
+            let event_count = events.data.len();
+            for event in events.data {
+                if let Some(message) = event.message {
+                    emit_progress(
+                        message.clone(),
+                        Some(run.run_id.clone()),
+                        Some("running".to_string()),
+                        sequence,
+                    );
+                    sequence += 1;
+                    log_messages.push(message);
+                }
+            }
+            cursor = events
+                .page
+                .next_cursor
+                .as_deref()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| cursor.saturating_add(event_count));
+        }
+
+        let current = client.get_runtime_run(token, &run.run_id).await?;
+        let terminal = matches!(
+            current.status.as_str(),
+            "succeeded" | "failed" | "timed_out" | "cancelled"
+        );
+        final_run = current;
+        if terminal {
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    emit_progress(
+        format!("Runtime run {}.", final_run.status),
+        Some(final_run.run_id.clone()),
+        Some(final_run.status.clone()),
+        sequence,
+    );
+
+    Ok(DirectRuntimeToolRunResult {
+        implementation_key,
+        skill_id: resolved_skill_id,
+        version: resolved_version,
+        execution_mode,
+        run_id: final_run.run_id,
+        status: final_run.status,
+        output: final_run.output,
+        error: final_run.error.map(|value| serde_json::json!(value)),
+        log_messages,
+    })
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -362,6 +575,152 @@ async fn validate_skill_runtime(
     Ok(handshake)
 }
 
+#[tauri::command]
+async fn run_agent_runtime_tool(
+    agent_id: String,
+    implementation_key: String,
+    input: Option<serde_json::Value>,
+    client_run_id: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+) -> Result<DirectRuntimeToolRunResult, String> {
+    ensure_tool_enabled(&db, &agent_id, &implementation_key, auth_state.inner()).await?;
+
+    let agent_uuid =
+        uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
+    let runtime_tools = AbilityService::resolve_agent_runtime_tools(&db, agent_uuid).await?;
+    let tool = runtime_tools
+        .into_iter()
+        .find(|entry| entry.implementation_key == implementation_key && entry.enabled)
+        .ok_or_else(|| {
+            format!(
+                "Tool '{}' is not enabled for this agent.",
+                implementation_key
+            )
+        })?;
+
+    let skill_id = tool
+        .config
+        .get("skill_id")
+        .or_else(|| tool.config.get("skillId"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&implementation_key)
+        .to_string();
+    let version = tool
+        .config
+        .get("version")
+        .or_else(|| tool.config.get("skill_version"))
+        .or_else(|| tool.config.get("skillVersion"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("latest")
+        .to_string();
+
+    let execution_mode = resolve_agent_execution_mode(&db, &agent_id, auth_state.inner()).await?;
+
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let client = SkillsRegistryClient::from_env()?;
+
+    let result = run_direct_runtime_skill(
+        &client,
+        &token,
+        agent_id,
+        implementation_key,
+        skill_id,
+        version,
+        input,
+        execution_mode,
+        &app,
+        client_run_id.as_deref(),
+    )
+    .await;
+
+    if let (Err(error), Some(client_run_id)) = (&result, &client_run_id) {
+        let _ = app.emit(
+            "direct-runtime-tool-progress",
+            DirectRuntimeToolProgressEvent {
+                client_run_id: client_run_id.clone(),
+                implementation_key: "unknown".to_string(),
+                run_id: None,
+                status: Some("failed".to_string()),
+                message: error.clone(),
+                sequence: 0,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            },
+        );
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn run_registry_skill_direct(
+    agent_id: String,
+    skill_id: String,
+    input: Option<serde_json::Value>,
+    client_run_id: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+) -> Result<DirectRuntimeToolRunResult, String> {
+    let execution_mode = resolve_agent_execution_mode(&db, &agent_id, auth_state.inner()).await?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let client = SkillsRegistryClient::from_env()?;
+    let installed_skills = client.list_installed_skills(&token).await?;
+
+    let installed = installed_skills
+        .into_iter()
+        .find(|entry| entry.skill_id == skill_id)
+        .ok_or_else(|| format!("Skill '{skill_id}' is not installed for this user."))?;
+
+    if !is_runnable_install_state(Some(installed.install_state.as_str())) {
+        return Err(format!(
+            "Skill '{skill_id}' install state is '{}'.",
+            installed.install_state
+        ));
+    }
+
+    let version = installed
+        .pinned_version
+        .clone()
+        .unwrap_or_else(|| "latest".to_string());
+
+    let result = run_direct_runtime_skill(
+        &client,
+        &token,
+        agent_id,
+        installed.implementation_key,
+        installed.skill_id,
+        version,
+        input,
+        execution_mode,
+        &app,
+        client_run_id.as_deref(),
+    )
+    .await;
+
+    if let (Err(error), Some(client_run_id)) = (&result, &client_run_id) {
+        let _ = app.emit(
+            "direct-runtime-tool-progress",
+            DirectRuntimeToolProgressEvent {
+                client_run_id: client_run_id.clone(),
+                implementation_key: "unknown".to_string(),
+                run_id: None,
+                status: Some("failed".to_string()),
+                message: error.clone(),
+                sequence: 0,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            },
+        );
+    }
+
+    result
+}
+
 // Agent commands
 #[tauri::command]
 async fn create_agent(
@@ -413,9 +772,20 @@ async fn send_message_to_agent(
     message: String,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<String, String> {
     // Simple one-shot message without conversation history
-    AgentService::send_message_to_agent(&db, agent_id, message, vec![], None, &ai_client).await
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
+    AgentService::send_message_to_agent(
+        &db,
+        agent_id,
+        message,
+        vec![],
+        None,
+        access_token.as_deref(),
+        &ai_client,
+    )
+    .await
 }
 
 // Conversation commands
@@ -458,10 +828,19 @@ async fn send_message(
     image_base64: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<conversation_service::MessageData, String> {
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
     let response =
-        ConversationService::send_message(&db, conversation_id, content, image_base64, &ai_client)
-            .await?;
+        ConversationService::send_message(
+            &db,
+            conversation_id,
+            content,
+            image_base64,
+            access_token.as_deref(),
+            &ai_client,
+        )
+        .await?;
     // Track as a core conversation skill usage (best-effort).
     if let Ok(conversation) =
         ConversationService::get_conversation(&db, response.conversation_id.to_string()).await
@@ -481,12 +860,15 @@ async fn send_message_streaming(
     on_event: Channel<ai_client::StreamEvent>,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<conversation_service::MessageData, String> {
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
     let response = ConversationService::send_message_streaming(
         &db,
         conversation_id,
         content,
         image_base64,
+        access_token.as_deref(),
         on_event,
         &ai_client,
     )
@@ -560,6 +942,7 @@ async fn edit_message(
     image_base64: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<
     (
         conversation_service::MessageData,
@@ -567,9 +950,17 @@ async fn edit_message(
     ),
     String,
 > {
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
     let result =
-        ConversationService::edit_message(&db, message_id, new_content, image_base64, &ai_client)
-            .await?;
+        ConversationService::edit_message(
+            &db,
+            message_id,
+            new_content,
+            image_base64,
+            access_token.as_deref(),
+            &ai_client,
+        )
+        .await?;
     if let Ok(conversation) =
         ConversationService::get_conversation(&db, result.0.conversation_id.to_string()).await
     {
@@ -588,6 +979,7 @@ async fn edit_message_streaming(
     on_event: Channel<ai_client::StreamEvent>,
     db: tauri::State<'_, DatabaseConnection>,
     ai_client: tauri::State<'_, AiClient>,
+    auth_state: tauri::State<'_, AuthState>,
 ) -> Result<
     (
         conversation_service::MessageData,
@@ -595,11 +987,13 @@ async fn edit_message_streaming(
     ),
     String,
 > {
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
     let result = ConversationService::edit_message_streaming(
         &db,
         message_id,
         new_content,
         image_base64,
+        access_token.as_deref(),
         on_event,
         &ai_client,
     )
@@ -877,6 +1271,32 @@ struct LocalDockerRuntimePrepareStatus {
     image_pulled: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectRuntimeToolRunResult {
+    implementation_key: String,
+    skill_id: String,
+    version: String,
+    execution_mode: RuntimeExecutionMode,
+    run_id: String,
+    status: String,
+    output: Option<Value>,
+    error: Option<Value>,
+    log_messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectRuntimeToolProgressEvent {
+    client_run_id: String,
+    implementation_key: String,
+    run_id: Option<String>,
+    status: Option<String>,
+    message: String,
+    sequence: usize,
+    timestamp_ms: i64,
+}
+
 fn resolve_docker_binary() -> Result<String, String> {
     let mut candidates: Vec<String> = Vec::new();
 
@@ -913,6 +1333,26 @@ fn resolve_docker_binary() -> Result<String, String> {
         "Docker CLI was not found. Tried: {}. Install Docker Desktop and ensure docker is available.",
         attempted.join(", ")
     ))
+}
+
+fn collect_runtime_prepare_images(primary_image: &str) -> Vec<String> {
+    let mut images: Vec<String> = vec![primary_image.trim().to_string()];
+    if let Ok(value) = std::env::var("RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES") {
+        for entry in value.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+            let Some((_, image)) = entry.split_once('=') else {
+                continue;
+            };
+            let trimmed = image.trim();
+            if !trimmed.is_empty() {
+                images.push(trimmed.to_string());
+            }
+        }
+    }
+    // Keep python runtime warm for coreagent.py.* skills when no profile map is configured.
+    images.push("python:3.12-alpine".to_string());
+    images.sort();
+    images.dedup();
+    images
 }
 
 fn run_docker_command(docker_bin: &str, args: &[&str]) -> Result<String, String> {
@@ -1041,6 +1481,18 @@ async fn prepare_local_docker_runtime(
                 .map_err(|e| format!("Failed to pull Docker image '{}' via '{}': {}", target_image, docker_bin, e))?;
             image_pulled = true;
             resolved_status = check_local_docker_runtime_sync(target_image.clone());
+        }
+
+        for image in collect_runtime_prepare_images(&target_image) {
+            if image == target_image {
+                continue;
+            }
+            if run_docker_command(&docker_bin, &["image", "inspect", &image]).is_ok() {
+                continue;
+            }
+            run_docker_command(&docker_bin, &["pull", &image])
+                .map_err(|e| format!("Failed to pull Docker image '{}' via '{}': {}", image, docker_bin, e))?;
+            image_pulled = true;
         }
 
         Ok(LocalDockerRuntimePrepareStatus {
@@ -1644,6 +2096,8 @@ pub fn run() {
             list_agent_registry_skills,
             sync_skill_advisories,
             validate_skill_runtime,
+            run_agent_runtime_tool,
+            run_registry_skill_direct,
             create_agent,
             list_agents,
             get_agent,

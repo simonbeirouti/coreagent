@@ -1,6 +1,10 @@
 #![allow(deprecated)]
 
 use crate::input_sanitizer::escape_for_prompt;
+use crate::skills_registry_client::{
+    CreateRuntimeRunInput, InstalledSkill, RuntimeExecutionMode, RuntimeRunSummary,
+    SkillsRegistryClient,
+};
 use crate::user_profile_service::UserProfileData;
 use futures::StreamExt;
 use rig::agent::AgentBuilder;
@@ -8,16 +12,22 @@ use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use rig::providers::anthropic;
 use rig::providers::openai;
+use std::collections::HashMap;
 use std::sync::Arc;
 pub use tauri::ipc::Channel;
+use tokio::time::{sleep, Duration};
 
 // OpenAI Vision API imports
 use async_openai::{
     types::chat::{
+        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
+        ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
-        ChatCompletionRequestMessageContentPartText, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestMessageContentPartText, ChatCompletionRequestToolMessage,
+        ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-        CreateChatCompletionRequestArgs, ImageDetail, ImageUrl,
+        ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequestArgs, FinishReason,
+        FunctionObject, ImageDetail, ImageUrl,
     },
     Client as OpenAIClient,
 };
@@ -41,6 +51,15 @@ pub enum StreamEvent {
     Error { message: String },
 }
 
+#[derive(Clone, Debug)]
+struct RuntimeToolSpec {
+    tool_name: String,
+    implementation_key: String,
+    skill_id: String,
+    version: String,
+    description: String,
+}
+
 /// AI Client manager for handling OpenAI and Anthropic connections
 pub struct AiClientManager {
     openai_client: Option<openai::Client>,
@@ -48,6 +67,27 @@ pub struct AiClientManager {
 }
 
 impl AiClientManager {
+    fn is_runnable_install_state(state: Option<&str>) -> bool {
+        matches!(state, Some("installed" | "ready"))
+    }
+
+    fn is_not_found_runtime_error(error: &str) -> bool {
+        let normalized = error.to_ascii_lowercase();
+        normalized.contains("(404)")
+            || normalized.contains("not found")
+            || normalized.contains("unknown skill")
+    }
+
+    fn resolve_installed_skill_by_implementation_key<'a>(
+        implementation_key: &str,
+        installed_skills: &'a [InstalledSkill],
+    ) -> Option<&'a InstalledSkill> {
+        installed_skills.iter().find(|entry| {
+            entry.implementation_key == implementation_key
+                && Self::is_runnable_install_state(Some(entry.install_state.as_str()))
+        })
+    }
+
     /// Build a structured identity prompt for an agent
     fn build_identity_prompt(
         agent_name: &str,
@@ -277,6 +317,111 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         }
     }
 
+    fn runtime_execution_mode_from_profile(user_profile: Option<&UserProfileData>) -> RuntimeExecutionMode {
+        let mode = user_profile
+            .and_then(|profile| profile.preferences.get("runtime_execution_mode"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("remote");
+        if mode.eq_ignore_ascii_case("local_docker") {
+            RuntimeExecutionMode::LocalDocker
+        } else {
+            RuntimeExecutionMode::Remote
+        }
+    }
+
+    fn sanitize_tool_name(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        let trimmed = out.trim_matches('_');
+        let candidate = if trimmed.is_empty() { "runtime_tool" } else { trimmed };
+        let mut name = candidate.to_string();
+        if name.len() > 64 {
+            name.truncate(64);
+        }
+        name
+    }
+
+    fn extract_runtime_tool_specs(
+        constraints: Option<&serde_json::Value>,
+    ) -> Vec<RuntimeToolSpec> {
+        let Some(tool_values) = constraints
+            .and_then(|value| value.get("runtime_tools"))
+            .and_then(|value| value.as_array())
+        else {
+            return Vec::new();
+        };
+
+        let mut specs = Vec::new();
+        for value in tool_values {
+            let Some(implementation_key) = value
+                .get("implementation_key")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+            else {
+                continue;
+            };
+
+            let enabled = value
+                .get("enabled")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+
+            let config = value.get("config").unwrap_or(&serde_json::Value::Null);
+            let skill_id = config
+                .get("skill_id")
+                .or_else(|| config.get("skillId"))
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .unwrap_or(implementation_key)
+                .to_string();
+            let version = config
+                .get("version")
+                .or_else(|| config.get("skill_version"))
+                .or_else(|| config.get("skillVersion"))
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .unwrap_or("latest")
+                .to_string();
+            let description = config
+                .get("description")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    config
+                        .get("ability_name")
+                        .and_then(|item| item.as_str())
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(|name| format!("Run the '{}' tool when it helps answer the user request.", name))
+                })
+                .unwrap_or_else(|| format!("Execute runtime skill '{}'.", implementation_key));
+            let tool_name = Self::sanitize_tool_name(implementation_key);
+            specs.push(RuntimeToolSpec {
+                tool_name,
+                implementation_key: implementation_key.to_string(),
+                skill_id,
+                version,
+                description,
+            });
+        }
+
+        specs
+    }
+
     /// Initialize AI clients from environment variables
     pub fn new() -> Result<Self, String> {
         // Load environment variables
@@ -379,6 +524,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         messages: Vec<(String, String)>, // (role, content) pairs
         user_message: &str,
         image_base64: Option<&str>,
+        _agent_id: Option<&str>,
+        _access_token: Option<&str>,
     ) -> Result<String, String> {
         // If no image provided, use regular completion
         if image_base64.is_none() {
@@ -773,6 +920,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         history: Vec<(String, String)>,
         user_message: &str,
         image_base64: &str,
+        _agent_id: Option<&str>,
+        _access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         // Build identity prompt for system message
@@ -1004,6 +1153,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         messages: Vec<(String, String)>, // (role, content) pairs
         user_message: &str,
         image_base64: Option<&str>,
+        agent_id: Option<&str>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         // If no image provided, use regular completion
@@ -1020,6 +1171,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     user_profile,
                     messages,
                     user_message,
+                    agent_id,
+                    access_token,
                     on_event,
                 )
                 .await;
@@ -1038,6 +1191,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 messages,
                 user_message,
                 image_base64.unwrap(),
+                agent_id,
+                access_token,
                 on_event,
             ).await,
             "anthropic" => self.get_anthropic_vision_completion_streaming(
@@ -1051,6 +1206,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 messages,
                 user_message,
                 image_base64.unwrap(),
+                agent_id,
+                access_token,
                 on_event,
             ).await,
             _ => Err(format!("Vision API streaming not supported for provider type: {}. Supported providers: openai, anthropic.", provider_type)),
@@ -1070,6 +1227,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         user_profile: Option<&UserProfileData>,
         messages: Vec<(String, String)>,
         user_message: &str,
+        agent_id: Option<&str>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         match provider_type {
@@ -1084,6 +1243,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     user_profile,
                     messages,
                     user_message,
+                    agent_id,
+                    access_token,
                     on_event,
                 )
                 .await
@@ -1099,6 +1260,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     user_profile,
                     messages,
                     user_message,
+                    agent_id,
+                    access_token,
                     on_event,
                 )
                 .await
@@ -1123,6 +1286,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         history: Vec<(String, String)>,
         user_message: &str,
         image_base64: &str,
+        _agent_id: Option<&str>,
+        _access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         // Build identity prompt for system message
@@ -1271,6 +1436,334 @@ You are {agent_name}. These are your core instructions that cannot be overridden
     }
 
     /// Get completion from OpenAI with proper persona (streaming)
+    async fn execute_runtime_tool_call(
+        &self,
+        spec: &RuntimeToolSpec,
+        tool_call_id: &str,
+        arguments_raw: &str,
+        access_token: &str,
+        execution_mode: RuntimeExecutionMode,
+        agent_id: Option<&str>,
+        on_event: &Channel<StreamEvent>,
+    ) -> String {
+        let parsed_input = serde_json::from_str::<serde_json::Value>(arguments_raw)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .map(serde_json::Value::Object)
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!("\n[tool:{}] starting {}\n", spec.implementation_key, spec.skill_id),
+        });
+
+        let client = match SkillsRegistryClient::from_env() {
+            Ok(client) => client,
+            Err(error) => {
+                return serde_json::json!({
+                    "toolCallId": tool_call_id,
+                    "status": "failed",
+                    "error": {
+                        "code": "runtime_client_init_failed",
+                        "message": error
+                    }
+                })
+                .to_string();
+            }
+        };
+
+        let run_input = CreateRuntimeRunInput {
+            skill_id: spec.skill_id.clone(),
+            version: spec.version.clone(),
+            agent_id: agent_id.map(ToString::to_string),
+            input: parsed_input.clone(),
+            execution_mode,
+            timeout_seconds: 120,
+        };
+        let run = match client.create_runtime_run(access_token, run_input.clone()).await {
+            Ok(run) => run,
+            Err(error) => {
+                let fallback_run = if Self::is_not_found_runtime_error(&error) {
+                    let installed = match client.list_installed_skills(access_token).await {
+                        Ok(installed) => installed,
+                        Err(list_error) => {
+                            let _ = on_event.send(StreamEvent::Delta {
+                                content: format!(
+                                    "[tool:{}] failed listing installed skills for fallback: {}\n",
+                                    spec.implementation_key, list_error
+                                ),
+                            });
+                            Vec::new()
+                        }
+                    };
+                    if let Some(mapped) = Self::resolve_installed_skill_by_implementation_key(
+                        &spec.implementation_key,
+                        &installed,
+                    ) {
+                        let fallback_version = mapped
+                            .pinned_version
+                            .clone()
+                            .unwrap_or_else(|| "latest".to_string());
+                        let _ = on_event.send(StreamEvent::Delta {
+                            content: format!(
+                                "[tool:{}] retrying with installed mapping: {}@{}\n",
+                                spec.implementation_key, mapped.skill_id, fallback_version
+                            ),
+                        });
+                        let retry_input = CreateRuntimeRunInput {
+                            skill_id: mapped.skill_id.clone(),
+                            version: fallback_version,
+                            ..run_input.clone()
+                        };
+                        match client.create_runtime_run(access_token, retry_input).await {
+                            Ok(retry_run) => Some(retry_run),
+                            Err(retry_error) => {
+                                let _ = on_event.send(StreamEvent::Delta {
+                                    content: format!(
+                                        "[tool:{}] retry create run failed: {}\n",
+                                        spec.implementation_key, retry_error
+                                    ),
+                                });
+                                return serde_json::json!({
+                                    "toolCallId": tool_call_id,
+                                    "status": "failed",
+                                    "error": {
+                                        "code": "runtime_run_create_failed",
+                                        "message": retry_error
+                                    }
+                                })
+                                .to_string();
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(retry_run) = fallback_run {
+                    retry_run
+                } else {
+                let _ = on_event.send(StreamEvent::Delta {
+                    content: format!("[tool:{}] create run failed: {}\n", spec.implementation_key, error),
+                });
+                return serde_json::json!({
+                    "toolCallId": tool_call_id,
+                    "status": "failed",
+                    "error": {
+                        "code": "runtime_run_create_failed",
+                        "message": error
+                    }
+                })
+                .to_string();
+                }
+            }
+        };
+
+        let mut cursor = 0usize;
+        let mut final_run: RuntimeRunSummary = run.clone();
+        for _ in 0..240 {
+            if let Ok(events) = client
+                .list_runtime_run_events(access_token, &run.run_id, cursor, 200)
+                .await
+            {
+                for event in events.data {
+                    if let Some(message) = event.message {
+                        let _ = on_event.send(StreamEvent::Delta {
+                            content: format!(
+                                "[tool:{}][{}] {}\n",
+                                spec.implementation_key, event.r#type, message
+                            ),
+                        });
+                    }
+                }
+                cursor = events
+                    .page
+                    .next_cursor
+                    .as_deref()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(cursor);
+            }
+
+            match client.get_runtime_run(access_token, &run.run_id).await {
+                Ok(current) => {
+                    let terminal = matches!(
+                        current.status.as_str(),
+                        "succeeded" | "failed" | "timed_out" | "cancelled"
+                    );
+                    final_run = current;
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool:{}] failed to fetch run status: {}\n",
+                            spec.implementation_key, error
+                        ),
+                    });
+                    break;
+                }
+            }
+
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        serde_json::json!({
+            "toolCallId": tool_call_id,
+            "runId": final_run.run_id,
+            "status": final_run.status,
+            "output": final_run.output,
+            "error": final_run.error
+        })
+        .to_string()
+    }
+
+    async fn get_openai_completion_streaming_with_runtime_tools(
+        &self,
+        model_id: &str,
+        mut chat_messages: Vec<ChatCompletionRequestMessage>,
+        runtime_tools: Vec<RuntimeToolSpec>,
+        execution_mode: RuntimeExecutionMode,
+        access_token: &str,
+        agent_id: Option<&str>,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        let openai_client = OpenAIClient::new();
+        on_event
+            .send(StreamEvent::Started)
+            .map_err(|e| format!("Failed to send Started event: {}", e))?;
+
+        // Nudge the model to prefer tool usage when the user asks for fresh/external data.
+        chat_messages.insert(
+            1,
+            ChatCompletionRequestMessage::System(
+                async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                    content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                        "You have runtime tools available. For requests requiring real-time, external, or environment-specific data, call an appropriate tool first. Do not claim lack of access before attempting a relevant tool call.".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        );
+
+        let tool_defs: Vec<ChatCompletionTools> = runtime_tools
+            .iter()
+            .map(|tool| {
+                ChatCompletionTools::Function(ChatCompletionTool {
+                    function: FunctionObject {
+                        name: tool.tool_name.clone(),
+                        description: Some(tool.description.clone()),
+                        parameters: Some(serde_json::json!({
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": true
+                        })),
+                        strict: None,
+                    },
+                })
+            })
+            .collect();
+        let tool_by_name: HashMap<String, RuntimeToolSpec> = runtime_tools
+            .into_iter()
+            .map(|tool| (tool.tool_name.clone(), tool))
+            .collect();
+
+        for _ in 0..6 {
+            let request = CreateChatCompletionRequestArgs::default()
+                .model(model_id)
+                .messages(chat_messages.clone())
+                .max_tokens(1000u32)
+                .temperature(0.7f32)
+                .tools(tool_defs.clone())
+                .build()
+                .map_err(|e| format!("Failed to build tool request: {}", e))?;
+
+            let response = openai_client
+                .chat()
+                .create(request)
+                .await
+                .map_err(|e| format!("OpenAI tool-call API error: {}", e))?;
+            let Some(choice) = response.choices.first() else {
+                return Err("OpenAI returned no choices for tool request.".to_string());
+            };
+
+            let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
+            let finish_reason = choice.finish_reason.unwrap_or(FinishReason::Stop);
+            if tool_calls.is_empty() || finish_reason != FinishReason::ToolCalls {
+                let content = choice.message.content.clone().unwrap_or_default();
+                if !content.is_empty() {
+                    on_event
+                        .send(StreamEvent::Delta {
+                            content: content.clone(),
+                        })
+                        .map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                }
+                on_event
+                    .send(StreamEvent::Done {
+                        full_content: content.clone(),
+                    })
+                    .map_err(|e| format!("Failed to send Done event: {}", e))?;
+                return Ok(content);
+            }
+
+            chat_messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: choice
+                        .message
+                        .content
+                        .clone()
+                        .map(ChatCompletionRequestAssistantMessageContent::Text),
+                    refusal: None,
+                    name: None,
+                    audio: None,
+                    tool_calls: Some(tool_calls.clone()),
+                    function_call: None,
+                },
+            ));
+
+            for tool_call in tool_calls {
+                let ChatCompletionMessageToolCalls::Function(call) = tool_call else {
+                    continue;
+                };
+                let tool_output = if let Some(spec) = tool_by_name.get(&call.function.name) {
+                    self.execute_runtime_tool_call(
+                        spec,
+                        &call.id,
+                        &call.function.arguments,
+                        access_token,
+                        execution_mode,
+                        agent_id,
+                        &on_event,
+                    )
+                    .await
+                } else {
+                    serde_json::json!({
+                        "toolCallId": call.id,
+                        "status": "failed",
+                        "error": {
+                            "code": "tool_not_registered",
+                            "message": format!("Tool '{}' is not registered in runtime tools.", call.function.name)
+                        }
+                    })
+                    .to_string()
+                };
+
+                chat_messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(tool_output),
+                        tool_call_id: call.id,
+                    },
+                ));
+            }
+        }
+
+        Err("Tool-call loop exceeded maximum iterations without terminal assistant response.".to_string())
+    }
+
+    /// Get completion from OpenAI with proper persona (streaming)
     async fn get_openai_completion_streaming(
         &self,
         model_id: &str,
@@ -1282,6 +1775,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         user_profile: Option<&UserProfileData>,
         history: Vec<(String, String)>,
         user_message: &str,
+        agent_id: Option<&str>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         // Build identity prompt for system message
@@ -1355,6 +1850,27 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             },
         ));
 
+        let runtime_tools = Self::extract_runtime_tool_specs(constraints);
+        if !runtime_tools.is_empty() {
+            if let Some(token) = access_token {
+                let mode = Self::runtime_execution_mode_from_profile(user_profile);
+                return self
+                    .get_openai_completion_streaming_with_runtime_tools(
+                        model_id,
+                        chat_messages,
+                        runtime_tools,
+                        mode,
+                        token,
+                        agent_id,
+                        on_event,
+                    )
+                    .await;
+            }
+            eprintln!(
+                "[AI_CLIENT] Runtime tools available but no auth token; skipping tool execution path."
+            );
+        }
+
         // Build the streaming request
         let request = CreateChatCompletionRequestArgs::default()
             .model(model_id)
@@ -1424,6 +1940,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         user_profile: Option<&UserProfileData>,
         history: Vec<(String, String)>,
         user_message: &str,
+        _agent_id: Option<&str>,
+        _access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
         // Build identity prompt for system message
@@ -1539,4 +2057,119 @@ pub type AiClient = Arc<AiClientManager>;
 pub fn create_ai_client() -> Result<AiClient, String> {
     let manager = AiClientManager::new()?;
     Ok(Arc::new(manager))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiClientManager;
+    use crate::skills_registry_client::{InstalledSkill, RuntimeExecutionMode};
+    use crate::user_profile_service::UserProfileData;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn make_profile(preferences: serde_json::Value) -> UserProfileData {
+        UserProfileData {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            preferences,
+            habits: json!({}),
+            work_patterns: json!({}),
+            language: "en".to_string(),
+            ai_response_language: "en".to_string(),
+            notifications_enabled: true,
+            analytics_enabled: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn runtime_mode_defaults_to_remote() {
+        let mode = AiClientManager::runtime_execution_mode_from_profile(None);
+        assert_eq!(mode, RuntimeExecutionMode::Remote);
+    }
+
+    #[test]
+    fn runtime_mode_reads_local_docker_preference() {
+        let profile = make_profile(json!({
+            "runtime_execution_mode": "local_docker"
+        }));
+        let mode = AiClientManager::runtime_execution_mode_from_profile(Some(&profile));
+        assert_eq!(mode, RuntimeExecutionMode::LocalDocker);
+    }
+
+    #[test]
+    fn extract_runtime_tools_filters_disabled_and_builds_defaults() {
+        let constraints = json!({
+            "runtime_tools": [
+                {
+                    "implementation_key": "coreagent.py.deep-analysis",
+                    "enabled": true,
+                    "config": {
+                        "skillId": "coreagent.py.deep_analysis",
+                        "version": "1.2.3",
+                        "description": "Run deep analysis"
+                    }
+                },
+                {
+                    "implementation_key": "coreagent.disabled.tool",
+                    "enabled": false,
+                    "config": {}
+                }
+            ]
+        });
+
+        let tools = AiClientManager::extract_runtime_tool_specs(Some(&constraints));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "coreagent_py_deep-analysis");
+        assert_eq!(tools[0].skill_id, "coreagent.py.deep_analysis");
+        assert_eq!(tools[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn resolve_installed_skill_prefers_runnable_match_by_implementation_key() {
+        let installed = vec![
+            InstalledSkill {
+                install_id: "install-1".to_string(),
+                skill_id: "skill.deep.analysis".to_string(),
+                implementation_key: "coreagent.py.deep_analysis".to_string(),
+                name: "Deep Analysis".to_string(),
+                install_state: "installed".to_string(),
+                auto_update: false,
+                pinned_version: Some("1.4.0".to_string()),
+                updated_at: Utc::now().to_rfc3339(),
+            },
+            InstalledSkill {
+                install_id: "install-2".to_string(),
+                skill_id: "skill.deep.analysis.stale".to_string(),
+                implementation_key: "coreagent.py.deep_analysis".to_string(),
+                name: "Deep Analysis".to_string(),
+                install_state: "installing".to_string(),
+                auto_update: false,
+                pinned_version: Some("1.2.0".to_string()),
+                updated_at: Utc::now().to_rfc3339(),
+            },
+        ];
+
+        let resolved = AiClientManager::resolve_installed_skill_by_implementation_key(
+            "coreagent.py.deep_analysis",
+            &installed,
+        )
+        .expect("expected a runnable installed skill");
+        assert_eq!(resolved.skill_id, "skill.deep.analysis");
+    }
+
+    #[test]
+    fn not_found_runtime_error_detects_registry_not_found_patterns() {
+        assert!(AiClientManager::is_not_found_runtime_error(
+            "Registry request failed (404 Not Found): skill missing"
+        ));
+        assert!(AiClientManager::is_not_found_runtime_error(
+            "Unknown skill requested for runtime run"
+        ));
+        assert!(!AiClientManager::is_not_found_runtime_error(
+            "Registry request failed (500): upstream unavailable"
+        ));
+    }
 }

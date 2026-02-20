@@ -1,7 +1,7 @@
 # CoreAgent Unified Delivery PRD
 
 ## Document Status
-- Version: 5.5
+- Version: 5.6
 - Last Updated: 2026-02-20
 - Owner: CoreAgent Product + Platform Engineering
 - Scope: Single source of truth for skills registry, tools/runtime integration, skills graph MVP, and next-iteration orchestration + automation
@@ -15,6 +15,18 @@
 - [ ] 6. Complete release gates (observability metrics, handshake/broker unit tests, lifecycle integration tests, resilience/security checks).
 - [ ] 7. Deliver skills graph MVP and week-1 usability items.
 - [x] Foundation complete and decisions resolved (registry baseline, handshake gates, research decisions for creation flow and runtime model).
+
+## Backlog Checklist
+- [ ] 1. Re-add email to `user_profile` so product updates/notifications can be sent.
+- [ ] 2. Auto-fallback runtime assignment from `local_docker` to `remote` when device/runtime is unavailable.
+- [ ] 3. Mobile application support to track jobs and message agents.
+
+## Immediate Runtime Todo List
+- [ ] Complete remote runner integration end-to-end (parity with local Docker execution path and diagnostics surface).
+- [ ] Improve tool invocation UX/functionality:
+  - derive the correct tool from user message intent more reliably
+  - ensure user text submitted with a tool call is included in the final tool output/context
+- [ ] Add automatic fallback to `remote` execution whenever local runtime is unavailable/not found.
 
 ## Status Update (2026-02-20)
 
@@ -51,6 +63,15 @@
     - profile persistence for runtime execution mode and local image preference
     - local Docker preflight + pre-pull flow via Tauri runtime commands
     - local mode failure remediation (`Open docker in background`) with auto-fallback to remote
+  - Runner runtime image selection hardened:
+    - canonical language profile mapping (`node`, `python`, `rust`) with alias normalization (`js/javascript`, `py`, `rs`)
+    - pre-pull warmup dedupe so aliases do not trigger extra language image pulls
+  - CoreAgent chat runtime timeline hardening:
+    - direct tool progress/event dedupe and stable sequence ordering
+    - direct tool cards rendered inline in conversation timeline order
+    - tool run auto-scroll while live progress is appended
+    - reload hydration of tool run accordions from persisted direct-tool context
+    - internal direct-tool context payload hidden from user-visible chat bubbles
 
 - In progress:
   - Remote execution parity and CoreAgent run diagnostics panel are pending final completion.

@@ -72,6 +72,13 @@ pnpm build
 - For Upstash, set `REDIS_URL` to the Redis connection string (`rediss://...`), not the REST URL.
 - Queue retries are configurable via `RUNTIME_RUN_MAX_ATTEMPTS` and `RUNTIME_RUN_RETRY_BACKOFF_MS`.
 - If you see transient Redis resets (for example `ECONNRESET`) on server cache logs, set `ENABLE_RUNTIME_REDIS_CACHE=false` in `apps/server/.env` to disable the optional cache client while keeping queue execution active.
+- Runner execution modes:
+  - `remote`: executes skill artifacts in Docker on the runner host (requires Docker + `RUNTIME_ENABLE_REMOTE_DOCKER=true`).
+  - `local_docker`: executes the same Docker-isolated flow with local-mode gating (`RUNTIME_ENABLE_LOCAL_DOCKER=true`).
+- Container image selection is profile-based via `RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES` using canonical language profiles (`default`, `node`, `python`, `rust`). Aliases like `js/javascript`, `py`, and `rs` normalize to those canonical profiles.
+- Runtime image warmup now dedupes alias profiles so each language pulls a single canonical image.
+- Chat runtime UX now renders direct tool runs inline with conversation order, dedupes repeated progress events, and auto-scrolls while tool progress is streaming.
+- On reload, internal direct-tool context payloads are hidden from user bubbles and used to hydrate tool run accordions instead.
 
 ## Current Test Milestone (2026-02-20)
 

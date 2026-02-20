@@ -245,6 +245,78 @@ pub struct AssignSkillInput {
     pub config: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExecutionMode {
+    Remote,
+    LocalDocker,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRuntimeRunInput {
+    pub skill_id: String,
+    pub version: String,
+    pub agent_id: Option<String>,
+    pub input: serde_json::Value,
+    pub execution_mode: RuntimeExecutionMode,
+    pub timeout_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRunError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRunSummary {
+    pub run_id: String,
+    pub user_id: String,
+    pub skill_id: String,
+    pub version: String,
+    pub agent_id: Option<String>,
+    pub execution_mode: RuntimeExecutionMode,
+    pub status: String,
+    pub timeout_seconds: u32,
+    pub input: serde_json::Value,
+    pub output: Option<serde_json::Value>,
+    pub error: Option<RuntimeRunError>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRunEvent {
+    pub event_id: String,
+    pub run_id: String,
+    pub sequence: i64,
+    pub r#type: String,
+    pub status: Option<String>,
+    pub message: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRunEventsPage {
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRunEventsResponse {
+    pub data: Vec<RuntimeRunEvent>,
+    pub page: RuntimeRunEventsPage,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ApiResponse<T> {
     data: T,
@@ -444,6 +516,46 @@ impl SkillsRegistryClient {
             .clamp(1, 200)
             .to_string();
         request = request.query(&[("limit", final_limit.as_str())]);
+        self.send_full(request).await
+    }
+
+    pub async fn create_runtime_run(
+        &self,
+        access_token: &str,
+        input: CreateRuntimeRunInput,
+    ) -> Result<RuntimeRunSummary, String> {
+        let request = self
+            .http
+            .post(self.url("/v1/runtime/runs"))
+            .bearer_auth(access_token)
+            .json(&input);
+        self.send_data(request).await
+    }
+
+    pub async fn get_runtime_run(
+        &self,
+        access_token: &str,
+        run_id: &str,
+    ) -> Result<RuntimeRunSummary, String> {
+        let request = self
+            .http
+            .get(self.url(&format!("/v1/runtime/runs/{run_id}")))
+            .bearer_auth(access_token);
+        self.send_data(request).await
+    }
+
+    pub async fn list_runtime_run_events(
+        &self,
+        access_token: &str,
+        run_id: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<RuntimeRunEventsResponse, String> {
+        let request = self
+            .http
+            .get(self.url(&format!("/v1/runtime/runs/{run_id}/events")))
+            .bearer_auth(access_token)
+            .query(&[("cursor", cursor), ("limit", limit)]);
         self.send_full(request).await
     }
 

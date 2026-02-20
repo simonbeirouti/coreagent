@@ -30,6 +30,7 @@ const RunnerEnvSchema = z.object({
   RUNTIME_ALLOW_PROCESS: z.coerce.boolean().default(false),
   RUNTIME_NETWORK_DOMAIN_ALLOWLIST: z.string().default(""),
   RUNTIME_CREDENTIAL_SCOPE_MAP: z.string().default(""),
+  RUNTIME_ENABLE_REMOTE_DOCKER: z.coerce.boolean().default(true),
   RUNTIME_ENABLE_LOCAL_DOCKER: z.coerce.boolean().default(false),
   RUNTIME_LOCAL_DOCKER_IMAGE: z.string().trim().min(1).default("node:20-alpine"),
   RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES: z.string().default(""),

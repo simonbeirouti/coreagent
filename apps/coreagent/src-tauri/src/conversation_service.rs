@@ -206,6 +206,7 @@ impl ConversationService {
         conversation_id: String,
         content: String,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<MessageData, String> {
         let conversation_id = Uuid::parse_str(&conversation_id)
@@ -318,6 +319,7 @@ impl ConversationService {
             final_prompt,
             history,
             image_base64,
+            access_token,
             ai_client,
         )
         .await?;
@@ -368,6 +370,7 @@ impl ConversationService {
         conversation_id: String,
         content: String,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         on_event: crate::ai_client::Channel<crate::ai_client::StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<MessageData, String> {
@@ -481,6 +484,7 @@ impl ConversationService {
             final_prompt,
             history,
             image_base64,
+            access_token,
             on_event,
             ai_client,
         )
@@ -705,6 +709,7 @@ impl ConversationService {
         message_id: String,
         new_content: String,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<(MessageData, MessageData), String> {
         let message_id =
@@ -832,6 +837,7 @@ impl ConversationService {
             final_prompt,
             history,
             image_base64,
+            access_token,
             ai_client,
         )
         .await?;
@@ -889,6 +895,7 @@ impl ConversationService {
         message_id: String,
         new_content: String,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         on_event: crate::ai_client::Channel<crate::ai_client::StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<(MessageData, MessageData), String> {
@@ -1014,6 +1021,7 @@ impl ConversationService {
             final_prompt,
             history,
             image_base64,
+            access_token,
             on_event,
             ai_client,
         )
