@@ -101,3 +101,9 @@ pnpm build
 5. Verify runtime results:
    - `GET /v1/runtime/runs/:runId` reaches `succeeded`
    - `GET /v1/runtime/runs/:runId/events` includes streamed `log` events
+6. Run automated parity verification:
+   - Ensure env toggles are set:
+     - `apps/server/.env`: `ENABLE_RUNTIME_QUEUE=true`
+     - `apps/runner/.env`: `RUNTIME_ENABLE_REMOTE_DOCKER=true` and `RUNTIME_ENABLE_LOCAL_DOCKER=true`
+   - Run:
+     - `pnpm --filter server verify:runtime-modes -- --authToken "<jwt-token>" --skillId "coreagent.rs.regex_advisor" --version "1.0.0" --input '{"text":"foo-123"}'`

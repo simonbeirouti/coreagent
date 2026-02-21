@@ -596,7 +596,10 @@ function AgentChatPage() {
   const prevToolRunsSignalRef = useRef<string>('');
 
   // Compute visible thread based on branch selections
-  const visibleMessages = messages ? resolveVisibleThread(messages, branchSelections) : [];
+  const visibleMessages = useMemo(
+    () => (messages ? resolveVisibleThread(messages, branchSelections) : []),
+    [messages, branchSelections]
+  );
   const displayMessages = useMemo(
     () =>
       visibleMessages.filter(
@@ -625,7 +628,10 @@ function AgentChatPage() {
     });
     return [...hydratedRuns, ...directToolRuns];
   }, [persistedToolRuns, directToolRuns]);
-  const branchInfoMap = messages ? getBranchInfo(messages, branchSelections) : new Map<string, BranchInfo>();
+  const branchInfoMap = useMemo(
+    () => (messages ? getBranchInfo(messages, branchSelections) : new Map<string, BranchInfo>()),
+    [messages, branchSelections]
+  );
   const chatTimelineItems = useMemo(() => {
     const messageItems = displayMessages.map((message, index) => ({
       kind: 'message' as const,
@@ -1302,6 +1308,197 @@ function AgentChatPage() {
     setBranchSelections(prev => selectBranch(prev, parentId, newIndex));
   }, []);
 
+  const renderedTimelineItems = useMemo(
+    () =>
+      chatTimelineItems.map((item) => {
+        if (item.kind === 'run') {
+          return (
+            <div key={item.id} className="flex min-w-0 justify-start">
+              <DirectToolRunCard run={item.run} />
+            </div>
+          );
+        }
+
+        const message = item.message;
+        const branchInfo = branchInfoMap.get(message.id);
+        const isEditing = editingMessageId === message.id;
+        const isUserMessage = message.role === 'user';
+
+        return (
+          <div key={item.id} className="group min-w-0">
+            <div
+              className={cn(
+                "flex min-w-0",
+                isUserMessage ? 'justify-end' : 'justify-start'
+              )}
+            >
+              <div className="relative min-w-0 max-w-[80%]">
+                {/* Hover dropdown menu */}
+                <div className={cn(
+                  "absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100"
+                )}>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-6 w-6">
+                        <MoreHorizontal className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align={isUserMessage ? "end" : "start"}>
+                      {isUserMessage && (
+                        <DropdownMenuItem onClick={() => handleStartEdit(message)}>
+                          <Pencil className="h-4 w-4 mr-2" />
+                          Edit
+                        </DropdownMenuItem>
+                      )}
+                      {message.role === 'assistant' && userId ? (
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            Feedback
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent className="w-52">
+                            <MessageFeedback
+                              agentId={agentId}
+                              conversationId={activeConversationId || ''}
+                              messageId={message.id}
+                              userId={userId}
+                              selected={feedbackByMessage[message.id]}
+                              mode="menu"
+                            />
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
+                      ) : null}
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={() => setDeleteConfirmMessageId(message.id)}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+
+                <Card
+                  className={cn(
+                    "min-w-0 overflow-hidden p-0",
+                    isUserMessage
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted'
+                  )}
+                >
+                  <CardContent className="min-w-0 p-3 pr-10">
+                    {isEditing ? (
+                      /* Inline edit mode */
+                      <div className="space-y-2">
+                        <Textarea
+                          value={editContent}
+                          onChange={(e) => setEditContent(e.target.value)}
+                          className="min-h-[60px] text-sm bg-background text-foreground"
+                          placeholder="Edit your message..."
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') {
+                              handleCancelEdit();
+                            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                              handleConfirmEdit();
+                            }
+                          }}
+                        />
+                        <div className="flex gap-1 justify-end">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={handleCancelEdit}
+                            className="h-7 text-xs"
+                          >
+                            <X className="h-3 w-3 mr-1" />
+                            Cancel
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={handleConfirmEdit}
+                            disabled={!editContent.trim() || editMessageStreaming.isStreaming}
+                            className="h-7 text-xs"
+                          >
+                            {editMessageStreaming.isStreaming ? (
+                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            ) : (
+                              <Check className="h-3 w-3 mr-1" />
+                            )}
+                            Save
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Render screenshot if present */}
+                        <MessageImage content={message.content} />
+                        {/* Render text content */}
+                        {getTextContent(message.content) && (
+                          <MarkdownContent
+                            content={getTextContent(message.content)}
+                            className="min-w-0 max-w-full overflow-x-auto"
+                          />
+                        )}
+                        <div className="text-xs opacity-70 mt-2">
+                          {new Date(message.created_at).toLocaleTimeString()}
+                        </div>
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Branch navigation arrows */}
+                {branchInfo && branchInfo.siblingCount > 1 && (
+                  <div className={cn(
+                    "flex items-center gap-1 mt-1",
+                    isUserMessage ? "justify-end" : "justify-start"
+                  )}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5"
+                      disabled={branchInfo.currentIndex === 0}
+                      onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex - 1)}
+                    >
+                      <ChevronLeft className="h-3 w-3" />
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {branchInfo.currentIndex + 1}/{branchInfo.siblingCount}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5"
+                      disabled={branchInfo.currentIndex === branchInfo.siblingCount - 1}
+                      onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex + 1)}
+                    >
+                      <ChevronRight className="h-3 w-3" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }),
+    [
+      chatTimelineItems,
+      branchInfoMap,
+      editingMessageId,
+      handleStartEdit,
+      userId,
+      agentId,
+      activeConversationId,
+      feedbackByMessage,
+      editContent,
+      editMessageStreaming.isStreaming,
+      handleCancelEdit,
+      handleConfirmEdit,
+      handleBranchNavigate,
+    ]
+  );
+
   if (agentLoading || conversationsLoading) {
     return (
       <div className="flex h-full overflow-hidden">
@@ -1444,177 +1641,7 @@ function AgentChatPage() {
           ) : ((chatTimelineItems.length > 0) || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) ? (
             <ScrollArea className="h-full w-full">
               <div className="w-full min-w-0 space-y-4 px-4 pb-4 pt-4">
-                {chatTimelineItems.map((item) => {
-                  if (item.kind === 'run') {
-                    return (
-                      <div key={item.id} className="flex min-w-0 justify-start">
-                        <DirectToolRunCard run={item.run} />
-                      </div>
-                    );
-                  }
-                  const message = item.message;
-                  const branchInfo = branchInfoMap.get(message.id);
-                  const isEditing = editingMessageId === message.id;
-                  const isUserMessage = message.role === 'user';
-
-                  return (
-                    <div key={item.id} className="group min-w-0">
-                      <div
-                        className={cn(
-                          "flex min-w-0",
-                          isUserMessage ? 'justify-end' : 'justify-start'
-                        )}
-                      >
-                        <div className="relative min-w-0 max-w-[80%]">
-                          {/* Hover dropdown menu */}
-                          <div className={cn(
-                            "absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100"
-                          )}>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-6 w-6">
-                                  <MoreHorizontal className="h-3 w-3" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align={isUserMessage ? "end" : "start"}>
-                                {isUserMessage && (
-                                  <DropdownMenuItem onClick={() => handleStartEdit(message)}>
-                                    <Pencil className="h-4 w-4 mr-2" />
-                                    Edit
-                                  </DropdownMenuItem>
-                                )}
-                                {message.role === 'assistant' && userId ? (
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger>
-                                      Feedback
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent className="w-52">
-                                      <MessageFeedback
-                                        agentId={agentId}
-                                        conversationId={activeConversationId || ''}
-                                        messageId={message.id}
-                                        userId={userId}
-                                        selected={feedbackByMessage[message.id]}
-                                        mode="menu"
-                                      />
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
-                                ) : null}
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onClick={() => setDeleteConfirmMessageId(message.id)}
-                                >
-                                  <Trash2 className="h-4 w-4 mr-2" />
-                                  Delete
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-
-                          <Card
-                            className={cn(
-                              "min-w-0 overflow-hidden p-0",
-                              isUserMessage
-                                ? 'bg-primary text-primary-foreground'
-                                : 'bg-muted'
-                            )}
-                          >
-                            <CardContent className="min-w-0 p-3 pr-10">
-                              {isEditing ? (
-                                /* Inline edit mode */
-                                <div className="space-y-2">
-                                  <Textarea
-                                    value={editContent}
-                                    onChange={(e) => setEditContent(e.target.value)}
-                                    className="min-h-[60px] text-sm bg-background text-foreground"
-                                    placeholder="Edit your message..."
-                                    autoFocus
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Escape') {
-                                        handleCancelEdit();
-                                      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                                        handleConfirmEdit();
-                                      }
-                                    }}
-                                  />
-                                  <div className="flex gap-1 justify-end">
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      onClick={handleCancelEdit}
-                                      className="h-7 text-xs"
-                                    >
-                                      <X className="h-3 w-3 mr-1" />
-                                      Cancel
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      onClick={handleConfirmEdit}
-                                      disabled={!editContent.trim() || editMessageStreaming.isStreaming}
-                                      className="h-7 text-xs"
-                                    >
-                                      {editMessageStreaming.isStreaming ? (
-                                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                      ) : (
-                                        <Check className="h-3 w-3 mr-1" />
-                                      )}
-                                      Save
-                                    </Button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <>
-                                  {/* Render screenshot if present */}
-                                  <MessageImage content={message.content} />
-                                  {/* Render text content */}
-                                  {getTextContent(message.content) && (
-                                    <MarkdownContent
-                                      content={getTextContent(message.content)}
-                                      className="min-w-0 max-w-full overflow-x-auto"
-                                    />
-                                  )}
-                                  <div className="text-xs opacity-70 mt-2">
-                                    {new Date(message.created_at).toLocaleTimeString()}
-                                  </div>
-                                </>
-                              )}
-                            </CardContent>
-                          </Card>
-
-                          {/* Branch navigation arrows */}
-                          {branchInfo && branchInfo.siblingCount > 1 && (
-                            <div className={cn(
-                              "flex items-center gap-1 mt-1",
-                              isUserMessage ? "justify-end" : "justify-start"
-                            )}>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-5 w-5"
-                                disabled={branchInfo.currentIndex === 0}
-                                onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex - 1)}
-                              >
-                                <ChevronLeft className="h-3 w-3" />
-                              </Button>
-                              <span className="text-xs text-muted-foreground">
-                                {branchInfo.currentIndex + 1}/{branchInfo.siblingCount}
-                              </span>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-5 w-5"
-                                disabled={branchInfo.currentIndex === branchInfo.siblingCount - 1}
-                                onClick={() => handleBranchNavigate(branchInfo.parentId, branchInfo.currentIndex + 1)}
-                              >
-                                <ChevronRight className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                {renderedTimelineItems}
                 {/* Streaming message display for edit */}
                 {editMessageStreaming.isStreaming && editMessageStreaming.streamingContent && (
                   <div className="flex justify-start">
@@ -1662,7 +1689,7 @@ function AgentChatPage() {
               </div>
             </ScrollArea>
           ) : (
-            <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+            <div className="flex h-full w-full flex-1 flex-col items-center justify-center text-center text-muted-foreground">
               <MessageSquare className="h-12 w-12 mb-4 opacity-50" />
               <p className="text-lg font-medium">Start a conversation</p>
               <p className="text-sm">Send a message to chat with {agent.name}</p>

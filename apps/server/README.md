@@ -112,3 +112,28 @@ pnpm --filter server check-types
 pnpm --filter server validate:migrations
 pnpm --filter server check:ci
 ```
+
+## Runtime Mode Parity Verification
+
+Use this to validate that `remote` and `local_docker` execution produce equivalent outcomes for the same skill input.
+
+Preflight:
+- Server env: `ENABLE_RUNTIME_QUEUE=true`
+- Runner env: `RUNTIME_ENABLE_REMOTE_DOCKER=true` and `RUNTIME_ENABLE_LOCAL_DOCKER=true`
+- Docker daemon is reachable on the runner host and required runtime images are available/pullable.
+
+Run from repo root:
+
+```bash
+pnpm --filter server verify:runtime-modes -- \
+  --authToken "<jwt-token>" \
+  --skillId "coreagent.rs.regex_advisor" \
+  --version "1.0.0" \
+  --input '{"text":"foo-123"}'
+```
+
+Pass criteria:
+- Both runs reach `succeeded`
+- No runtime `error` payloads
+- Output schema/shape parity
+- Event lifecycle/log parity checks succeed

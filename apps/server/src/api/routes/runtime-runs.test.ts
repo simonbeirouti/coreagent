@@ -196,6 +196,73 @@ describe("runtime run routes", () => {
     });
   });
 
+  it("keeps create-run contract consistent between remote and local_docker", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const payload = {
+      skillId: "coreagent.repo.search",
+      version: "1.0.0",
+      timeoutSeconds: 90,
+      input: {
+        query: "parity-check"
+      }
+    };
+
+    const [remoteResponse, localResponse] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/v1/runtime/runs",
+        headers: authHeader(),
+        payload: {
+          ...payload,
+          executionMode: "remote"
+        }
+      }),
+      app.inject({
+        method: "POST",
+        url: "/v1/runtime/runs",
+        headers: authHeader(),
+        payload: {
+          ...payload,
+          executionMode: "local_docker"
+        }
+      })
+    ]);
+
+    expect(remoteResponse.statusCode).toBe(201);
+    expect(localResponse.statusCode).toBe(201);
+
+    const remoteBody = remoteResponse.json() as {
+      data: {
+        runId: string;
+        skillId: string;
+        version: string;
+        status: string;
+        executionMode: string;
+        timeoutSeconds: number;
+        input: Record<string, unknown>;
+        output: Record<string, unknown> | null;
+        error: { code: string; message: string } | null;
+      };
+    };
+    const localBody = localResponse.json() as typeof remoteBody;
+
+    expect(remoteBody.data.runId).not.toEqual(localBody.data.runId);
+    expect(remoteBody.data.skillId).toBe(localBody.data.skillId);
+    expect(remoteBody.data.version).toBe(localBody.data.version);
+    expect(remoteBody.data.status).toBe("queued");
+    expect(localBody.data.status).toBe("queued");
+    expect(remoteBody.data.executionMode).toBe("remote");
+    expect(localBody.data.executionMode).toBe("local_docker");
+    expect(remoteBody.data.timeoutSeconds).toBe(localBody.data.timeoutSeconds);
+    expect(remoteBody.data.input).toEqual(localBody.data.input);
+    expect(remoteBody.data.output).toBeNull();
+    expect(localBody.data.output).toBeNull();
+    expect(remoteBody.data.error).toBeNull();
+    expect(localBody.data.error).toBeNull();
+  });
+
   it("rejects unsupported execution mode values", async () => {
     const app = buildApp(testEnv);
     appsToClose.push(app);
