@@ -69,7 +69,7 @@ describe("runtime seed manifests", () => {
     expect(manifest.permissions?.map((item) => item.permissionKey)).toContain("process.exec");
 
     const script = await loadArtifactScript(manifest.artifactPath as string);
-    expect(script).toContain('cargo +"$RUSTUP_TOOLCHAIN" run');
+    expect(script).toContain("cargo run --quiet --manifest-path");
     expect(script).toContain("\"matchCount\"");
     expect(script).toContain("\"advisory\"");
   });

@@ -446,8 +446,8 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
     run.status === 'running' ? 'Running' : run.status.replace(/_/g, ' ');
 
   return (
-    <Card className="min-w-1/2 p-0 bg-muted border-border/80">
-      <CardContent className="p-3">
+    <Card className="w-full min-w-0 max-w-[80%] overflow-hidden border-border/80 bg-muted p-0">
+      <CardContent className="min-w-0 p-3">
         <Accordion type="single" collapsible>
           <AccordionItem value={`run-${run.clientRunId}`} className="border-b-0">
             <AccordionTrigger className="py-1 hover:no-underline">
@@ -466,7 +466,7 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                 ) : null}
               </div>
             </AccordionTrigger>
-            <AccordionContent className="pt-1">
+            <AccordionContent className="min-w-0 pt-1">
               <div className="space-y-2">
                 {run.executionMode ? (
                   <div className="text-xs text-muted-foreground">
@@ -481,7 +481,7 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                 <div className="space-y-1.5 rounded-md border bg-background p-2">
                   {run.timeline.length > 0 ? (
                     run.timeline.map((entry) => (
-                      <div key={entry.id} className="text-xs">
+                      <div key={entry.id} className="text-xs break-words">
                         <span
                           className={cn(
                             'mr-2 font-medium',
@@ -504,7 +504,7 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                 {run.output ? (
                   <div className="space-y-1">
                     <div className="text-xs font-medium">Output</div>
-                    <pre className="max-h-48 overflow-auto rounded-md border bg-background p-2 text-[11px]">
+                    <pre className="max-h-48 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 text-[11px]">
                       {JSON.stringify(run.output, null, 2)}
                     </pre>
                   </div>
@@ -512,7 +512,7 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                 {run.error ? (
                   <div className="space-y-1">
                     <div className="text-xs font-medium text-destructive">Error</div>
-                    <pre className="max-h-56 overflow-auto rounded-md border border-destructive/40 bg-background p-2 text-[11px]">
+                    <pre className="max-h-56 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/40 bg-background p-2 text-[11px]">
                       {JSON.stringify(run.error, null, 2)}
                     </pre>
                   </div>
@@ -1346,9 +1346,9 @@ function AgentChatPage() {
   }
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex h-full min-h-0 w-full overflow-hidden">
       {/* History Sidebar - Always visible */}
-      <div className="w-64 border-r bg-background flex flex-col h-full">
+      <div className="flex h-full min-h-0 w-64 shrink-0 flex-col overflow-hidden border-r bg-background">
         <div className="p-2 border-b shrink-0">
           <Button
             onClick={handleStartNewConversation}
@@ -1361,7 +1361,7 @@ function AgentChatPage() {
           </Button>
         </div>
         <div className="p-2 flex flex-col flex-1 min-h-0">
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1 min-h-0">
             <div className="space-y-1">
               {conversations && conversations.length > 0 ? (
                 conversations.map((conv) => (
@@ -1427,9 +1427,9 @@ function AgentChatPage() {
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {/* Messages */}
-        <div className="flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
           {activeConversationId && messagesLoading ? (
             /* Loading skeleton when messages are being fetched */
             <div className="space-y-4 pt-4 px-4">
@@ -1442,12 +1442,12 @@ function AgentChatPage() {
               ))}
             </div>
           ) : ((chatTimelineItems.length > 0) || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) ? (
-            <ScrollArea className="h-full">
-              <div className="space-y-4 px-4 pt-4">
+            <ScrollArea className="h-full w-full">
+              <div className="w-full min-w-0 space-y-4 px-4 pb-4 pt-4">
                 {chatTimelineItems.map((item) => {
                   if (item.kind === 'run') {
                     return (
-                      <div key={item.id} className="flex justify-start">
+                      <div key={item.id} className="flex min-w-0 justify-start">
                         <DirectToolRunCard run={item.run} />
                       </div>
                     );
@@ -1458,18 +1458,17 @@ function AgentChatPage() {
                   const isUserMessage = message.role === 'user';
 
                   return (
-                    <div key={item.id} className="group">
+                    <div key={item.id} className="group min-w-0">
                       <div
                         className={cn(
-                          "flex",
+                          "flex min-w-0",
                           isUserMessage ? 'justify-end' : 'justify-start'
                         )}
                       >
-                        <div className="relative max-w-[80%]">
+                        <div className="relative min-w-0 max-w-[80%]">
                           {/* Hover dropdown menu */}
                           <div className={cn(
-                            "absolute top-1 opacity-0 group-hover:opacity-100 transition-opacity z-10",
-                            isUserMessage ? "left-0 -translate-x-full pr-1" : "right-0 translate-x-full pl-1"
+                            "absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100"
                           )}>
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
@@ -1514,13 +1513,13 @@ function AgentChatPage() {
 
                           <Card
                             className={cn(
-                              "p-0",
+                              "min-w-0 overflow-hidden p-0",
                               isUserMessage
                                 ? 'bg-primary text-primary-foreground'
                                 : 'bg-muted'
                             )}
                           >
-                            <CardContent className="p-3">
+                            <CardContent className="min-w-0 p-3 pr-10">
                               {isEditing ? (
                                 /* Inline edit mode */
                                 <div className="space-y-2">
@@ -1569,7 +1568,10 @@ function AgentChatPage() {
                                   <MessageImage content={message.content} />
                                   {/* Render text content */}
                                   {getTextContent(message.content) && (
-                                    <MarkdownContent content={getTextContent(message.content)} />
+                                    <MarkdownContent
+                                      content={getTextContent(message.content)}
+                                      className="min-w-0 max-w-full overflow-x-auto"
+                                    />
                                   )}
                                   <div className="text-xs opacity-70 mt-2">
                                     {new Date(message.created_at).toLocaleTimeString()}
@@ -1616,9 +1618,12 @@ function AgentChatPage() {
                 {/* Streaming message display for edit */}
                 {editMessageStreaming.isStreaming && editMessageStreaming.streamingContent && (
                   <div className="flex justify-start">
-                    <Card className="max-w-[80%] p-0 bg-muted">
-                      <CardContent className="p-3">
-                        <MarkdownContent content={editMessageStreaming.streamingContent} />
+                    <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                      <CardContent className="min-w-0 p-3">
+                        <MarkdownContent
+                          content={editMessageStreaming.streamingContent}
+                          className="min-w-0 max-w-full overflow-x-auto"
+                        />
                         <div className="flex items-center gap-2 mt-2">
                           <Loader2 className="h-3 w-3 animate-spin" />
                           <span className="text-xs opacity-70">AI is responding...</span>
@@ -1630,10 +1635,13 @@ function AgentChatPage() {
                 {/* Streaming message display for new message */}
                 {sendMessageStreaming.isStreaming && (
                   <div className="flex justify-start">
-                    <Card className="max-w-[80%] p-0 bg-muted">
-                      <CardContent className="p-3">
+                    <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                      <CardContent className="min-w-0 p-3">
                         {sendMessageStreaming.streamingContent ? (
-                          <MarkdownContent content={sendMessageStreaming.streamingContent} />
+                          <MarkdownContent
+                            content={sendMessageStreaming.streamingContent}
+                            className="min-w-0 max-w-full overflow-x-auto"
+                          />
                         ) : (
                           <div className="flex items-center gap-2">
                             <Loader2 className="h-3 w-3 animate-spin" />
@@ -1664,9 +1672,9 @@ function AgentChatPage() {
 
         {/* Message Input - Show when we have an active conversation or are composing a new one */}
         {(activeConversationId || isComposingNewConversation) && (
-          <div className="border-t p-4 shrink-0 bg-background">
+          <div className="shrink-0 border-t bg-background p-4">
             {showSlashCommands && filteredSlashCommands.length > 0 && (
-              <div className="mx-auto mb-3 max-h-40 overflow-auto">
+              <div className="mb-3 max-h-40 w-full overflow-auto">
                 {filteredSlashCommands.map((command) => (
                   <button
                     key={command.id}
@@ -1682,7 +1690,7 @@ function AgentChatPage() {
             )}
             {/* Pending Screenshot Preview */}
             {pendingScreenshot && (
-              <div className="mx-auto mb-3 flex items-center gap-2 p-2 bg-muted rounded-md">
+              <div className="mb-3 flex w-full items-center gap-2 rounded-md bg-muted p-2">
                 <div className="relative">
                   <img 
                     src={`data:image/png;base64,${pendingScreenshot.base64}`}
@@ -1706,7 +1714,7 @@ function AgentChatPage() {
             )}
 
             {/* Message Input Row */}
-            <div className="mx-auto flex gap-2">
+            <div className="flex w-full gap-2">
               <MicrophoneButton
                 agentId={agentId}
                 userId={userId}

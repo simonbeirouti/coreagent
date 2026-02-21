@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { RunnerEnv } from "./env.js";
 import {
+  buildContainerEnvironment,
   collectRuntimeDockerImages,
   executeLocalDockerRun,
   executeRemoteDockerRun,
@@ -201,6 +202,23 @@ describe("local docker execution", () => {
     expect(images.filter((image) => image === "python:3.12-alpine")).toHaveLength(1);
     expect(images.filter((image) => image === "rust:1.83-alpine")).toHaveLength(1);
     expect(images).toContain("ghcr.io/acme/custom:1.0.0");
+  });
+
+  it("keeps rust toolchain paths on rust profile", () => {
+    const env = buildContainerEnvironment("rust");
+
+    expect(env).toContain("CARGO_HOME=/tmp/coreagent_cargo_home");
+    expect(env).toContain("RUSTUP_HOME=/usr/local/rustup");
+    expect(env).toContain("RUSTUP_NO_UPDATE_CHECK=1");
+    expect(env.some((entry) => entry.startsWith("RUSTUP_TOOLCHAIN="))).toBe(false);
+  });
+
+  it("does not set rust-specific env for non-rust profiles", () => {
+    const env = buildContainerEnvironment("node");
+
+    expect(env).toContain("CARGO_HOME=/tmp/coreagent_cargo_home");
+    expect(env.some((entry) => entry.startsWith("RUSTUP_HOME="))).toBe(false);
+    expect(env.some((entry) => entry.startsWith("RUSTUP_TOOLCHAIN="))).toBe(false);
   });
 
   it("keeps network enabled for jobs that request network permissions", () => {

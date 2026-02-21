@@ -298,6 +298,23 @@ function parseContainerOutput(rawStdout: string): Record<string, unknown> {
   }
 }
 
+export function buildContainerEnvironment(runtimeProfile: string): string[] {
+  const env = [
+    "PATH=/usr/local/cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "TMPDIR=/tmp",
+    "PIP_CACHE_DIR=/tmp/pip-cache",
+    "XDG_CACHE_HOME=/tmp/.cache",
+    "COREAGENT_TMP_DIR=/tmp",
+    "CARGO_HOME=/tmp/coreagent_cargo_home"
+  ];
+  if (runtimeProfile === "rust") {
+    // Use image-provisioned rustup/toolchains and only keep cargo cache writable in /tmp.
+    env.push("RUSTUP_HOME=/usr/local/rustup");
+    env.push("RUSTUP_NO_UPDATE_CHECK=1");
+  }
+  return env;
+}
+
 function streamByLine(
   source: Readable,
   streamType: "stdout" | "stderr",
@@ -373,17 +390,16 @@ async function executeDockerRun(
     workspace = await prepareArtifactWorkspace(job, env, mode);
     const containerCmd = ["/bin/sh", "-c", workspace.containerEntrypoint];
 
-    const containerEnv = [
-      "PATH=/usr/local/cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-      "TMPDIR=/tmp",
-      "PIP_CACHE_DIR=/tmp/pip-cache",
-      "XDG_CACHE_HOME=/tmp/.cache",
-      "COREAGENT_TMP_DIR=/tmp",
-      "CARGO_HOME=/tmp/coreagent_cargo_home"
-    ];
+    const containerEnv = buildContainerEnvironment(runtimeProfile);
+
+    const tmpfsMounts: Record<string, string> = {
+      "/tmp": "rw,exec,size=268435456",
+      "/var/tmp": "rw,exec,size=268435456",
+      "/root/.cache": "rw,size=134217728"
+    };
     if (runtimeProfile === "rust") {
-      containerEnv.push("RUSTUP_HOME=/tmp/coreagent_rustup_home");
-      containerEnv.push("RUSTUP_TOOLCHAIN=stable");
+      // rustup may still create temp files under $RUSTUP_HOME/tmp even when toolchain is preinstalled.
+      tmpfsMounts["/usr/local/rustup/tmp"] = "rw,size=67108864";
     }
 
     const createOptions: ContainerCreateOptions = {
@@ -397,11 +413,7 @@ async function executeDockerRun(
         AutoRemove: false,
         ReadonlyRootfs: true,
         Binds: [`${workspace.hostWorkdir}:/workspace:ro`],
-        Tmpfs: {
-          "/tmp": "rw,exec,size=268435456",
-          "/var/tmp": "rw,exec,size=268435456",
-          "/root/.cache": "rw,size=134217728"
-        },
+        Tmpfs: tmpfsMounts,
         Memory: env.RUNTIME_LOCAL_DOCKER_MEMORY_MB * 1024 * 1024,
         CpuShares: env.RUNTIME_LOCAL_DOCKER_CPU_SHARES,
         ...(disableNetwork ? { NetworkMode: "none" } : {})

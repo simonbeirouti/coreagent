@@ -127,7 +127,8 @@
 
 @layer components {
   .markdown-content {
-    @apply break-words;
+    @apply min-w-0 max-w-full break-words;
+    overflow-wrap: anywhere;
   }
 
   .markdown-content > *:first-child {
@@ -167,6 +168,10 @@
 
   .markdown-content pre {
     @apply my-2 overflow-x-auto rounded-md bg-background/70 p-3 text-xs;
+  }
+
+  .markdown-content table {
+    @apply my-2 block max-w-full overflow-x-auto border-collapse;
   }
 
   .markdown-content code {
