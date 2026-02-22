@@ -107,6 +107,13 @@ pnpm build
 - Attachment-read capability has been integrated as a core runtime tool.
 - File asset management is unified and reusable across chat and Files route workflows.
 
+## Current Delivery Update (2026-02-23)
+
+- Legacy tool-calling paths are now removed from CoreAgent runtime execution.
+- Provider-native tool calling is now the only supported decision policy in-app.
+- Runtime tool execution is now API/Docker only (`runtime API -> queue -> runner -> Docker`) with no local legacy fallback path.
+- Legacy runtime toggle env vars were removed from `apps/coreagent/.env.example`.
+
 ## Next Validation Steps
 
 1. Start services:
@@ -126,3 +133,8 @@ pnpm build
      - `apps/runner/.env`: `RUNTIME_ENABLE_REMOTE_DOCKER=true` and `RUNTIME_ENABLE_LOCAL_DOCKER=true`
    - Run:
      - `pnpm --filter server verify:runtime-modes -- --authToken "<jwt-token>" --skillId "coreagent.rs.regex_advisor" --version "1.0.0" --input '{"text":"foo-123"}'`
+
+## Backlog Note
+
+- File list/state synchronization still has a known gap when bucket contents are changed directly outside app flows.
+- Backlog item: add direct bucket-to-app sync/reconciliation so Files and chat attachment views reflect bucket truth without requiring app-originated updates.

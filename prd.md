@@ -1,8 +1,8 @@
 # CoreAgent Unified Delivery PRD
 
 ## Document Status
-- Version: 5.7
-- Last Updated: 2026-02-22
+- Version: 5.8
+- Last Updated: 2026-02-23
 - Owner: CoreAgent Product + Platform Engineering
 - Scope: Single source of truth for skills registry, tools/runtime integration, skills graph MVP, and next-iteration orchestration + automation
 
@@ -20,6 +20,17 @@
 - [ ] 1. Re-add email to `user_profile` so product updates/notifications can be sent.
 - [ ] 2. Auto-fallback runtime assignment from `local_docker` to `remote` when device/runtime is unavailable.
 - [ ] 3. Mobile application support to track jobs and message agents.
+- [ ] 4. Add direct bucket-to-app file sync/reconciliation so Files/chat attachment state reflects bucket truth when objects are changed outside app upload/delete flows.
+
+## Status Update (2026-02-23)
+
+### Legacy Tool-Calling Removal Progress
+- Completed now:
+  - Legacy tool decision policies removed; provider-native policy is now the single supported path.
+  - Legacy runtime executor branches removed; runtime tool execution now follows a single API/Docker path.
+  - Legacy attachment-read local fallback path removed; `attachment_read` must resolve through runtime skill mapping.
+  - Legacy runtime env toggles removed from app env examples and runtime behavior docs.
+  - Added runtime module tests to lock provider-native/API-only behavior.
 
 ## Immediate Runtime Todo List
 - [ ] Complete remote runner integration end-to-end (parity with local Docker execution path and diagnostics surface).
