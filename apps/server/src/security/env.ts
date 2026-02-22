@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
@@ -49,11 +50,10 @@ const EnvSchema = z.object({
 export type AppEnv = z.infer<typeof EnvSchema>;
 
 function hydrateEnvFromDotenvFiles(): void {
-  const cwd = process.cwd();
-  const serverEnvPath = resolve(cwd, ".env");
-
-  if (existsSync(serverEnvPath)) {
-    loadDotenv({ path: serverEnvPath, override: false });
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const serviceEnvPath = resolve(moduleDir, "../../.env");
+  if (existsSync(serviceEnvPath)) {
+    loadDotenv({ path: serviceEnvPath, override: false });
   }
 }
 

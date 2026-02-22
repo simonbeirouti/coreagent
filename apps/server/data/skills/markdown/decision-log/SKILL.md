@@ -1,33 +1,38 @@
-# Decision Log Writer
+# Decision Log
 
-## Purpose
-Turn a discussion or analysis into a durable decision record.
+## Decision
+- **Title:** {{decision_title}}
+- **Selected Option:** {{selected_option}}
 
-## Inputs
-- `decision_title`
-- `context`
-- `options_considered`
-- `selected_option`
-- `tradeoffs`
-- `follow_up_checks` (optional)
+## Context
+{{context}}
 
-## Workflow
-1. Capture decision scope and success criteria.
-2. List options with 1-2 pros/cons each.
-3. Record selected option and why it won.
-4. Capture consequences (technical, product, operational).
-5. Define validation checkpoints and rollback criteria.
+{{#if messageContext.userMessage}}
+### User Request Context
+{{messageContext.userMessage}}
+{{/if}}
 
-## Output Format
-- `Decision`
-- `Context`
-- `Options`
-- `Chosen Path`
-- `Tradeoffs`
-- `Validation Plan`
-- `Rollback Trigger`
+## Options Considered
+{{#each options_considered}}
+- {{this}}
+{{/each}}
 
-## Guardrails
-- Keep rationale testable.
-- Avoid vague language like "seems better" without criteria.
-- If evidence is weak, include explicit re-evaluation date.
+## Tradeoffs
+{{#each tradeoffs}}
+- {{this}}
+{{/each}}
+
+## Attachment Evidence
+{{#each attachmentContent}}
+- **{{this.storagePath}}** ({{this.fileType}})
+  - Summary: {{this.summary}}
+  - Excerpt: {{this.contentExcerpt}}
+{{/each}}
+
+## Validation Plan
+{{#each follow_up_checks}}
+- {{this}}
+{{/each}}
+
+## Rollback Trigger
+{{rollback_trigger}}

@@ -162,9 +162,7 @@ CREATE TABLE IF NOT EXISTS skill_publication_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ---------------------------------------------------------------------------
 -- Search/list performance indexes
--- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_skills_status_updated_at
 ON skills(status, updated_at DESC);
 
@@ -220,18 +218,14 @@ WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_skill_publication_events_version_created
 ON skill_publication_events(skill_version_id, created_at DESC);
 
--- ---------------------------------------------------------------------------
 -- Automatic timestamp maintenance
--- ---------------------------------------------------------------------------
 CREATE TRIGGER update_skills_updated_at BEFORE UPDATE ON skills
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_skill_installs_updated_at BEFORE UPDATE ON skill_installs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- ---------------------------------------------------------------------------
 -- Row Level Security (RLS)
--- ---------------------------------------------------------------------------
 ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skill_permissions ENABLE ROW LEVEL SECURITY;
@@ -258,16 +252,14 @@ ON skill_advisories FOR SELECT USING (auth.uid() IS NOT NULL);
 CREATE POLICY "Users can access their skill installs"
 ON skill_installs FOR SELECT USING (user_id = auth.uid());
 
-CREATE POLICY "Users can create their skill installs"
+-- Install mutations are scoped to owner.
+CREATE POLICY "Users can insert their skill installs"
 ON skill_installs FOR INSERT WITH CHECK (user_id = auth.uid());
 
 CREATE POLICY "Users can update their skill installs"
 ON skill_installs FOR UPDATE USING (user_id = auth.uid());
 
-CREATE POLICY "Users can delete their skill installs"
-ON skill_installs FOR DELETE USING (user_id = auth.uid());
-
--- Runtime run/health records are strictly scoped to the owning user.
+-- Runtime run history is scoped to owner.
 CREATE POLICY "Users can access their skill runs"
 ON skill_runs FOR SELECT USING (user_id = auth.uid());
 
@@ -277,11 +269,123 @@ ON skill_runs FOR INSERT WITH CHECK (user_id = auth.uid());
 CREATE POLICY "Users can update their skill runs"
 ON skill_runs FOR UPDATE USING (user_id = auth.uid());
 
+-- Runtime health stream is scoped to owner.
 CREATE POLICY "Users can access their skill health events"
 ON skill_health_events FOR SELECT USING (user_id = auth.uid());
 
 CREATE POLICY "Users can create their skill health events"
 ON skill_health_events FOR INSERT WITH CHECK (user_id = auth.uid());
 
-CREATE POLICY "Users can update their skill health events"
-ON skill_health_events FOR UPDATE USING (user_id = auth.uid());
+-- Publication events are catalog metadata; readable by authenticated users.
+CREATE POLICY "Authenticated users can read publication events"
+ON skill_publication_events FOR SELECT USING (auth.uid() IS NOT NULL);
+
+-- ============================================================================
+-- Runtime Run Events + Status Extension
+-- ============================================================================
+
+-- Expand runtime run status to include "preparing" before "running".
+ALTER TABLE skill_runs DROP CONSTRAINT IF EXISTS skill_runs_status_check;
+ALTER TABLE skill_runs
+  ADD CONSTRAINT skill_runs_status_check
+  CHECK (status IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled'));
+
+-- Structured event stream per run for cursor-based playback.
+CREATE TABLE IF NOT EXISTS skill_run_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  skill_run_id UUID NOT NULL REFERENCES skill_runs(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL CHECK (sequence >= 0),
+  event_type TEXT NOT NULL CHECK (event_type IN ('state_transition', 'log', 'policy_block')),
+  status TEXT CHECK (status IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled')),
+  message TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (skill_run_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_run_events_run_sequence
+ON skill_run_events(skill_run_id, sequence ASC);
+
+CREATE INDEX IF NOT EXISTS idx_skill_run_events_user_created
+ON skill_run_events(user_id, created_at DESC);
+
+ALTER TABLE skill_run_events ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can access their runtime run events"
+ON skill_run_events FOR SELECT USING (user_id = auth.uid());
+
+CREATE POLICY "Users can create their runtime run events"
+ON skill_run_events FOR INSERT WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY "Users can update their runtime run events"
+ON skill_run_events FOR UPDATE USING (user_id = auth.uid());
+
+-- ============================================================================
+-- Runtime Environment Lifecycle + Install State Extension
+-- ============================================================================
+
+-- Expand install lifecycle to include runtime environment readiness states.
+ALTER TABLE skill_installs DROP CONSTRAINT IF EXISTS skill_installs_install_state_check;
+ALTER TABLE skill_installs
+  ADD CONSTRAINT skill_installs_install_state_check
+  CHECK (
+    install_state IN (
+      'pending',
+      'resolving',
+      'building',
+      'ready',
+      'installed',
+      'failed',
+      'disabled',
+      'revoked'
+    )
+  );
+
+-- Immutable runtime environment metadata keyed by skill version digest.
+CREATE TABLE IF NOT EXISTS runtime_environments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  skill_ref_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  skill_version_id UUID NOT NULL REFERENCES skill_versions(id) ON DELETE CASCADE,
+  digest TEXT NOT NULL,
+  image_ref TEXT,
+  readiness_status TEXT NOT NULL
+    CHECK (readiness_status IN ('resolving', 'building', 'ready', 'failed')),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(skill_version_id, digest),
+  CHECK (btrim(digest) <> '')
+);
+
+CREATE TABLE IF NOT EXISTS runtime_environment_builds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  runtime_environment_id UUID NOT NULL REFERENCES runtime_environments(id) ON DELETE CASCADE,
+  build_status TEXT NOT NULL
+    CHECK (build_status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  logs_uri TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_environments_skill_version
+ON runtime_environments(skill_version_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_environments_status
+ON runtime_environments(readiness_status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_environment_builds_env_started
+ON runtime_environment_builds(runtime_environment_id, started_at DESC);
+
+CREATE TRIGGER update_runtime_environments_updated_at BEFORE UPDATE ON runtime_environments
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+ALTER TABLE runtime_environments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runtime_environment_builds ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Authenticated users can read runtime environments"
+ON runtime_environments FOR SELECT USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Authenticated users can read runtime environment builds"
+ON runtime_environment_builds FOR SELECT USING (auth.uid() IS NOT NULL);

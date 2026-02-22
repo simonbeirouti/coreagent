@@ -229,7 +229,7 @@ impl FeedbackService {
         )
     }
 
-    async fn resolve_agent_id_for_message(
+    pub async fn resolve_agent_id_for_message(
         db: &DatabaseConnection,
         message_id: Uuid,
     ) -> Result<Uuid, String> {

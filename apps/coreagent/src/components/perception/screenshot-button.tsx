@@ -26,12 +26,6 @@ export function ScreenshotButton({ agentId, conversationId, onScreenshot, disabl
         conversationId
       });
       onScreenshot(result.image_base64, result.storage_path, result.signed_url);
-
-      if (result.signed_url) {
-        toast.success('Screenshot captured and uploaded');
-      } else {
-        toast.success('Screenshot captured');
-      }
     } catch (error) {
       toast.error('Screenshot failed');
       console.error('Screenshot error:', error);

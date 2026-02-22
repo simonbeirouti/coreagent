@@ -221,7 +221,22 @@ async function parseUserIdFromJwt(token: string, env: AppEnv): Promise<AuthResol
 
     if (jwksUrl) {
       const options = toVerifyOptions(env);
-      payload = await verifyWithJwks(token, jwksUrl, options);
+      try {
+        payload = await verifyWithJwks(token, jwksUrl, options);
+      } catch (jwksError) {
+        // Local dev fallback: if JWKS retrieval/verification fails but a shared secret is configured,
+        // attempt HS256 verification to avoid hard dependency on remote JWKS availability.
+        if (env.JWT_SECRET) {
+          const localVerification = verifyLocallyWithSharedSecret(token, env);
+          if (localVerification.ok) {
+            payload = localVerification.payload;
+          } else {
+            throw jwksError;
+          }
+        } else {
+          throw jwksError;
+        }
+      }
     } else if (env.JWT_SECRET) {
       const localVerification = verifyLocallyWithSharedSecret(token, env);
       if (!localVerification.ok) {

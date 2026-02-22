@@ -41,9 +41,9 @@ function AgentLayout() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Menubar */}
-      <div className="p-4 bg-background shrink-0 -mt-4">
+      <div className="shrink-0 bg-background px-4 pt-0">
 
         <Menubar className="border-b border-border">
           <MenubarMenu>
@@ -103,7 +103,7 @@ function AgentLayout() {
       </div>
 
       {/* Child Routes */}
-      <div className="flex-1 flex flex-col overflow-hidden -mt-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <Outlet />
       </div>
     </div>

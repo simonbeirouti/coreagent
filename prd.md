@@ -1,8 +1,8 @@
 # CoreAgent Unified Delivery PRD
 
 ## Document Status
-- Version: 5.3
-- Last Updated: 2026-02-19
+- Version: 5.8
+- Last Updated: 2026-02-23
 - Owner: CoreAgent Product + Platform Engineering
 - Scope: Single source of truth for skills registry, tools/runtime integration, skills graph MVP, and next-iteration orchestration + automation
 
@@ -15,6 +15,137 @@
 - [ ] 6. Complete release gates (observability metrics, handshake/broker unit tests, lifecycle integration tests, resilience/security checks).
 - [ ] 7. Deliver skills graph MVP and week-1 usability items.
 - [x] Foundation complete and decisions resolved (registry baseline, handshake gates, research decisions for creation flow and runtime model).
+
+## Backlog Checklist
+- [ ] 1. Re-add email to `user_profile` so product updates/notifications can be sent.
+- [ ] 2. Auto-fallback runtime assignment from `local_docker` to `remote` when device/runtime is unavailable.
+- [ ] 3. Mobile application support to track jobs and message agents.
+- [ ] 4. Add direct bucket-to-app file sync/reconciliation so Files/chat attachment state reflects bucket truth when objects are changed outside app upload/delete flows.
+
+## Status Update (2026-02-23)
+
+### Legacy Tool-Calling Removal Progress
+- Completed now:
+  - Legacy tool decision policies removed; provider-native policy is now the single supported path.
+  - Legacy runtime executor branches removed; runtime tool execution now follows a single API/Docker path.
+  - Legacy attachment-read local fallback path removed; `attachment_read` must resolve through runtime skill mapping.
+  - Legacy runtime env toggles removed from app env examples and runtime behavior docs.
+  - Added runtime module tests to lock provider-native/API-only behavior.
+
+## Immediate Runtime Todo List
+- [ ] Complete remote runner integration end-to-end (parity with local Docker execution path and diagnostics surface).
+- [ ] Improve tool invocation UX/functionality:
+  - derive the correct tool from user message intent more reliably
+  - ensure user text submitted with a tool call is included in the final tool output/context
+- [ ] Add automatic fallback to `remote` execution whenever local runtime is unavailable/not found.
+
+## Status Update (2026-02-22)
+
+### Attachment Files + Core Tool Progress
+- Completed now:
+  - User file library flow shipped with shared storage bucket model (`user-files`) and user-scoped access policy.
+  - Chat + Files route integration shipped:
+    - Upload from chat attach control.
+    - Upload/manage from dedicated Files route.
+    - Shared visibility both directions (chat uploads visible on Files page and vice versa).
+  - Reusable file browser/list/filter UI added and reused across page/dialog contexts.
+  - Attachment lifecycle enhancements shipped:
+    - delete support
+    - responsive container-based file card grid
+    - mobile-friendly icon-first actions
+  - Attachment behavior hardening shipped:
+    - files are attached by marker reference, not automatically inlined into prompt context
+    - model reads attachment content only through tool path
+  - Core runtime tool shipped: `attachment_read` (enabled as core).
+    - parses chat attachment markers (`[File:path:...|name:...|type:...]`)
+    - reads `txt/csv/pdf/doc`
+    - summarizes image attachments (`png/jpg/jpeg/gif/webp`) via vision path
+    - enforces guardrails (max files/bytes/chars) and structured fallback errors
+  - Runtime mode validation completed in active development flow:
+    - local tool execution path works repeatedly
+    - remote tool execution path works repeatedly
+  - Docker isolation is now the standard security boundary for tool execution paths.
+
+## Status Update (2026-02-20)
+
+### Runtime Platform Progress
+- Completed now:
+  - Database reset + migration apply completed:
+    - `supabase/01_coreagent_foundation.sql`
+    - `supabase/02_backend_runtime_env_events.sql`
+  - Seed runs completed successfully:
+    - `apps/coreagent/scripts/seed-test-data.ts`
+    - `apps/server/scripts/seed-open-skills.mjs`
+  - Runtime package-install test skill published path prepared:
+    - `coreagent.py.deep_analysis` (runtime `numpy` install path)
+  - Runtime execution API surface shipped in `apps/server`:
+    - `POST /v1/runtime/runs`
+    - `GET /v1/runtime/runs/:runId`
+    - `GET /v1/runtime/runs/:runId/events`
+    - `POST /v1/runtime/runs/:runId/cancel`
+  - Runner service scaffold shipped in `apps/runner` (BullMQ worker + Redis connection + queue consumption skeleton).
+  - Shared runtime contracts package created in `packages/runtime-contracts`.
+  - Run persistence implemented in Postgres (`skill_runs`) with runtime event stream table migration (`skill_run_events` via `supabase/backend_runtime_env_events.sql`).
+  - Queue/Redis operational diagnostics added:
+    - queue health integrated into `/ready` and `/diagnostics`
+    - dedicated `GET /v1/runtime/health` with stale-run visibility
+  - Retry/backoff controls added for queue jobs (`RUNTIME_RUN_MAX_ATTEMPTS`, `RUNTIME_RUN_RETRY_BACKOFF_MS`).
+  - Queue-depth autoscaling recommendation added to runtime queue health:
+    - `RUNTIME_AUTOSCALE_MIN_REPLICAS`
+    - `RUNTIME_AUTOSCALE_MAX_REPLICAS`
+    - `RUNTIME_AUTOSCALE_TARGET_CONCURRENCY_PER_REPLICA`
+  - Local Docker execution path now runs skill artifacts in containerized workspace (no placeholder command path).
+  - Runner-to-server live log streaming added via queue progress events into `skill_run_events`.
+  - CoreAgent settings runtime integration shipped:
+    - runtime mode selector (`remote` / `local_docker`) with inline health status
+    - profile persistence for runtime execution mode and local image preference
+    - local Docker preflight + pre-pull flow via Tauri runtime commands
+    - local mode failure remediation (`Open docker in background`) with auto-fallback to remote
+  - Runner runtime image selection hardened:
+    - canonical language profile mapping (`node`, `python`, `rust`) with alias normalization (`js/javascript`, `py`, `rs`)
+    - pre-pull warmup dedupe so aliases do not trigger extra language image pulls
+  - CoreAgent chat runtime timeline hardening:
+    - direct tool progress/event dedupe and stable sequence ordering
+    - direct tool cards rendered inline in conversation timeline order
+    - tool run auto-scroll while live progress is appended
+    - reload hydration of tool run accordions from persisted direct-tool context
+    - internal direct-tool context payload hidden from user-visible chat bubbles
+
+- In progress:
+  - Remote execution parity and CoreAgent run diagnostics panel are pending final completion.
+
+### Remaining Tasks (By Priority)
+1. Execution runtime platform:
+   - Remaining:
+     - scoped credential source abstraction beyond env-backed mapping (vault/DB-backed broker)
+     - remote execution path parity with artifact/container contract
+2. CoreAgent runtime integration closure:
+   - Remaining:
+     - pass selected runtime mode through run creation path in CoreAgent runtime invocation
+     - add in-app run diagnostics view for state + `skill_run_events` logs
+3. Runtime and sync hardening:
+   - Remaining:
+     - startup skills bootstrap + richer diagnostics state
+     - production advisory sync policy implementation (checkpoint/retry cadence)
+     - degraded mode stale-policy enforcement (`2m` soft / `10m` hard)
+     - stronger handshake cache/invalidation
+4. Skill creation flow quality:
+   - Remaining in full (authoring kit, dual-lane UX completion, permission profiles, trust workflow).
+5. Skills interaction completeness:
+   - Remaining:
+     - richer failure state UX
+     - registry diagnostics panel in app
+6. Orchestration capability controls:
+   - Remaining in full.
+7. Test and release gates:
+   - Partially progressed; still remaining:
+     - targeted runtime tests added:
+       - frontend: runtime status mapping (`apps/coreagent/src/routes/runtime-status.test.ts`)
+       - backend: credential broker scope extraction/dedup (`apps/runner/src/credential-broker.test.ts`)
+     - expanded observability metrics
+     - full lifecycle + resilience + security suites
+8. Skills graph MVP:
+   - Remaining in full.
 
 ## Executive Summary
 CoreAgent now has:
@@ -174,15 +305,43 @@ Ship a production-ready, editable skill graph surface that:
 This checklist is the detailed tracker and is ordered by importance and implementation sequence.
 
 ### 1. Execution Runtime Platform (Skill Environments + Runners)
-- [ ] Add unified execution API for registry-managed tools (enqueue run, stream events/logs, resolve output, cancel).
-- [ ] Add runtime environment builder keyed by `(skill_id, version, digest)` and immutable image metadata.
-- [ ] Extend install lifecycle/state model to include environment readiness (`resolving`, `building`, `ready`, `failed`).
-- [ ] Add remote runner service for mobile-default execution with autoscaling by queue depth/concurrency.
-- [ ] Add desktop local Docker runner mode (`local_docker`) using the same execution API contract.
-- [ ] Add permission broker enforcement at run-time for `network`, `filesystem`, `browser`, and `process`.
-- [ ] Add scoped credential broker (no raw environment secret passthrough into skill containers).
-- [ ] Record structured per-run audit telemetry in `skill_runs` and health transitions in `skill_health_events`.
-- [ ] Add operational controls: run timeout, retries/backoff, stuck-run reaper, and kill semantics.
+- [x] Add unified execution API for registry-managed tools (enqueue run, stream events/logs, resolve output, cancel).
+- [x] Add runtime environment builder keyed by `(skill_id, version, digest)` and immutable image metadata.
+- [x] Extend install lifecycle/state model to include environment readiness (`resolving`, `building`, `ready`, `failed`).
+- [x] Add remote runner service for mobile-default execution with autoscaling by queue depth/concurrency.
+- [x] Add desktop local Docker runner mode (`local_docker`) using the same execution API contract.
+- [x] Replace local Docker placeholder command path with artifact/container execution path.
+- [x] Stream runner container logs into `skill_run_events` for live runtime event consumption.
+- [x] Add permission broker enforcement at run-time for `network`, `filesystem`, `browser`, and `process`.
+- [x] Add scoped credential broker (no raw environment secret passthrough into skill containers).
+- [x] Record structured per-run audit telemetry in `skill_runs` and health transitions in `skill_health_events`.
+- [x] Add operational controls: run timeout, retries/backoff, stuck-run reaper, and kill semantics.
+
+### 1A. CoreAgent Runtime Integration + Validation (Local/Remote)
+- [x] Add CoreAgent runtime mode selector in onboarding/settings (`remote` vs `local_docker`).
+- [x] Persist runtime mode preference in CoreAgent profile/config.
+- [x] Add local Docker preflight command in CoreAgent (Docker installed + daemon reachable).
+- [x] Add local Docker pre-pull command in CoreAgent for configured runtime image.
+- [x] Block local mode selection and show remediation guidance when preflight/pre-pull fails.
+- [ ] Route selected runtime mode into runtime run creation path from CoreAgent.
+- [ ] Add CoreAgent runtime run panel to show run status + streamed `skill_run_events` logs.
+- [x] Execute and record local execution validation:
+  - choose `local_docker` mode in CoreAgent
+  - run a registry skill with local mode
+  - verify run reaches `succeeded`
+  - verify streamed `log` events appear in run events feed
+- [x] Execute and record remote execution validation:
+  - choose `remote` mode in CoreAgent
+  - run a registry skill with remote mode
+  - verify run reaches `succeeded`
+  - verify streamed `log` events appear in run events feed
+
+### Immediate Next Steps (Validation Pass)
+1. Complete wiring so selected runtime mode is used in all CoreAgent run creation paths.
+2. Add CoreAgent runtime run panel for status + streamed `skill_run_events` logs.
+3. Refine tool routing reliability (intent-to-tool selection quality and deterministic tool planning).
+4. Improve `attachment_read` extraction quality for complex docs and add richer parse diagnostics.
+5. Add automatic `local_docker` -> `remote` fallback when local runtime is unavailable.
 
 ### 2. Runtime And Sync Hardening
 - [ ] Add startup skills bootstrap flow (installed skills sync + diagnostics status).

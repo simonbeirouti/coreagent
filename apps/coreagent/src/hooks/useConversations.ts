@@ -1,9 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { Channel } from '@tauri-apps/api/core';
 import { Conversation, Message, CreateConversationRequest, SendMessageRequest, StreamEvent } from '../types';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 import { abilityKeys, conversationKeys, memoryKeys } from '@/lib/query-keys';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
+import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 function getOptimisticParentId(messages: Message[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
@@ -86,6 +88,187 @@ function invalidateFallbackDashboardQueries(queryClient: ReturnType<typeof useQu
   });
 }
 
+function toUserFriendlyStreamingDelta(raw: string): string {
+  const value = raw.trim();
+  if (value.startsWith('[tool-chain] phase=plan_created')) {
+    return '';
+  }
+  if (value.startsWith('[tool-chain] phase=planner_filtered')) {
+    return '';
+  }
+  if (value.startsWith('[tool-chain] phase=tool_step_started')) {
+    return '';
+  }
+  if (value.startsWith('[tool-chain] phase=tool_step_done')) {
+    return '';
+  }
+  if (value.startsWith('[tool-chain] phase=final_summarize')) {
+    return '';
+  }
+  if (value.startsWith('[tool-chain] phase=budget_exhausted')) {
+    return '';
+  }
+  if (value.startsWith('[tool-selection] runtime tools available')) {
+    return '';
+  }
+  if (value.startsWith('[tool-selection]')) {
+    return '';
+  }
+  if (value.startsWith('[tool:')) {
+    return '';
+  }
+  if (value.startsWith('[event:')) {
+    return '';
+  }
+  return raw;
+}
+
+export type InferredToolProgressEvent = {
+  clientRunId: string;
+  conversationId: string;
+  implementationKey: string;
+  runId?: string | null;
+  status?: string | null;
+  message: string;
+  sequence: number;
+  timestampMs: number;
+};
+
+type PersistedInferredToolRun = {
+  clientRunId: string;
+  implementationKey: string;
+  runId?: string | null;
+  status?: string | null;
+  startedAtMs: number;
+  timeline: Array<{
+    id: string;
+    message: string;
+    level: 'info' | 'success' | 'error';
+    timestampMs: number;
+    sequence: number;
+  }>;
+};
+
+function normalizeInferredImplementationKey(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  return trimmed
+    .replace(/^coreagent_(rs|py|js|md)_/, '')
+    .replace(/^coreagent_(rs|py|js|md)\./, '')
+    .replace(/^coreagent\.(rs|py|js|md)\./, '')
+    .trim();
+}
+
+function inferTimelineLevelFromProgress(message: string, status?: string | null): 'info' | 'success' | 'error' {
+  const normalized = `${status ?? ''} ${message}`.toLowerCase();
+  if (
+    normalized.includes('failed') ||
+    normalized.includes('error') ||
+    normalized.includes('timed_out') ||
+    normalized.includes('cancelled')
+  ) {
+    return 'error';
+  }
+  if (normalized.includes('succeeded') || normalized.includes('success')) {
+    return 'success';
+  }
+  return 'info';
+}
+
+function groupInferredRunsForPersistence(
+  events: InferredToolProgressEvent[]
+): PersistedInferredToolRun[] {
+  const grouped = new Map<string, PersistedInferredToolRun>();
+  for (const event of events) {
+    const existing = grouped.get(event.clientRunId);
+    const entry = {
+      id: `${event.clientRunId}-persisted-${event.sequence}`,
+      message: event.message,
+      level: inferTimelineLevelFromProgress(event.message, event.status),
+      timestampMs: event.timestampMs,
+      sequence: event.sequence,
+    } as const;
+    if (!existing) {
+      grouped.set(event.clientRunId, {
+        clientRunId: event.clientRunId,
+        implementationKey: event.implementationKey,
+        runId: event.runId ?? null,
+        status: event.status ?? 'running',
+        startedAtMs: event.timestampMs,
+        timeline: [entry],
+      });
+      continue;
+    }
+    existing.status = event.status ?? existing.status;
+    existing.runId = event.runId ?? existing.runId;
+    existing.timeline.push(entry);
+  }
+
+  return Array.from(grouped.values()).map((run) => ({
+    ...run,
+    timeline: run.timeline.sort((a, b) => a.sequence - b.sequence),
+  }));
+}
+
+function normalizePlannedToolLabel(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return 'tool';
+  const withoutPrefix = trimmed.replace(/^coreagent_(rs|py|js|md)_/, '');
+  const lastSegment = withoutPrefix.split('.').pop() || withoutPrefix;
+  return lastSegment.replace(/[_-]+/g, ' ').trim();
+}
+
+function buildAcceptanceMessageFromLine(line: string): string | null {
+  if (
+    !line.startsWith('[tool-chain] phase=') &&
+    !line.startsWith('[tool:') &&
+    !line.startsWith('[event:')
+  ) {
+    return null;
+  }
+
+  const plannerMatch = line.match(/callable_tools=([^\s]+)/);
+  if (plannerMatch?.[1]) {
+    const tools = plannerMatch[1]
+      .split(',')
+      .map((token) => normalizePlannedToolLabel(token))
+      .filter(Boolean);
+    if (tools.length === 1) {
+      return `Accepted. I will run ${tools[0]} and then summarize the result.`;
+    }
+    if (tools.length > 1) {
+      return `Accepted. I will run ${tools.join(', ')} and then summarize the combined results.`;
+    }
+  }
+
+  return 'Accepted. I will run the required tool steps and then summarize the results.';
+}
+
+function inferStatusFromToolEvent(eventCode: string, rawMessage: string): string {
+  const normalized = `${eventCode} ${rawMessage}`.toLowerCase();
+  if (
+    normalized.includes('succeeded') ||
+    normalized.includes('success') ||
+    normalized.includes('completed')
+  ) {
+    return 'succeeded';
+  }
+  if (normalized.includes('cancelled')) {
+    return 'cancelled';
+  }
+  if (normalized.includes('timed_out') || normalized.includes('timed out')) {
+    return 'timed_out';
+  }
+  if (
+    normalized.includes('failed') ||
+    normalized.includes('error') ||
+    normalized.includes('budget_exhausted')
+  ) {
+    return 'failed';
+  }
+  return 'running';
+}
+
 // Fetch conversations for an agent
 export function useConversations(agentId: string) {
   const initialData = getCachedData<Conversation[]>(conversationKeys.list(agentId));
@@ -94,11 +277,12 @@ export function useConversations(agentId: string) {
   return useQuery({
     queryKey: conversationKeys.list(agentId),
     queryFn: async (): Promise<Conversation[]> => {
-      return await invoke('list_conversations', { agentId });
+      return tauriCommandClient.listConversations(agentId);
     },
     enabled: !!agentId,
     initialData,
     initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
@@ -110,11 +294,12 @@ export function useConversation(conversationId: string) {
   return useQuery({
     queryKey: conversationKeys.detail(conversationId),
     queryFn: async (): Promise<Conversation> => {
-      return await invoke('get_conversation', { conversationId });
+      return tauriCommandClient.getConversation(conversationId);
     },
     enabled: !!conversationId,
     initialData,
     initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
@@ -126,11 +311,12 @@ export function useMessages(conversationId: string) {
   return useQuery({
     queryKey: conversationKeys.messages(conversationId),
     queryFn: async (): Promise<Message[]> => {
-      return await invoke('get_conversation_messages', { conversationId });
+      return tauriCommandClient.getConversationMessages(conversationId);
     },
     enabled: !!conversationId,
     initialData,
     initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
@@ -140,7 +326,7 @@ export function useCreateConversation() {
 
   return useMutation({
     mutationFn: async (request: CreateConversationRequest): Promise<Conversation> => {
-      return await invoke('create_conversation', { request });
+      return tauriCommandClient.createConversation(request);
     },
     onMutate: async (request) => {
       await queryClient.cancelQueries({ queryKey: conversationKeys.list(request.agent_id) });
@@ -260,7 +446,7 @@ export function useCreateConversationInstant() {
     }
 
     // Create in background
-    invoke<Conversation>('create_conversation', { request })
+    tauriCommandClient.createConversation(request)
       .then((realConversation) => {
         // Replace optimistic with real in the list
         queryClient.setQueryData<Conversation[]>(
@@ -337,11 +523,7 @@ export function useSendMessage() {
 
   return useMutation({
     mutationFn: async (request: SendMessageRequest): Promise<Message> => {
-      return await invoke('send_message', {
-        conversationId: request.conversation_id,
-        content: request.content,
-        imageBase64: request.image_base64,
-      });
+      return tauriCommandClient.sendMessage(request);
     },
     onMutate: async (request) => {
       // Cancel outgoing refetches to prevent overwriting our optimistic update
@@ -413,7 +595,7 @@ export function useUpdateConversationTitle() {
 
   return useMutation({
     mutationFn: async ({ conversationId, title }: { conversationId: string; title: string | null }): Promise<Conversation> => {
-      return await invoke('update_conversation_title', { conversationId, title });
+      return tauriCommandClient.updateConversationTitle(conversationId, title);
     },
     onMutate: async ({ conversationId, title }) => {
       const previousConversation = queryClient.getQueryData<Conversation>(
@@ -483,7 +665,7 @@ export function useGenerateConversationTitle() {
 
   return useMutation({
     mutationFn: async ({ conversationId, firstMessage }: { conversationId: string; firstMessage: string }): Promise<Conversation> => {
-      return await invoke('generate_conversation_title', { conversationId, firstMessage });
+      return tauriCommandClient.generateConversationTitle(conversationId, firstMessage);
     },
     onMutate: async ({ conversationId, firstMessage }) => {
       const previousConversation = queryClient.getQueryData<Conversation>(
@@ -555,7 +737,7 @@ export function useDeleteConversation() {
 
   return useMutation({
     mutationFn: async ({ conversationId }: { conversationId: string; agentId: string }): Promise<void> => {
-      return await invoke('delete_conversation', { conversationId });
+      return tauriCommandClient.deleteConversation(conversationId);
     },
     onMutate: async ({ conversationId, agentId }) => {
       // Cancel any outgoing refetches to prevent overwriting our optimistic update
@@ -622,12 +804,32 @@ export function useSendMessageStreaming() {
   const queryClient = useQueryClient();
   const [streamingContent, setStreamingContent] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toolAcceptanceMessage, setToolAcceptanceMessage] = useState<string | null>(null);
+  const [toolAcceptanceTimestampMs, setToolAcceptanceTimestampMs] = useState<number | null>(null);
+  const [inferredToolProgress, setInferredToolProgress] = useState<InferredToolProgressEvent[]>([]);
+  const inferredToolProgressRef = useRef<InferredToolProgressEvent[]>([]);
+  const inferredRunByToolRef = useRef<Map<string, string>>(new Map());
+  const inferredRunByCallIdRef = useRef<Map<string, string>>(new Map());
+  const inferredSequenceRef = useRef(0);
+  const inferredRunCounterRef = useRef(0);
+  const hasPublishedToolAcceptanceRef = useRef(false);
 
   const sendMessage = useCallback(async (request: SendMessageRequest): Promise<Message> => {
+    const acceptanceNow = Date.now();
     setIsStreaming(true);
+    setStreamingConversationId(request.conversation_id);
     setStreamingContent('');
     setError(null);
+    setToolAcceptanceMessage('Accepted. Working on your request now.');
+    setToolAcceptanceTimestampMs(acceptanceNow);
+    setInferredToolProgress([]);
+    inferredToolProgressRef.current = [];
+    inferredRunByToolRef.current = new Map();
+    inferredRunByCallIdRef.current = new Map();
+    inferredSequenceRef.current = 0;
+    hasPublishedToolAcceptanceRef.current = false;
 
     // Optimistically add user message to cache (like useSendMessage does)
     await queryClient.cancelQueries({
@@ -659,6 +861,7 @@ export function useSendMessageStreaming() {
 
     return new Promise((resolve, reject) => {
       let hasResolved = false;
+      let tempAssistantMessageId: string | null = null;
 
       channel.onmessage = (event: StreamEvent) => {
         switch (event.type) {
@@ -666,7 +869,147 @@ export function useSendMessageStreaming() {
             console.log('Streaming started');
             break;
           case 'Delta':
-            setStreamingContent(prev => prev + event.data.content);
+            {
+              const lines = event.data.content.split('\n').map((line) => line.trim()).filter(Boolean);
+              const progressBatch: InferredToolProgressEvent[] = [];
+              for (const line of lines) {
+                if (!hasPublishedToolAcceptanceRef.current) {
+                  const acceptance = buildAcceptanceMessageFromLine(line);
+                  if (acceptance) {
+                    hasPublishedToolAcceptanceRef.current = true;
+                    setToolAcceptanceMessage(acceptance);
+                    setToolAcceptanceTimestampMs(Date.now());
+                  }
+                }
+                const structuredEventMatch = line.match(
+                  /^\[event:([^\]]+)\]\[provider:([^\]]+)\](?:\[tool:([^\]]+)\])?\s*(.*)$/
+                );
+                if (structuredEventMatch) {
+                  const eventCode = structuredEventMatch[1].trim();
+                  const toolKeyRaw = (structuredEventMatch[3] ?? '').trim();
+                  const toolKey = normalizeInferredImplementationKey(toolKeyRaw);
+                  const rawMessage = (structuredEventMatch[4] ?? '').trim();
+                  if (!toolKey) {
+                    continue;
+                  }
+                  const callId = rawMessage.match(/\bcall_id=([^\s]+)/)?.[1] ?? null;
+                  let clientRunId = callId
+                    ? inferredRunByCallIdRef.current.get(callId)
+                    : inferredRunByToolRef.current.get(toolKey);
+                  if (!clientRunId) {
+                    inferredRunCounterRef.current += 1;
+                    clientRunId = callId
+                      ? `inferred-${toolKey}-${callId}`
+                      : `inferred-${toolKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                    inferredRunByToolRef.current.set(toolKey, clientRunId);
+                    if (callId) {
+                      inferredRunByCallIdRef.current.set(callId, clientRunId);
+                    }
+                  }
+                  inferredSequenceRef.current += 1;
+                  progressBatch.push({
+                    clientRunId,
+                    conversationId: request.conversation_id,
+                    implementationKey: toolKey,
+                    runId: rawMessage.match(/\brun_id=([^\s]+)/)?.[1] ?? null,
+                    status: inferStatusFromToolEvent(eventCode, rawMessage),
+                    message: rawMessage || eventCode.replace(/_/g, ' '),
+                    sequence: inferredSequenceRef.current,
+                    timestampMs: Date.now(),
+                  });
+                  continue;
+                }
+
+                const toolStepStartMatch = line.match(
+                  /^\[tool-chain\]\s+phase=tool_step_started\s+step=\d+\s+tool=([^\s]+)\s+call_id=([^\s]+)$/
+                );
+                if (toolStepStartMatch) {
+                  const toolName = toolStepStartMatch[1].trim();
+                  const callId = toolStepStartMatch[2].trim();
+                  const implementationKey = normalizeInferredImplementationKey(toolName);
+                  inferredRunCounterRef.current += 1;
+                  const clientRunId = `inferred-${implementationKey}-${callId}`;
+                  inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                  inferredRunByCallIdRef.current.set(callId, clientRunId);
+                  inferredSequenceRef.current += 1;
+                  progressBatch.push({
+                    clientRunId,
+                    conversationId: request.conversation_id,
+                    implementationKey,
+                    runId: null,
+                    status: 'running',
+                    message: `Starting ${implementationKey}`,
+                    sequence: inferredSequenceRef.current,
+                    timestampMs: Date.now(),
+                  });
+                  continue;
+                }
+
+                if (line.startsWith('[tool:')) {
+                  const startMatch = line.match(/^\[tool:([^\]]+)\]\s+starting\s+(.+)$/);
+                  if (startMatch) {
+                    const implementationKey = normalizeInferredImplementationKey(startMatch[1]);
+                    let clientRunId = inferredRunByToolRef.current.get(implementationKey);
+                    if (!clientRunId) {
+                      inferredRunCounterRef.current += 1;
+                      clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                      inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                    }
+                    inferredSequenceRef.current += 1;
+                    progressBatch.push({
+                      clientRunId,
+                      conversationId: request.conversation_id,
+                      implementationKey,
+                      runId: null,
+                      status: 'running',
+                      message: `Starting ${implementationKey}`,
+                      sequence: inferredSequenceRef.current,
+                      timestampMs: Date.now(),
+                    });
+                    continue;
+                  }
+
+                  const toolMatch = line.match(/^\[tool:([^\]]+)\](?:\[([^\]]+)\])?\s+(.+)$/);
+                  if (!toolMatch) continue;
+                  const implementationKey = normalizeInferredImplementationKey(toolMatch[1]);
+                  const sourceType = (toolMatch[2] || '').toLowerCase();
+                  const message = toolMatch[3].trim();
+                  let clientRunId = inferredRunByToolRef.current.get(implementationKey);
+                  if (!clientRunId) {
+                    inferredRunCounterRef.current += 1;
+                    clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                    inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                  }
+                  const normalized = `${sourceType} ${message}`.toLowerCase();
+                  const status = normalized.includes('succeeded')
+                    ? 'succeeded'
+                    : normalized.includes('failed') || normalized.includes('error')
+                    ? 'failed'
+                    : normalized.includes('cancelled')
+                    ? 'cancelled'
+                    : normalized.includes('timed_out')
+                    ? 'timed_out'
+                    : 'running';
+                  inferredSequenceRef.current += 1;
+                  progressBatch.push({
+                    clientRunId,
+                    conversationId: request.conversation_id,
+                    implementationKey,
+                    runId: null,
+                    status,
+                    message,
+                    sequence: inferredSequenceRef.current,
+                    timestampMs: Date.now(),
+                  });
+                }
+              }
+              if (progressBatch.length > 0) {
+                const nextProgress = [...inferredToolProgressRef.current, ...progressBatch];
+                inferredToolProgressRef.current = nextProgress;
+                setInferredToolProgress(nextProgress);
+              }
+            }
+            setStreamingContent(prev => prev + toUserFriendlyStreamingDelta(event.data.content));
             break;
           case 'Done':
             // Add assistant message to cache immediately (optimistic)
@@ -680,6 +1023,7 @@ export function useSendMessageStreaming() {
               created_at: new Date().toISOString(),
               parent_id: userMessage.id,
             };
+            tempAssistantMessageId = assistantMessage.id;
             queryClient.setQueryData<Message[]>(
               conversationKeys.messages(request.conversation_id),
               (old = []) => [...old, assistantMessage]
@@ -687,10 +1031,12 @@ export function useSendMessageStreaming() {
             // Now safe to end streaming display
             setStreamingContent('');
             setIsStreaming(false);
+            setStreamingConversationId(null);
             console.log('Streaming completed');
             break;
           case 'Error':
             setIsStreaming(false);
+            setStreamingConversationId(null);
             setError(event.data.message);
             if (!hasResolved) {
               hasResolved = true;
@@ -707,23 +1053,49 @@ export function useSendMessageStreaming() {
         }
       };
 
-      invoke<Message>('send_message_streaming', {
-        conversationId: request.conversation_id,
-        content: request.content,
-        imageBase64: request.image_base64,
-        onEvent: channel,
-      })
+      tauriCommandClient.sendMessageStreaming(request, channel)
         .then((message) => {
           if (hasResolved) return; // Already handled error
           hasResolved = true;
           setIsStreaming(false);
+          setStreamingConversationId(null);
 
           const agentId = getAgentIdForConversation(queryClient, request.conversation_id);
+          const persistedRuns = groupInferredRunsForPersistence(inferredToolProgressRef.current);
+          const inferredMetadata: Record<string, unknown> = {
+            ...(message.metadata ?? {}),
+          };
+          if (persistedRuns.length > 0) {
+            inferredMetadata.inferred_tool_runs = persistedRuns;
+          }
+          if (toolAcceptanceMessage) {
+            inferredMetadata.tool_acceptance_message = toolAcceptanceMessage;
+            if (toolAcceptanceTimestampMs) {
+              inferredMetadata.tool_acceptance_timestamp_ms = toolAcceptanceTimestampMs;
+            }
+          }
+          const messageWithInferredRuns: Message = {
+            ...message,
+            metadata: inferredMetadata,
+          };
 
-          // Refetch messages to reconcile temp IDs with server IDs.
-          queryClient.invalidateQueries({
-            queryKey: conversationKeys.messages(request.conversation_id)
-          });
+          // Reconcile optimistic temp messages with DB IDs while preserving
+          // inferred tool run metadata for reload hydration.
+          queryClient.setQueryData<Message[]>(
+            conversationKeys.messages(request.conversation_id),
+            (old = []) => {
+              const replaced = old.map((item) => {
+                if (tempAssistantMessageId && item.id === tempAssistantMessageId) {
+                  return messageWithInferredRuns;
+                }
+                return item;
+              });
+              if (replaced.some((item) => item.id === messageWithInferredRuns.id)) {
+                return replaced;
+              }
+              return [...replaced, messageWithInferredRuns];
+            }
+          );
 
           // Update conversation timestamp
           queryClient.invalidateQueries({
@@ -735,12 +1107,13 @@ export function useSendMessageStreaming() {
             invalidateFallbackDashboardQueries(queryClient);
           }
 
-          resolve(message);
+          resolve(messageWithInferredRuns);
         })
         .catch((error) => {
           if (hasResolved) return; // Already handled error
           hasResolved = true;
           setIsStreaming(false);
+          setStreamingConversationId(null);
           setError(error.message || 'Failed to send message');
 
           // Rollback to previous messages on error
@@ -754,13 +1127,21 @@ export function useSendMessageStreaming() {
           reject(error);
         });
     });
-  }, [queryClient]);
+  }, [
+    queryClient,
+    toolAcceptanceMessage,
+    toolAcceptanceTimestampMs,
+  ]);
 
   return {
     sendMessage,
     streamingContent,
     isStreaming,
+    streamingConversationId,
     error,
+    toolAcceptanceMessage,
+    toolAcceptanceTimestampMs,
+    inferredToolProgress,
     clearError: useCallback(() => setError(null), [])
   };
 }
@@ -771,7 +1152,7 @@ export function useDeleteMessage() {
 
   return useMutation({
     mutationFn: async ({ messageId }: { messageId: string; conversationId: string }): Promise<string[]> => {
-      return await invoke('delete_message', { messageId });
+      return tauriCommandClient.deleteMessage(messageId);
     },
     onMutate: async ({ messageId, conversationId }) => {
       // Cancel outgoing refetches
@@ -888,7 +1269,7 @@ export function useEditMessageStreaming() {
             console.log('Edit streaming started');
             break;
           case 'Delta':
-            setStreamingContent(prev => prev + event.data.content);
+            setStreamingContent(prev => prev + toUserFriendlyStreamingDelta(event.data.content));
             break;
           case 'Done':
             // Keep streaming bubble visible until invoke resolves and we reconcile
@@ -913,12 +1294,12 @@ export function useEditMessageStreaming() {
         }
       };
 
-      invoke<[Message, Message]>('edit_message_streaming', {
-        messageId: request.message_id,
-        newContent: request.new_content,
-        imageBase64: request.image_base64,
-        onEvent: channel,
-      })
+      tauriCommandClient.editMessageStreaming(
+        request.message_id,
+        request.new_content,
+        channel,
+        request.image_base64
+      )
         .then((result) => {
           if (hasResolved) return;
           hasResolved = true;

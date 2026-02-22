@@ -15,6 +15,12 @@
     "server#build": {
       "outputs": ["dist/**"]
     },
+    "runner#build": {
+      "outputs": ["dist/**"]
+    },
+    "@coreagent/runtime-contracts#build": {
+      "outputs": ["dist/**"]
+    },
     "lint": {
       "dependsOn": ["^lint"]
     },

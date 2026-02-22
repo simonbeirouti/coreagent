@@ -1,6 +1,7 @@
 use crate::ability_service::AbilityService;
 use crate::ai_client::StreamEvent;
 use crate::entities::agents::{self};
+use crate::skills_registry_client::SkillsRegistryClient;
 use crate::user_profile_service::UserProfileService;
 use chrono;
 use sea_orm::{
@@ -57,6 +58,12 @@ pub struct AgentRuntimeCapability {
     pub implementation_key: String,
     pub enabled: bool,
     pub config: serde_json::Value,
+    #[serde(default = "default_parameters_schema")]
+    pub parameters_schema: serde_json::Value,
+}
+
+fn default_parameters_schema() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 // Convert SeaORM model to our AgentData struct
@@ -85,6 +92,115 @@ pub struct AgentService;
 impl AgentService {
     const STREAMING_TIMEOUT_SECONDS: u64 = 90;
 
+    fn is_runnable_install_state(state: Option<&str>) -> bool {
+        matches!(state, Some("installed" | "ready"))
+    }
+
+    async fn append_registry_runtime_tools(
+        agent_id: &str,
+        access_token: Option<&str>,
+        runtime_tools: &mut Vec<AgentRuntimeCapability>,
+    ) {
+        let Some(token) = access_token else {
+            eprintln!(
+                "[AGENT] No auth token available while loading registry runtime tools for agent {}.",
+                agent_id
+            );
+            return;
+        };
+        let client = match SkillsRegistryClient::from_env() {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!(
+                    "[AGENT] Failed to initialize registry client while loading runtime tools for agent {}: {}",
+                    agent_id, error
+                );
+                return;
+            }
+        };
+        let assigned = match client.list_agent_skills(token, agent_id).await {
+            Ok(skills) => skills,
+            Err(error) => {
+                eprintln!(
+                    "[AGENT] Failed to list registry-assigned skills for agent {}: {}",
+                    agent_id, error
+                );
+                return;
+            }
+        };
+
+        let mut appended = 0usize;
+        for skill in assigned {
+            if !skill.enabled || !Self::is_runnable_install_state(skill.install_state.as_deref()) {
+                continue;
+            }
+            if runtime_tools
+                .iter()
+                .any(|tool| tool.implementation_key == skill.implementation_key)
+            {
+                continue;
+            }
+
+            let version = skill
+                .pinned_version
+                .clone()
+                .unwrap_or_else(|| "latest".to_string());
+            let mut config = skill.config.clone();
+            if let Some(config_obj) = config.as_object_mut() {
+                config_obj.insert(
+                    "skill_id".to_string(),
+                    serde_json::Value::String(skill.skill_id.clone()),
+                );
+                config_obj.insert(
+                    "skillId".to_string(),
+                    serde_json::Value::String(skill.skill_id.clone()),
+                );
+                config_obj.insert(
+                    "version".to_string(),
+                    serde_json::Value::String(version),
+                );
+                if config_obj.get("description").is_none() {
+                    config_obj.insert(
+                        "description".to_string(),
+                        serde_json::Value::String(format!("Run assigned skill '{}'.", skill.name)),
+                    );
+                }
+                if config_obj.get("ability_name").is_none() {
+                    config_obj.insert(
+                        "ability_name".to_string(),
+                        serde_json::Value::String(skill.name.clone()),
+                    );
+                }
+            } else {
+                config = serde_json::json!({
+                    "skill_id": skill.skill_id,
+                    "skillId": skill.skill_id,
+                    "version": version,
+                    "description": format!("Run assigned skill '{}'.", skill.name),
+                    "ability_name": skill.name
+                });
+            }
+
+            let parameters_schema = skill
+                .config
+                .get("parameters_schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            runtime_tools.push(AgentRuntimeCapability {
+                implementation_key: skill.implementation_key,
+                enabled: true,
+                config,
+                parameters_schema,
+            });
+            appended += 1;
+        }
+        println!(
+            "[AGENT] Appended {} runnable registry runtime tools for agent {}.",
+            appended, agent_id
+        );
+    }
+
     fn merge_constraints_with_runtime_tools(
         base_constraints: Option<&serde_json::Value>,
         runtime_tools: &[AgentRuntimeCapability],
@@ -96,9 +212,16 @@ impl AgentService {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         if let Some(obj) = merged.as_object_mut() {
+            let runtime_tools_value = serde_json::to_value(runtime_tools).unwrap_or_else(|error| {
+                eprintln!(
+                    "[AGENT] Failed to serialize runtime_tools for merged constraints: {}",
+                    error
+                );
+                serde_json::json!([])
+            });
             obj.insert(
                 "runtime_tools".to_string(),
-                serde_json::to_value(runtime_tools).unwrap_or_else(|_| serde_json::json!([])),
+                runtime_tools_value,
             );
         }
         Some(merged)
@@ -108,13 +231,41 @@ impl AgentService {
         db: &DatabaseConnection,
         agent_id: Uuid,
     ) -> Result<Vec<AgentRuntimeCapability>, String> {
-        let tools = AbilityService::resolve_agent_runtime_tools(db, agent_id).await?;
-        Ok(tools
+        let settings = AbilityService::list_agent_tool_settings(db, agent_id.to_string()).await?;
+        Ok(settings
             .into_iter()
-            .map(|tool| AgentRuntimeCapability {
-                implementation_key: tool.implementation_key,
-                enabled: tool.enabled,
-                config: tool.config,
+            .map(|setting| {
+                let mut config = setting.config;
+                if let Some(config_obj) = config.as_object_mut() {
+                    if config_obj
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        if let Some(description) = setting.description.clone() {
+                            let trimmed = description.trim();
+                            if !trimmed.is_empty() {
+                                config_obj.insert(
+                                    "description".to_string(),
+                                    serde_json::Value::String(trimmed.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    if !config_obj.contains_key("ability_name") {
+                        config_obj.insert(
+                            "ability_name".to_string(),
+                            serde_json::Value::String(setting.ability_name.clone()),
+                        );
+                    }
+                }
+                AgentRuntimeCapability {
+                    implementation_key: setting.implementation_key,
+                    enabled: setting.enabled,
+                    config,
+                    parameters_schema: setting.parameters_schema,
+                }
             })
             .collect())
     }
@@ -282,6 +433,7 @@ impl AgentService {
         message: String,
         history: Vec<(String, String)>, // (role, content) pairs
         image_base64: Option<String>,
+        access_token: Option<&str>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
         // Get agent details from database
@@ -305,9 +457,23 @@ impl AgentService {
             .await
             .ok();
 
-        let runtime_tools = Self::resolve_enabled_tools(db, agent.id)
-            .await
-            .unwrap_or_default();
+        let mut runtime_tools = match Self::resolve_enabled_tools(db, agent.id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[AGENT] Failed to resolve runtime tools for agent {} ({}): {}. Falling back to empty tool catalog.",
+                    agent.id, agent.name, error
+                );
+                Vec::new()
+            }
+        };
+        Self::append_registry_runtime_tools(&agent.id.to_string(), access_token, &mut runtime_tools)
+            .await;
+        println!(
+            "[AGENT] Runtime tool catalog for {} has {} entries",
+            agent.name,
+            runtime_tools.len()
+        );
         let merged_constraints = Self::merge_constraints_with_runtime_tools(
             agent.behavioral_constraints.as_ref(),
             &runtime_tools,
@@ -327,6 +493,8 @@ impl AgentService {
                 history,
                 &message,
                 image_base64.as_deref(),
+                Some(&agent.id.to_string()),
+                access_token,
             )
             .await?;
 
@@ -345,6 +513,7 @@ impl AgentService {
         message: String,
         history: Vec<(String, String)>,
         image_base64: Option<String>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
         ai_client: &crate::ai_client::AiClient,
     ) -> Result<String, String> {
@@ -369,9 +538,23 @@ impl AgentService {
         .ok()
         .flatten();
 
-        let runtime_tools = Self::resolve_enabled_tools(db, agent.id)
-            .await
-            .unwrap_or_default();
+        let mut runtime_tools = match Self::resolve_enabled_tools(db, agent.id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[AGENT] Failed to resolve runtime tools for streaming agent {} ({}): {}. Falling back to empty tool catalog.",
+                    agent.id, agent.name, error
+                );
+                Vec::new()
+            }
+        };
+        Self::append_registry_runtime_tools(&agent.id.to_string(), access_token, &mut runtime_tools)
+            .await;
+        println!(
+            "[AGENT] Streaming runtime tool catalog for {} has {} entries",
+            agent.name,
+            runtime_tools.len()
+        );
         let merged_constraints = Self::merge_constraints_with_runtime_tools(
             agent.behavioral_constraints.as_ref(),
             &runtime_tools,
@@ -392,6 +575,8 @@ impl AgentService {
                 history,
                 &message,
                 image_base64.as_deref(),
+                Some(&agent.id.to_string()),
+                access_token,
                 on_event.clone(),
             ),
         )

@@ -1,29 +1,39 @@
-# Registry Operator Assistant
+# Registry Operator Plan
 
-## Purpose
-Help users interact with the skills registry safely and consistently.
+## Goal
+- **Operation:** {{goal}}
+- **Skill:** {{skill_id}}
+- **Agent:** {{agent_id}}
+- **Version:** {{version}}
 
-## Inputs
-- `goal`: one of `discover`, `install`, `assign`, `validate`, `revoke-check`
-- `skill_id` (optional)
-- `agent_id` (optional)
-- `version` (optional)
+{{#if messageContext.userMessage}}
+## Request Context
+{{messageContext.userMessage}}
+{{/if}}
 
-## Workflow
-1. Identify the exact requested registry operation.
-2. Generate the minimal API sequence needed.
-3. Include command examples with required auth headers.
-4. Explain expected success responses and common failure codes.
-5. Suggest safe fallback actions when registry is degraded.
+## Action Plan
+{{#each action_plan}}
+1. {{this}}
+{{/each}}
 
-## Output Format
-- `Action Plan`
-- `Commands`
-- `Expected Responses`
-- `Failure Handling`
-- `Safety Notes`
+## Commands
+{{#each commands}}
+```bash
+{{this}}
+```
+{{/each}}
 
-## Guardrails
-- Never suggest bypassing policy or signature checks.
-- Always include auth requirements for user-scoped routes.
-- For risky operations, require explicit confirmation language.
+## Expected Responses
+{{#each expected_responses}}
+- {{this}}
+{{/each}}
+
+## Failure Handling
+{{#each failure_handling}}
+- {{this}}
+{{/each}}
+
+## Safety Notes
+{{#each safety_notes}}
+- {{this}}
+{{/each}}

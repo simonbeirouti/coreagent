@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { invoke } from '@tauri-apps/api/core';
 import { abilityKeys } from '@/lib/query-keys';
 import { getCachedData, getCachedDataUpdatedAt } from '@/lib/tauri-store';
 import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
+import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 export interface AgentAbility {
   id: string;
@@ -93,7 +93,7 @@ export function useAgentAbilities(agentId: string) {
   return useQuery({
     queryKey: abilityKeys.agent(agentId),
     queryFn: async (): Promise<AgentAbility[]> => {
-      return invoke('list_agent_abilities', { agentId });
+      return tauriCommandClient.listAgentAbilities<AgentAbility[]>(agentId);
     },
     enabled: !!agentId,
     ...cacheFirstStaticQueryPolicy,
@@ -108,7 +108,7 @@ export function useAgentSkillRatings(agentId: string) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<SkillPerformanceRating[]> => {
-      return invoke('get_agent_skill_ratings', { agentId });
+      return tauriCommandClient.getAgentSkillRatings<SkillPerformanceRating[]>(agentId);
     },
     enabled: !!agentId,
     initialData,
@@ -125,7 +125,7 @@ export function useAgentSkillRatingTrends(agentId: string, days = 14) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<SkillRatingTrendSeries[]> => {
-      return invoke('get_agent_skill_rating_trends', { agentId, days });
+      return tauriCommandClient.getAgentSkillRatingTrends<SkillRatingTrendSeries[]>(agentId, days);
     },
     enabled: !!agentId,
     initialData,
@@ -138,7 +138,7 @@ export function useAgentToolSettings(agentId: string) {
   return useQuery({
     queryKey: abilityKeys.toolSettings(agentId),
     queryFn: async (): Promise<AgentToolSetting[]> => {
-      return invoke('list_agent_tool_settings', { agentId });
+      return tauriCommandClient.listAgentToolSettings<AgentToolSetting[]>(agentId);
     },
     enabled: !!agentId,
     ...cacheFirstStaticQueryPolicy,
@@ -149,7 +149,7 @@ export function useAgentRegistrySkills(agentId: string) {
   return useQuery({
     queryKey: abilityKeys.agentRegistrySkills(agentId),
     queryFn: async (): Promise<AgentRegistrySkill[]> => {
-      return invoke('list_agent_registry_skills', { agentId });
+      return tauriCommandClient.listAgentRegistrySkills<AgentRegistrySkill[]>(agentId);
     },
     enabled: !!agentId,
     ...cacheFirstStaticQueryPolicy,
@@ -164,11 +164,11 @@ export function useSetAgentAbilityEnabled(agentId: string) {
       implementationKey: string;
       enabled: boolean;
     }): Promise<AgentToolSetting> => {
-      return invoke('set_agent_ability_enabled', {
+      return tauriCommandClient.setAgentAbilityEnabled<AgentToolSetting>(
         agentId,
-        implementationKey: params.implementationKey,
-        enabled: params.enabled,
-      });
+        params.implementationKey,
+        params.enabled
+      );
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });
@@ -186,11 +186,11 @@ export function useUpdateAgentAbilityConfig(agentId: string) {
       implementationKey: string;
       config: Record<string, unknown>;
     }): Promise<AgentToolSetting> => {
-      return invoke('update_agent_ability_config', {
+      return tauriCommandClient.updateAgentAbilityConfig<AgentToolSetting>(
         agentId,
-        implementationKey: params.implementationKey,
-        config: params.config,
-      });
+        params.implementationKey,
+        params.config
+      );
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });

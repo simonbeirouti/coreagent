@@ -9,7 +9,7 @@ interface MarkdownContentProps {
 
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
   return (
-    <div className={cn('markdown-content text-sm', className)}>
+    <div className={cn('markdown-content min-w-0 max-w-full text-sm', className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

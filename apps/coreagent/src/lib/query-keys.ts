@@ -81,3 +81,11 @@ export const registryKeys = {
   advisories: (cursor = '', limit = 50) =>
     [...registryKeys.all, 'advisories', cursor, limit] as const,
 };
+
+export const userFileKeys = {
+  all: ['user-files'] as const,
+  lists: () => [...userFileKeys.all, 'list'] as const,
+  list: (userId: string) => [...userFileKeys.lists(), userId] as const,
+  recents: (userId: string, limit: number) =>
+    [...userFileKeys.all, 'recent', userId, limit] as const,
+};
