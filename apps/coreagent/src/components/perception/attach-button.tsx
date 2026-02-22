@@ -1,96 +1,100 @@
-import React, { useRef } from 'react';
+import React from 'react';
 import { Button } from '@/components/ui/button';
-import { Paperclip, Loader2 } from 'lucide-react';
-import { uploadScreenshot } from '@/lib/storage';
+import { ChevronRight, FolderOpen, Paperclip, Upload } from 'lucide-react';
+import type { UserFileRecord } from '@/lib/storage';
 import { useAuth } from '@/hooks/use-auth';
+import { useRecentUserFiles, useUploadUserFile } from '@/hooks/useUserFiles';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { UserFileBrowser } from '@/components/files/user-file-browser';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ALLOWED_USER_FILE_EXTENSIONS, MAX_ATTACHMENT_BYTES } from '@/lib/storage';
 import { toast } from 'sonner';
 
 interface AttachButtonProps {
-  /** 
-   * Callback when file is attached and uploaded
-   * @param imageBase64 - Full quality base64 for preview
-   * @param storagePath - Path in Supabase storage (for persistence in messages)
-   * @param signedUrl - Temporary signed URL for immediate display
-   */
-  onAttach: (imageBase64: string, storagePath?: string, signedUrl?: string) => void;
+  onAttach?: (file: UserFileRecord) => void;
   disabled?: boolean;
 }
 
-export function AttachButton({ onAttach, disabled }: AttachButtonProps) {
+export function AttachButton({
+  onAttach,
+  disabled,
+}: AttachButtonProps) {
   const { user } = useAuth();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isUploading, setIsUploading] = React.useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const uploadUserFile = useUploadUserFile(user?.id || '');
+  const { data: recentFiles = [] } = useRecentUserFiles(user?.id || '', 5);
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+  const attachableRecentFiles = React.useMemo(
+    () =>
+      recentFiles.filter(
+        (file) =>
+          !file.id.startsWith('temp-') &&
+          !file.storage_path.startsWith('pending/') &&
+          file.storage_path.trim().length > 0
+      ),
+    [recentFiles]
+  );
 
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+    setMenuOpen(false);
+  };
+
+  const handleSelectFile = (file: UserFileRecord) => {
+    if (file.id.startsWith('temp-') || file.storage_path.startsWith('pending/')) {
+      toast.warning('File is still uploading. Please wait a moment and try again.');
+      return;
+    }
+    onAttach?.(file);
+    setMenuOpen(false);
+  };
+
+  const openExplorer = () => {
+    setMenuOpen(false);
+    setOpen(true);
+  };
+
+  const handleUploadFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Check file size (30MB limit to be safe for both OpenAI and Anthropic)
-    const maxSizeBytes = 30 * 1024 * 1024; // 30MB
-    if (file.size > maxSizeBytes) {
-      toast.error('File too large. Maximum size is 30MB.');
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      toast.error(
+        `File too large. Maximum size is 5MB (${file.size} bytes selected).`
+      );
       return;
     }
 
-    // Check if it's an image
-    if (!file.type.startsWith('image/')) {
-      toast.error('Please select an image file.');
+    const extension = file.name.split('.').pop()?.toLowerCase() || '';
+    if (!ALLOWED_USER_FILE_EXTENSIONS.includes(extension as (typeof ALLOWED_USER_FILE_EXTENSIONS)[number])) {
+      toast.error(`Unsupported file type. Allowed: ${ALLOWED_USER_FILE_EXTENSIONS.join(', ')}`);
       return;
     }
-
-    setIsUploading(true);
 
     try {
-      // Read file as base64
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        try {
-          const dataUrl = e.target?.result as string;
-          const base64 = dataUrl.split(',')[1]; // Remove data:image/jpeg;base64, prefix
-
-          if (!user?.id) {
-            toast.error('You must be logged in to attach files');
-            return;
-          }
-
-          // Determine if compression is needed (JPEG for compression, PNG for lossless)
-          const isJpeg = file.type === 'image/jpeg';
-          const shouldCompress = file.size > 1024 * 1024; // Compress if > 1MB
-
-          // Upload to Supabase
-          const uploadResult = await uploadScreenshot(base64, user.id, {
-            isJpeg: shouldCompress && isJpeg,
-          });
-
-          onAttach(base64, `screenshots/${uploadResult.storagePath}`, uploadResult.signedUrl);
-
-          toast.success('File attached successfully');
-        } catch (error) {
-          console.error('Upload error:', error);
-          toast.error('Failed to upload file');
-        } finally {
-          setIsUploading(false);
-        }
-      };
-
-      reader.onerror = () => {
-        toast.error('Failed to read file');
-        setIsUploading(false);
-      };
-
-      reader.readAsDataURL(file);
+      if (!user?.id) {
+        toast.error('You must be logged in to attach files');
+        return;
+      }
+      const result = await uploadUserFile.mutateAsync(file);
+      onAttach?.(result.record);
+      if (!onAttach) {
+        toast.success('File uploaded');
+      }
     } catch (error) {
-      console.error('File processing error:', error);
-      toast.error('Failed to process file');
-      setIsUploading(false);
+      toast.error(error instanceof Error ? error.message : 'Failed to upload');
+    } finally {
+      event.target.value = '';
     }
-
-    // Reset input so same file can be selected again
-    event.target.value = '';
-  };
-
-  const handleButtonClick = () => {
-    fileInputRef.current?.click();
   };
 
   return (
@@ -98,24 +102,68 @@ export function AttachButton({ onAttach, disabled }: AttachButtonProps) {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
-        onChange={handleFileSelect}
         className="hidden"
+        accept=".txt,.pdf,.doc,.csv,.png,.jpg,.jpeg,.gif,.webp,text/plain,application/pdf,application/msword,text/csv,image/png,image/jpeg,image/gif,image/webp"
+        onChange={handleUploadFileSelect}
       />
-      <Button
-        onClick={handleButtonClick}
-        disabled={disabled || isUploading}
-        size="default"
-        variant="outline"
-        className="shrink-0"
-        title="Attach image file"
-      >
-        {isUploading ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Paperclip className="h-4 w-4" />
-        )}
-      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              disabled={disabled || uploadUserFile.isPending}
+              size="default"
+              variant="outline"
+              className="shrink-0"
+              title="Attach file"
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" className="w-56">
+            <DropdownMenuItem onClick={handleUploadClick}>
+              <Upload className="h-4 w-4" />
+              Upload a file
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Paperclip className="h-4 w-4" />
+                Recent
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-64">
+                {attachableRecentFiles.length > 0 ? (
+                  attachableRecentFiles.slice(0, 5).map((file) => (
+                    <DropdownMenuItem key={file.id} onClick={() => handleSelectFile(file)}>
+                      <span className="max-w-[180px] truncate">{file.file_name}</span>
+                      <ChevronRight className="ml-auto h-4 w-4 opacity-60" />
+                    </DropdownMenuItem>
+                  ))
+                ) : (
+                  <DropdownMenuItem onClick={openExplorer}>
+                    <FolderOpen className="h-4 w-4" />
+                    Open explorer
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuItem onClick={openExplorer}>
+              <FolderOpen className="h-4 w-4" />
+              Open explorer
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <DialogContent className="w-full sm:min-w-2/3">
+          <DialogHeader>
+            <DialogTitle>Attach from your assets</DialogTitle>
+          </DialogHeader>
+          <div className="w-full">
+            <UserFileBrowser
+              userId={user?.id || ''}
+              mode="select"
+              onSelectFile={handleSelectFile}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

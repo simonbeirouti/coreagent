@@ -40,6 +40,55 @@ function toAbsolutePath(baseDir, value) {
   return path.isAbsolute(value) ? value : path.resolve(baseDir, value);
 }
 
+function withRuntimeContextSchema(schema) {
+  const baseSchema = schema && typeof schema === "object" ? { ...schema } : { type: "object" };
+  const properties =
+    baseSchema.properties && typeof baseSchema.properties === "object" ? { ...baseSchema.properties } : {};
+  const required = Array.isArray(baseSchema.required)
+    ? baseSchema.required.filter((value) => typeof value === "string")
+    : [];
+
+  properties.messageContext = {
+    type: "object",
+    properties: {
+      userMessage: { type: "string" },
+      source: { type: "string" },
+      conversationId: { type: "string" }
+    }
+  };
+  properties.attachments = {
+    type: "array",
+    items: {
+      type: "object",
+      properties: {
+        storagePath: { type: "string" },
+        fileName: { type: "string" },
+        fileType: { type: "string" }
+      }
+    }
+  };
+  properties.attachmentContent = {
+    type: "array",
+    items: {
+      type: "object",
+      properties: {
+        storagePath: { type: "string" },
+        fileType: { type: "string" },
+        summary: { type: "string" },
+        contentExcerpt: { type: "string" },
+        truncated: { type: "boolean" }
+      }
+    }
+  };
+
+  return {
+    ...baseSchema,
+    type: "object",
+    properties,
+    required
+  };
+}
+
 async function uploadArtifact(baseUrl, token, artifactBase64, skillId) {
   const response = await fetch(`${baseUrl}/v1/admin/artifacts/upload`, {
     method: "POST",
@@ -123,8 +172,11 @@ async function main() {
       runtime: required(item.runtime, "runtime", skillId),
       entrypoint: required(item.entrypoint, "entrypoint", skillId),
       artifactDigest: digest,
-      manifest: item.manifest ?? {},
-      inputSchema: item.inputSchema ?? {},
+      manifest: {
+        ...(item.manifest ?? {}),
+        input_schema: withRuntimeContextSchema(item.manifest?.input_schema ?? item.inputSchema ?? {})
+      },
+      inputSchema: withRuntimeContextSchema(item.inputSchema ?? {}),
       outputSchema: item.outputSchema ?? {},
       healthcheck: item.healthcheck ?? {},
       heartbeatPolicy: item.heartbeatPolicy ?? {},

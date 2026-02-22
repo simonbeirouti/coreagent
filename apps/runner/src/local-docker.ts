@@ -42,6 +42,160 @@ type PreparedArtifact = {
   cleanup: () => Promise<void>;
 };
 
+function isMarkdownEntrypoint(path: string): boolean {
+  return path.trim().toLowerCase().endsWith(".md");
+}
+
+function resolveTemplateValue(
+  payload: Record<string, unknown>,
+  currentItem: unknown,
+  expression: string
+): unknown {
+  const raw = expression.trim();
+  if (!raw) {
+    return undefined;
+  }
+  if (raw === "this") {
+    return currentItem;
+  }
+  const useCurrent = raw === "this" || raw.startsWith("this.");
+  const root: unknown = useCurrent ? currentItem : payload;
+  const path = useCurrent ? raw.replace(/^this\.?/, "") : raw;
+  if (!path) {
+    return root;
+  }
+  const segments = path.split(".").filter((segment) => segment.length > 0);
+  let value: unknown = root;
+  for (const segment of segments) {
+    if (!value || typeof value !== "object" || !(segment in (value as Record<string, unknown>))) {
+      return undefined;
+    }
+    value = (value as Record<string, unknown>)[segment];
+  }
+  return value;
+}
+
+function markdownValueToText(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function renderMarkdownTemplateInternal(
+  template: string,
+  payload: Record<string, unknown>,
+  currentItem: unknown
+): string {
+  let output = template;
+  output = output.replace(/{{#each\s+([^}]+)}}([\s\S]*?){{\/each}}/g, (_match, pathExpr, block) => {
+    const value = resolveTemplateValue(payload, currentItem, String(pathExpr));
+    if (!Array.isArray(value) || value.length === 0) {
+      return "";
+    }
+    return value
+      .map((item) => renderMarkdownTemplateInternal(String(block), payload, item))
+      .join("");
+  });
+  output = output.replace(/{{#if\s+([^}]+)}}([\s\S]*?){{\/if}}/g, (_match, pathExpr, block) => {
+    const value = resolveTemplateValue(payload, currentItem, String(pathExpr));
+    if (!value) {
+      return "";
+    }
+    return renderMarkdownTemplateInternal(String(block), payload, currentItem);
+  });
+  output = output.replace(/{{\s*([^}]+)\s*}}/g, (_match, pathExpr) =>
+    markdownValueToText(resolveTemplateValue(payload, currentItem, String(pathExpr)))
+  );
+  return output;
+}
+
+export function renderMarkdownTemplate(template: string, payload: Record<string, unknown>): string {
+  return renderMarkdownTemplateInternal(template, payload, null).trim();
+}
+
+function buildMarkdownRendererSource(): string {
+  return [
+    "const fs = require('node:fs');",
+    "",
+    "function readJson(path) {",
+    "  if (!fs.existsSync(path)) return {};",
+    "  try {",
+    "    return JSON.parse(fs.readFileSync(path, 'utf8'));",
+    "  } catch {",
+    "    return {};",
+    "  }",
+    "}",
+    "",
+    "function getByPath(root, expression, currentItem) {",
+    "  const raw = String(expression || '').trim();",
+    "  if (!raw) return undefined;",
+    "  if (raw === 'this') return currentItem;",
+    "  const useCurrent = raw === 'this' || raw.startsWith('this.');",
+    "  const target = useCurrent ? currentItem : root;",
+    "  const path = useCurrent ? raw.replace(/^this\\.?/, '') : raw;",
+    "  if (!path) return target;",
+    "  const segments = path.split('.').filter(Boolean);",
+    "  let value = target;",
+    "  for (const segment of segments) {",
+    "    if (value == null || typeof value !== 'object' || !(segment in value)) return undefined;",
+    "    value = value[segment];",
+    "  }",
+    "  return value;",
+    "}",
+    "",
+    "function toText(value) {",
+    "  if (value == null) return '';",
+    "  if (typeof value === 'string') return value;",
+    "  if (typeof value === 'number' || typeof value === 'boolean') return String(value);",
+    "  return JSON.stringify(value, null, 2);",
+    "}",
+    "",
+    "function renderTemplate(template, root, currentItem) {",
+    "  let output = String(template || '');",
+    "",
+    "  output = output.replace(/{{#each\\s+([^}]+)}}([\\s\\S]*?){{\\/each}}/g, (_, pathExpr, block) => {",
+    "    const value = getByPath(root, pathExpr, currentItem);",
+    "    if (!Array.isArray(value) || value.length === 0) return '';",
+    "    return value.map((item) => renderTemplate(block, root, item)).join('');",
+    "  });",
+    "",
+    "  output = output.replace(/{{#if\\s+([^}]+)}}([\\s\\S]*?){{\\/if}}/g, (_, pathExpr, block) => {",
+    "    const value = getByPath(root, pathExpr, currentItem);",
+    "    if (!value) return '';",
+    "    return renderTemplate(block, root, currentItem);",
+    "  });",
+    "",
+    "  output = output.replace(/{{\\s*([^}]+)\\s*}}/g, (_, pathExpr) => toText(getByPath(root, pathExpr, currentItem)));",
+    "  return output;",
+    "}",
+    "",
+    "const templatePath = process.argv[2];",
+    "const inputPath = process.argv[3];",
+    "",
+    "if (!templatePath || !inputPath) {",
+    "  process.stderr.write('markdown renderer missing required args');",
+    "  process.exit(1);",
+    "}",
+    "",
+    "const template = fs.readFileSync(templatePath, 'utf8');",
+    "const payload = readJson(inputPath);",
+    "const renderedMarkdown = renderTemplate(template, payload, null).trim();",
+    "",
+    "const output = {",
+    "  markdown: renderedMarkdown,",
+    "  renderedMarkdown,",
+    "  format: 'markdown',",
+    "  generatedAt: new Date().toISOString()",
+    "};",
+    "process.stdout.write(JSON.stringify(output));",
+    ""
+  ].join("\n");
+}
+
 const BUILTIN_PROFILE_IMAGES: Record<string, string> = {
   default: "node:20-alpine",
   node: "node:20-alpine",
@@ -271,9 +425,24 @@ async function prepareArtifactWorkspace(
     const inputPath = join(hostWorkdir, "input.json");
     await writeFile(inputPath, JSON.stringify(job.input, null, 2));
 
+    let containerEntrypoint = `/workspace/${safeEntrypoint}`;
+    if (isMarkdownEntrypoint(safeEntrypoint)) {
+      const rendererPath = join(hostWorkdir, "__coreagent_markdown_renderer.js");
+      await writeFile(rendererPath, buildMarkdownRendererSource(), { mode: 0o755 });
+
+      const wrapperPath = join(hostWorkdir, "__coreagent_markdown_entrypoint.sh");
+      const wrapperScript = [
+        "#!/bin/sh",
+        "set -eu",
+        `node /workspace/__coreagent_markdown_renderer.js "/workspace/${safeEntrypoint}" "/workspace/input.json"`
+      ].join("\n");
+      await writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
+      containerEntrypoint = "/workspace/__coreagent_markdown_entrypoint.sh";
+    }
+
     return {
       hostWorkdir,
-      containerEntrypoint: `/workspace/${safeEntrypoint}`,
+      containerEntrypoint,
       cleanup
     };
   } catch (error) {

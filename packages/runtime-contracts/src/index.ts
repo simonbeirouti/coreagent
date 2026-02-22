@@ -19,6 +19,35 @@ export const CreateRuntimeRunRequestSchema = z.object({
   version: z.string().trim().min(1).optional(),
   agentId: z.string().uuid().optional(),
   input: z.record(z.string(), z.unknown()).optional().default({}),
+  messageContext: z
+    .object({
+      userMessage: z.string().trim().min(1),
+      source: z.string().trim().optional(),
+      conversationId: z.string().uuid().optional()
+    })
+    .optional(),
+  attachments: z
+    .array(
+      z.object({
+        storagePath: z.string().trim().min(1),
+        fileName: z.string().trim().optional(),
+        fileType: z.string().trim().optional(),
+        sizeBytes: z.number().int().min(1).max(5 * 1024 * 1024).optional()
+      })
+    )
+    .optional(),
+  attachmentContent: z
+    .array(
+      z.object({
+        storagePath: z.string().trim().min(1),
+        fileType: z.string().trim().optional(),
+        contentExcerpt: z.string().optional(),
+        summary: z.string().optional(),
+        truncated: z.boolean().optional(),
+        sizeBytes: z.number().int().min(1).max(5 * 1024 * 1024).optional()
+      })
+    )
+    .optional(),
   executionMode: RuntimeExecutionModeSchema.optional().default("remote"),
   timeoutSeconds: z.number().int().min(1).max(3600).optional().default(120)
 });

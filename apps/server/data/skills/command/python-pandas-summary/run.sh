@@ -17,6 +17,7 @@ python3 -m pip install --quiet --disable-pip-version-check --target "$DEPS_DIR" 
 
 PYTHONPATH="$DEPS_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 import json
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -27,15 +28,40 @@ if input_path.exists():
 else:
     payload = {}
 
-rows = payload.get('rows') or [
-    {"team": "alpha", "score": 10},
-    {"team": "beta", "score": 15},
-    {"team": "gamma", "score": 8},
-]
+rows = payload.get('rows') or []
+if not rows:
+    attachment_content = payload.get('attachmentContent') or []
+    csv_text = None
+    if isinstance(attachment_content, list):
+        for item in attachment_content:
+            if not isinstance(item, dict):
+                continue
+            file_type = str(item.get('fileType') or '').lower()
+            excerpt = item.get('contentExcerpt')
+            if file_type == 'csv' and isinstance(excerpt, str) and excerpt.strip():
+                csv_text = excerpt
+                break
+    if csv_text:
+        frame = pd.read_csv(StringIO(csv_text))
+        rows = frame.to_dict(orient='records')
 
 df = pd.DataFrame(rows)
+if df.empty:
+    raise SystemExit('VALIDATION_ERROR:missing rows and no parseable CSV attachment context')
 if "score" not in df.columns:
-    df["score"] = 0
+    message_context = payload.get('messageContext') or {}
+    if isinstance(message_context, dict):
+        user_message = message_context.get('userMessage')
+        if isinstance(user_message, str):
+            maybe_score = pd.to_numeric(pd.Series([user_message]).str.extract(r'(-?\d+(?:\.\d+)?)')[0], errors='coerce')
+            if maybe_score.notna().any():
+                df["score"] = float(maybe_score.dropna().iloc[0])
+            else:
+                raise SystemExit('VALIDATION_ERROR:rows are missing score column and no score inferred from message context')
+        else:
+            raise SystemExit('VALIDATION_ERROR:rows are missing score column')
+    else:
+        raise SystemExit('VALIDATION_ERROR:rows are missing score column')
 
 summary = {
     "count": int(len(df)),

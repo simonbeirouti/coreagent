@@ -14,10 +14,12 @@ pub mod conversation_service;
 pub mod db;
 pub mod entities;
 pub mod feedback_service;
+pub mod file_read_service;
 pub mod input_sanitizer;
 pub mod memory_service;
 pub mod orchestration_service;
 pub mod perception_tracker;
+pub mod rig_runtime;
 pub mod skills_registry_client;
 pub mod user_profile_service;
 pub mod vision_service;
@@ -98,6 +100,7 @@ fn is_core_tool_key(implementation_key: &str) -> bool {
             | "vision_analysis"
             | "audio_transcription"
             | "voice_synthesis"
+            | "attachment_read"
     )
 }
 
@@ -262,7 +265,17 @@ async fn resolve_agent_execution_mode(
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         });
-    Ok(execution_mode_from_preferences(&profile.preferences))
+    let mode = execution_mode_from_preferences(&profile.preferences);
+    eprintln!(
+        "[RUNTIME_MODE] resolved mode={} agent_id={} user_id={}",
+        match mode {
+            RuntimeExecutionMode::Remote => "remote",
+            RuntimeExecutionMode::LocalDocker => "local_docker",
+        },
+        agent_id,
+        agent.user_id
+    );
+    Ok(mode)
 }
 
 async fn run_direct_runtime_skill(

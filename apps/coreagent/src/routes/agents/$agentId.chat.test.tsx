@@ -3,6 +3,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import React from "react";
 import { createTestQueryClient } from "@/test/utils";
+import { toast } from "sonner";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -12,7 +13,10 @@ const mocks = vi.hoisted(() => ({
   createConversation: vi.fn(async () => ({ id: "conversation-1" })),
   generateConversationTitle: vi.fn(),
   messagesData: [] as Array<Record<string, unknown>>,
+  recentFilesData: [] as Array<Record<string, unknown>>,
   scrollIntoView: vi.fn(),
+  attachClickCount: 0,
+  forcePendingAttach: false,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -62,6 +66,18 @@ vi.mock("@/hooks/useAbilities", () => ({
           additionalProperties: true,
         },
       },
+      {
+        implementation_key: "attachment_read",
+        ability_name: "Attachment Read",
+        description: "Read attached files in chat",
+        enabled: true,
+        parameters_schema: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: true,
+        },
+      },
     ],
   }),
   useAgentRegistrySkills: () => ({
@@ -101,6 +117,51 @@ vi.mock("@/hooks/usePerception", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useUserFiles", () => ({
+  useRecentUserFiles: () => ({ data: mocks.recentFilesData }),
+  useUploadUserFile: () => ({ isPending: false, mutateAsync: vi.fn() }),
+  useUserFiles: () => ({ data: [], isLoading: false }),
+}));
+
+vi.mock("@/components/perception/attach-button", () => ({
+  AttachButton: ({ onAttach }: { onAttach: (file: Record<string, unknown>) => void }) => (
+    <button
+      type="button"
+      onClick={() => {
+        mocks.attachClickCount += 1;
+        const suffix = String(mocks.attachClickCount);
+        if (mocks.forcePendingAttach) {
+          onAttach({
+            id: `temp-${suffix}`,
+            user_id: "user-1",
+            storage_path: `pending/manual-${suffix}.txt`,
+            file_name: `manual-${suffix}.txt`,
+            file_ext: "txt",
+            mime_type: "text/plain",
+            size_bytes: 14,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+          return;
+        }
+        onAttach({
+          id: `file-${suffix}`,
+          user_id: "user-1",
+          storage_path: `user-1/manual-${suffix}.txt`,
+          file_name: `manual-${suffix}.txt`,
+          file_ext: "txt",
+          mime_type: "text/plain",
+          size_bytes: 14,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+      }}
+    >
+      Mock Attach
+    </button>
+  ),
+}));
+
 vi.mock("@/hooks/useConversations", () => ({
   useConversations: () => ({ data: [], isLoading: false }),
   useCreateConversation: () => ({ mutateAsync: mocks.createConversation }),
@@ -109,6 +170,10 @@ vi.mock("@/hooks/useConversations", () => ({
   useSendMessageStreaming: () => ({
     isStreaming: false,
     streamingContent: "",
+    streamingConversationId: null,
+    inferredToolProgress: [],
+    toolAcceptanceMessage: null,
+    toolAcceptanceTimestampMs: null,
     error: null,
     sendMessage: mocks.sendMessageStreaming,
     clearError: mocks.clearStreamingError,
@@ -138,6 +203,9 @@ describe("chat route runtime", () => {
     mocks.createConversation.mockClear();
     mocks.generateConversationTitle.mockReset();
     mocks.messagesData = [];
+    mocks.recentFilesData = [];
+    mocks.attachClickCount = 0;
+    mocks.forcePendingAttach = false;
     mocks.scrollIntoView.mockReset();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
@@ -172,6 +240,7 @@ describe("chat route runtime", () => {
     expect(screen.getByText("/screenshot")).toBeInTheDocument();
     expect(screen.getByText("/coreagent.py.deep_analysis")).toBeInTheDocument();
     expect(screen.getByText("/coreagent.py.weather_lookup")).toBeInTheDocument();
+    expect(screen.queryByText("/attachment_read")).not.toBeInTheDocument();
     expect(screen.getAllByText("/coreagent.py.deep_analysis")).toHaveLength(1);
 
     fireEvent.click(
@@ -180,6 +249,137 @@ describe("chat route runtime", () => {
       })
     );
     expect((composerInput as HTMLInputElement).value).toBe("/coreagent.py.deep_analysis ");
+  });
+
+  it("attaches selected file marker from attach button flow", async () => {
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mock Attach" }));
+    fireEvent.change(screen.getByPlaceholderText("Message Test Agent..."), {
+      target: { value: "use this file" },
+    });
+    fireEvent.keyPress(screen.getByPlaceholderText("Message Test Agent..."), {
+      key: "Enter",
+      code: "Enter",
+      charCode: 13,
+    });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    expect(payload?.content).toContain("[File:path:user-1/manual-1.txt|name:manual-1.txt|type:txt]");
+    expect(payload?.content).toContain("use this file");
+  });
+
+  it("includes multiple attached files in a single message", async () => {
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mock Attach" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mock Attach" }));
+    fireEvent.change(screen.getByPlaceholderText("Message Test Agent..."), {
+      target: { value: "use these files" },
+    });
+    fireEvent.keyPress(screen.getByPlaceholderText("Message Test Agent..."), {
+      key: "Enter",
+      code: "Enter",
+      charCode: 13,
+    });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    expect(payload?.content).toContain("[File:path:user-1/manual-1.txt|name:manual-1.txt|type:txt]");
+    expect(payload?.content).toContain("[File:path:user-1/manual-2.txt|name:manual-2.txt|type:txt]");
+    expect(payload?.content).toContain("use these files");
+  });
+
+  it("caps pending attachments at 10 files per message", async () => {
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    for (let i = 0; i < 11; i += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Mock Attach" }));
+    }
+    fireEvent.change(screen.getByPlaceholderText("Message Test Agent..."), {
+      target: { value: "include max files" },
+    });
+    fireEvent.keyPress(screen.getByPlaceholderText("Message Test Agent..."), {
+      key: "Enter",
+      code: "Enter",
+      charCode: 13,
+    });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    const markerMatches = payload?.content?.match(/\[File:path:/g) ?? [];
+    expect(markerMatches).toHaveLength(10);
+    expect(payload?.content).not.toContain("[File:path:user-1/manual-11.txt|name:manual-11.txt|type:txt]");
+  });
+
+  it("does not include pending file markers in outgoing messages", async () => {
+    mocks.forcePendingAttach = true;
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mock Attach" }));
+    fireEvent.change(screen.getByPlaceholderText("Message Test Agent..."), {
+      target: { value: "summarize attached files" },
+    });
+    fireEvent.keyPress(screen.getByPlaceholderText("Message Test Agent..."), {
+      key: "Enter",
+      code: "Enter",
+      charCode: 13,
+    });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    expect(payload?.content).not.toContain("[File:path:pending/");
+    expect(toast.warning).toHaveBeenCalledWith(
+      "File is still uploading. Please wait and attach it again once ready."
+    );
   });
 
   it("adds runtime tool context for tool-intent prompts and lets the agent decide execution", async () => {

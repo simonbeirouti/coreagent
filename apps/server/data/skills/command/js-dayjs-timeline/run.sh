@@ -25,11 +25,43 @@ if (fs.existsSync("/workspace/input.json")) {
   payload = JSON.parse(fs.readFileSync("/workspace/input.json", "utf8"));
 }
 
-const offsets = Array.isArray(payload.offsetDays) && payload.offsetDays.length > 0
-  ? payload.offsetDays.map((value) => Number(value))
-  : [0, 1, 7, 30];
+const messageContext = payload.messageContext && typeof payload.messageContext === "object"
+  ? payload.messageContext
+  : {};
+const userMessage = typeof messageContext.userMessage === "string" ? messageContext.userMessage : "";
+const attachmentContext = Array.isArray(payload.attachmentContent) ? payload.attachmentContent : [];
+const attachmentText = attachmentContext
+  .map((item) => {
+    if (!item || typeof item !== "object") return "";
+    const excerpt = typeof item.contentExcerpt === "string" ? item.contentExcerpt : "";
+    const summary = typeof item.summary === "string" ? item.summary : "";
+    return `${excerpt}\n${summary}`.trim();
+  })
+  .filter((value) => value.length > 0)
+  .join("\n");
 
-const baseDate = dayjs(payload.baseDate || "2026-01-01");
+let offsets = Array.isArray(payload.offsetDays) && payload.offsetDays.length > 0
+  ? payload.offsetDays.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+  : [];
+if (offsets.length === 0 && userMessage.length > 0) {
+  const inferred = [...userMessage.matchAll(/-?\d+/g)].map((match) => Number(match[0]));
+  offsets = inferred.filter((value) => Number.isFinite(value));
+}
+if (offsets.length === 0) {
+  throw new Error("VALIDATION_ERROR:missing offsetDays and no numeric offsets found in messageContext.userMessage");
+}
+
+const dateFromInput = typeof payload.baseDate === "string" ? payload.baseDate : null;
+const dateFromMessage = userMessage.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? null;
+const dateFromAttachments = attachmentText.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0] ?? null;
+const resolvedBaseDate = dateFromInput ?? dateFromMessage ?? dateFromAttachments;
+if (!resolvedBaseDate) {
+  throw new Error("VALIDATION_ERROR:missing baseDate and no YYYY-MM-DD date found in messageContext.userMessage or attachmentContent");
+}
+const baseDate = dayjs(resolvedBaseDate);
+if (!baseDate.isValid()) {
+  throw new Error("VALIDATION_ERROR:invalid baseDate");
+}
 const timeline = offsets.map((offset) => ({
   offsetDays: offset,
   date: baseDate.add(offset, "day").format("YYYY-MM-DD")
@@ -38,7 +70,7 @@ const timeline = offsets.map((offset) => ({
 const result = {
   timeline,
   generatedAt: dayjs().toISOString(),
-  note: "Generated with dayjs installed at runtime."
+  note: "Generated from runtime-provided message/file context."
 };
 
 process.stdout.write(JSON.stringify(result));

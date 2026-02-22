@@ -18,6 +18,7 @@ python3 -m pip install --quiet --disable-pip-version-check --target "$DEPS_DIR" 
 
 PYTHONPATH="$DEPS_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -29,9 +30,30 @@ else:
     payload = {}
 
 values = payload.get('values') or []
-values = [float(value) for value in values]
+values = [float(value) for value in values if isinstance(value, (int, float, str))]
 if not values:
-    values = [1.0, 3.0, 7.0, 12.0, 18.0]
+    context_chunks = []
+    message_context = payload.get('messageContext') or {}
+    if isinstance(message_context, dict):
+        user_message = message_context.get('userMessage')
+        if isinstance(user_message, str):
+            context_chunks.append(user_message)
+    attachment_content = payload.get('attachmentContent') or []
+    if isinstance(attachment_content, list):
+        for item in attachment_content:
+            if not isinstance(item, dict):
+                continue
+            excerpt = item.get('contentExcerpt') or item.get('summary')
+            if isinstance(excerpt, str):
+                context_chunks.append(excerpt)
+
+    if context_chunks:
+        joined = "\n".join(context_chunks)
+        tokens = re.findall(r'-?\d+(?:\.\d+)?', joined)
+        values = [float(token) for token in tokens]
+
+if not values:
+    raise SystemExit('VALIDATION_ERROR:missing numeric values; provide values or numeric message/file context')
 
 arr = np.array(values, dtype=float)
 result = {

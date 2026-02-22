@@ -63,4 +63,6 @@ image = "0.25"
 # Async utilities
 futures-util = "0.3"
 futures = "0.3"
+pdf-extract = "0.10.0"
+zip = "8.1.0"
 

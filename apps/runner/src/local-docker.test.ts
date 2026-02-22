@@ -6,6 +6,7 @@ import {
   collectRuntimeDockerImages,
   executeLocalDockerRun,
   executeRemoteDockerRun,
+  renderMarkdownTemplate,
   resolveDockerImageForJob,
   shouldDisableDockerNetwork
 } from "./local-docker.js";
@@ -241,5 +242,28 @@ describe("local docker execution", () => {
     );
 
     expect(disableNetwork).toBe(false);
+  });
+
+  it("renders markdown templates with loops and conditionals", () => {
+    const template = [
+      "# Decision",
+      "{{decision_title}}",
+      "{{#if messageContext.userMessage}}",
+      "Context: {{messageContext.userMessage}}",
+      "{{/if}}",
+      "{{#each items}}",
+      "- {{this}}",
+      "{{/each}}"
+    ].join("\n");
+    const rendered = renderMarkdownTemplate(template, {
+      decision_title: "Adopt dynamic runtime context",
+      messageContext: { userMessage: "Use attached file content." },
+      items: ["first", "second"]
+    });
+
+    expect(rendered).toContain("Adopt dynamic runtime context");
+    expect(rendered).toContain("Context: Use attached file content.");
+    expect(rendered).toContain("- first");
+    expect(rendered).toContain("- second");
   });
 });

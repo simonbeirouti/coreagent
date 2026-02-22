@@ -5,6 +5,7 @@ import {
   GalleryVerticalEnd,
   Bot,
   Home,
+  FileText,
   BookOpen,
   Settings
 } from "lucide-react"
@@ -40,6 +41,11 @@ const data = {
       title: "Agents",
       url: "/agents",
       icon: Bot,
+    },
+    {
+      title: "Files",
+      url: "/files",
+      icon: FileText,
     }
   ],
   secondaryItems: [

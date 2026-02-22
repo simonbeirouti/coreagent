@@ -6,7 +6,7 @@ Cloud-first, multimodal AI agent platform built with Rust + Supabase where agent
 Phase 2 (Agent Identity) hardening is complete: two-layer quality feedback, closed-loop adaptation, retrieval tuning guardrails, dashboard transparency surfaces, hardened frontend/backend tests, and project quality rules + docs are in place.
 Current focus is unified delivery across skills registry integration, reliable agent tooling, and next-iteration sub-agent orchestration + automation.
 
-## Project Updates (February 16, 2026)
+## Project Updates (February 22, 2026)
 - Legacy split PRDs have been consolidated into a single unified program PRD in `prd.md`.
 - `prd.md` now contains completed work summary, current integration gaps, and next-iteration delivery for sub-agents + automation.
 - Root route now provides a board-first orchestration experience:
@@ -16,6 +16,19 @@ Current focus is unified delivery across skills registry integration, reliable a
     - `idle -> review` is blocked
     - `idle -> working` is task-context gated via dialog
   - board lane positions persist locally per agent for continuity
+- Runtime tool execution is now validated in both modes:
+  - `remote` works repeatedly
+  - `local_docker` works repeatedly
+- Docker isolation is the security boundary for tool execution paths.
+- File/asset workflow updates shipped:
+  - unified user-scoped assets bucket (`user-files`)
+  - reusable file browser/list/filter UX across chat and Files route
+  - chat attach flow with recents + explorer support
+  - delete support and responsive/mobile-friendly file cards
+- New core runtime tool shipped: `attachment_read`
+  - reads attached `txt/csv/pdf/doc` content
+  - summarizes attached image files (`png/jpg/jpeg/gif/webp`)
+  - enforces size/count/length guardrails and structured fallback errors
 
 ### Shipped
 - ✅ **Phase 0 (Foundation):** React + TypeScript app shell, routing, UI system, and auth UX
@@ -41,11 +54,17 @@ Current focus is unified delivery across skills registry integration, reliable a
 - Phase 3 orchestration hardening: backend-driven lane state, review-completion semantics, and richer diagnostics
 - Skills runtime and vetted registry implementation for safe in-app install/update/disable
 - Reliability coverage expansion for orchestration board interactions and assignment lifecycle paths
+- Runtime integration closure:
+  - route selected runtime mode through all run creation paths
+  - complete in-app runtime run diagnostics surface
+- Attachment-read quality hardening for complex document parsing/reporting
 
 ### Next
 - Connect lane state to orchestration run/task lifecycle as source-of-truth
 - Add explicit review completion transitions tied to run/task status outcomes
-- Implement skills runtime sandbox + signed registry integration
+- Refine tool routing reliability and tool-intent resolution quality
+- Add automatic `local_docker` -> `remote` fallback when local runtime is unavailable
+- Expand attachment-read diagnostics + edge-case handling (complex/legacy docs)
 
 ## Tech Stack
 - **Frontend**: React 19 + TypeScript + TanStack Router + Shadcn UI + Tailwind CSS

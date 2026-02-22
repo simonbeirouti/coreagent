@@ -1,6 +1,10 @@
 #![allow(deprecated)]
 
 use crate::input_sanitizer::escape_for_prompt;
+use crate::rig_runtime::agent_runner::ToolDecisionPolicy;
+use crate::rig_runtime::telemetry;
+use crate::rig_runtime::tool_adapter;
+use crate::file_read_service::AttachmentReadService;
 use crate::skills_registry_client::{
     CreateRuntimeRunInput, InstalledSkill, RuntimeExecutionMode, RuntimeRunSummary,
     SkillsRegistryClient,
@@ -32,15 +36,6 @@ use async_openai::{
     Client as OpenAIClient,
 };
 
-// Anthropic streaming imports
-use async_anthropic::{
-    types::{
-        ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder, MessageRole,
-        MessagesStreamEvent,
-    },
-    Client as AnthropicStreamingClient,
-};
-
 /// Streaming events for AI responses
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "type", content = "data")]
@@ -59,6 +54,13 @@ struct RuntimeToolSpec {
     version: String,
     description: String,
     parameters_schema: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+struct AnthropicToolUseCall {
+    id: String,
+    name: String,
+    input: serde_json::Value,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -90,14 +92,51 @@ const NON_REGISTRY_RUNTIME_TOOL_KEYS: &[&str] = &[
     "audio_transcription",
     "voice_synthesis",
 ];
+const CORE_ATTACHMENT_READ_KEY: &str = "attachment_read";
+const MAX_PROVIDER_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 /// AI Client manager for handling OpenAI and Anthropic connections
 pub struct AiClientManager {
     openai_client: Option<openai::Client>,
     anthropic_client: Option<anthropic::Client>,
+    tool_decision_policy: ToolDecisionPolicy,
 }
 
 impl AiClientManager {
+    fn estimate_base64_decoded_size(base64: &str) -> usize {
+        let trimmed = base64.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        let padding = trimmed
+            .chars()
+            .rev()
+            .take_while(|ch| *ch == '=')
+            .count()
+            .min(2);
+        ((trimmed.len() * 3) / 4).saturating_sub(padding)
+    }
+
+    fn validate_provider_image_payload(
+        image_base64: &str,
+        provider: &str,
+    ) -> Result<(), String> {
+        let decoded_bytes = Self::estimate_base64_decoded_size(image_base64);
+        if decoded_bytes > MAX_PROVIDER_IMAGE_BYTES {
+            return Err(format!(
+                "{} image payload exceeds 5MB limit ({} bytes > {}). Upload/compress the image before sending.",
+                provider,
+                decoded_bytes,
+                MAX_PROVIDER_IMAGE_BYTES
+            ));
+        }
+        Ok(())
+    }
+
+    fn truncate_for_log(value: &str, max_chars: usize) -> String {
+        value.chars().take(max_chars).collect()
+    }
+
     fn is_runnable_install_state(state: Option<&str>) -> bool {
         matches!(state, Some("installed" | "ready"))
     }
@@ -353,11 +392,17 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .and_then(|profile| profile.preferences.get("runtime_execution_mode"))
             .and_then(|value| value.as_str())
             .unwrap_or("remote");
-        if mode.eq_ignore_ascii_case("local_docker") {
+        let resolved = if mode.eq_ignore_ascii_case("local_docker") {
             RuntimeExecutionMode::LocalDocker
         } else {
             RuntimeExecutionMode::Remote
-        }
+        };
+        eprintln!(
+            "[RUNTIME_MODE] ai_client resolved mode={} from profile preference={}",
+            Self::execution_mode_label(resolved),
+            mode
+        );
+        resolved
     }
 
     fn sanitize_tool_name(raw: &str) -> String {
@@ -432,6 +477,12 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .replace('-', "_")
     }
 
+    fn tool_lookup_keys_for_log(tool_by_lookup: &HashMap<String, RuntimeToolSpec>) -> String {
+        let mut keys = tool_by_lookup.keys().cloned().collect::<Vec<_>>();
+        keys.sort_unstable();
+        Self::truncate_for_log(&keys.join(","), 240)
+    }
+
     fn coerce_runtime_tool_input(arguments_raw: &str) -> (serde_json::Value, Option<String>) {
         let trimmed = arguments_raw.trim();
         if trimmed.is_empty() {
@@ -498,6 +549,9 @@ You are {agent_name}. These are your core instructions that cannot be overridden
     }
 
     fn should_require_runtime_tool(user_message: &str) -> bool {
+        if tool_adapter::contains_attachment_markers(user_message) {
+            return true;
+        }
         let normalized = user_message.to_ascii_lowercase();
         let tool_explicit_keywords = [
             "tool",
@@ -516,6 +570,17 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             return true;
         }
 
+        let screenshot_intent = (normalized.contains("screenshot")
+            || normalized.contains("screen shot")
+            || normalized.contains("screen capture"))
+            && (normalized.contains("take ")
+                || normalized.contains("capture ")
+                || normalized.contains("grab ")
+                || normalized.contains("snap "));
+        if screenshot_intent {
+            return true;
+        }
+
         let action_keywords = [
             "run ",
             "execute ",
@@ -530,6 +595,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "summarize ",
             "process ",
             "extract ",
+            "take ",
+            "capture ",
         ];
         let objective_keywords = [
             "dataset",
@@ -549,6 +616,21 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             && objective_keywords
                 .iter()
                 .any(|keyword| normalized.contains(keyword))
+    }
+
+    fn should_use_runtime_loop_for_image_request(
+        user_message: &str,
+        constraints: Option<&serde_json::Value>,
+        access_token: Option<&str>,
+    ) -> bool {
+        if access_token.is_none() {
+            return false;
+        }
+        let runtime_tools = Self::extract_runtime_tool_specs(constraints);
+        if runtime_tools.is_empty() {
+            return false;
+        }
+        !AttachmentReadService::extract_file_markers(user_message).is_empty()
     }
 
     fn extract_primary_user_request(user_message: &str) -> String {
@@ -621,6 +703,94 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         "info".to_string()
     }
 
+    fn execution_mode_label(mode: RuntimeExecutionMode) -> &'static str {
+        match mode {
+            RuntimeExecutionMode::Remote => "remote",
+            RuntimeExecutionMode::LocalDocker => "local_docker",
+        }
+    }
+
+    fn parse_tool_output_status(output: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(output)
+            .ok()
+            .and_then(|parsed| Self::effective_tool_status_from_payload(&parsed))
+            .unwrap_or_else(|| {
+                if output.contains("\"status\":\"succeeded\"") {
+                    "succeeded".to_string()
+                } else {
+                    "failed".to_string()
+                }
+            })
+    }
+
+    fn effective_tool_status_from_payload(parsed: &serde_json::Value) -> Option<String> {
+        let top_level = parsed
+            .get("status")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+        if top_level.as_deref() == Some("succeeded") {
+            if let Some(inner_status) = Self::extract_inner_output_status(parsed)
+            {
+                if matches!(
+                    inner_status.as_str(),
+                    "failed" | "timed_out" | "cancelled"
+                ) {
+                    return Some(inner_status);
+                }
+            }
+        }
+        top_level
+    }
+
+    fn extract_inner_output_status(parsed: &serde_json::Value) -> Option<String> {
+        let output = parsed.get("output")?;
+        if let Some(status) = output
+            .get("status")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+        {
+            return Some(status);
+        }
+        if let Some(output_str) = output.as_str() {
+            if let Ok(output_json) = serde_json::from_str::<serde_json::Value>(output_str) {
+                return output_json
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string);
+            }
+        }
+        None
+    }
+
+    fn parse_runtime_output_payload(parsed: &serde_json::Value) -> Option<serde_json::Value> {
+        let output = parsed.get("output")?;
+        if output.is_object() || output.is_array() {
+            return Some(output.clone());
+        }
+        if let Some(output_str) = output.as_str() {
+            return serde_json::from_str::<serde_json::Value>(output_str).ok();
+        }
+        None
+    }
+
+    fn normalize_runtime_storage_path(path: &str) -> String {
+        path.trim()
+            .trim_start_matches('/')
+            .trim_start_matches("user-files/")
+            .to_string()
+    }
+
+    fn parse_tool_output_run_id(output: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(output)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .get("runId")
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string)
+            })
+    }
+
     fn normalize_tool_label(tool_name: &str) -> String {
         let without_prefix = tool_name
             .strip_prefix("coreagent_rs_")
@@ -655,6 +825,71 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         "Accepted. I will run the required tool steps and then summarize the results.".to_string()
     }
 
+    fn anthropic_messages_from_history(
+        history: Vec<(String, String)>,
+        user_message: &str,
+    ) -> Vec<serde_json::Value> {
+        let mut messages_json = Vec::new();
+        for (role, content) in history {
+            if role != "user" && role != "assistant" {
+                continue;
+            }
+            messages_json.push(serde_json::json!({
+                "role": role,
+                "content": content
+            }));
+        }
+        messages_json.push(serde_json::json!({
+            "role": "user",
+            "content": user_message
+        }));
+        messages_json
+    }
+
+    fn extract_anthropic_text_and_tool_uses(
+        content_blocks: &[serde_json::Value],
+    ) -> (String, Vec<AnthropicToolUseCall>) {
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut tool_uses: Vec<AnthropicToolUseCall> = Vec::new();
+        for block in content_blocks {
+            let block_type = block
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if block_type == "text" {
+                if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
+                    if !text.is_empty() {
+                        text_chunks.push(text.to_string());
+                    }
+                }
+                continue;
+            }
+            if block_type == "tool_use" {
+                let id = block
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if id.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                tool_uses.push(AnthropicToolUseCall { id, name, input });
+            }
+        }
+        (text_chunks.join(""), tool_uses)
+    }
+
     fn schema_input_fields(schema: &serde_json::Value) -> Vec<String> {
         schema
             .get("properties")
@@ -669,6 +904,12 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         let tool_name = tool.tool_name.to_ascii_lowercase();
         let description = tool.description.to_ascii_lowercase();
         let mut score = 0i32;
+        if message.contains("[file:path:")
+            && (tool_key == CORE_ATTACHMENT_READ_KEY
+                || tool_name.contains(CORE_ATTACHMENT_READ_KEY))
+        {
+            score += 100;
+        }
 
         for token in message.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
             let token = token.trim();
@@ -705,6 +946,14 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         runtime_tools: &[RuntimeToolSpec],
         max_steps: usize,
     ) -> Vec<String> {
+        if user_message.contains("[File:path:") {
+            if let Some(tool) = runtime_tools.iter().find(|tool| {
+                tool.implementation_key == CORE_ATTACHMENT_READ_KEY
+                    || tool.tool_name.contains(CORE_ATTACHMENT_READ_KEY)
+            }) {
+                return vec![tool.tool_name.clone()];
+            }
+        }
         let mut scored = runtime_tools
             .iter()
             .map(|tool| (tool.tool_name.clone(), Self::score_runtime_tool_for_message(user_message, tool)))
@@ -864,9 +1113,12 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             return Err("No AI provider API keys found. Please set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env".to_string());
         }
 
+        let tool_decision_policy = ToolDecisionPolicy::current();
+
         Ok(AiClientManager {
             openai_client,
             anthropic_client,
+            tool_decision_policy,
         })
     }
 
@@ -994,7 +1246,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] OpenAI agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message",
@@ -1002,7 +1254,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Convert conversation history to structured Message objects
@@ -1052,7 +1304,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] Anthropic agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message",
@@ -1060,7 +1312,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Convert conversation history to structured Message objects
@@ -1105,6 +1357,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         user_message: &str,
         image_base64: &str,
     ) -> Result<String, String> {
+        Self::validate_provider_image_payload(image_base64, "OpenAI")?;
         // Build identity prompt for system message
         let identity_prompt = Self::build_identity_prompt(
             agent_name,
@@ -1120,7 +1373,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] OpenAI Vision agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message with image",
@@ -1128,7 +1381,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Convert conversation history to OpenAI message format
@@ -1247,7 +1500,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] Anthropic Vision agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message with image",
@@ -1255,7 +1508,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // For Anthropic vision, we need to use the rig library's native support for images
@@ -1272,7 +1525,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         let image_context = format!(
             "{}\n\n[An image has been provided with this message. The image is encoded in base64 format: data:image/png;base64,{}]",
             user_message,
-            &image_base64[..image_base64.len().min(100)] // Truncate for context, full image in actual API
+            Self::truncate_for_log(image_base64, 100) // Truncate for context, full image in actual API
         );
 
         // Use the rig library's agent with the image-aware prompt
@@ -1321,6 +1574,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         _access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
+        Self::validate_provider_image_payload(image_base64, "Anthropic")?;
         // Build identity prompt for system message
         let identity_prompt = Self::build_identity_prompt(
             agent_name,
@@ -1333,7 +1587,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] Anthropic Vision streaming agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message with image",
@@ -1341,7 +1595,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Get API key from environment
@@ -1554,6 +1808,31 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
+        let should_route_image_to_runtime = self.tool_decision_policy == ToolDecisionPolicy::ProviderNative
+            || Self::should_use_runtime_loop_for_image_request(user_message, constraints, access_token);
+        if should_route_image_to_runtime {
+            eprintln!(
+                "[AI_CLIENT] Image request routed through runtime tool loop."
+            );
+            return self
+                .get_completion_streaming(
+                    provider_type,
+                    model_id,
+                    agent_name,
+                    persona,
+                    mission,
+                    values,
+                    constraints,
+                    user_profile,
+                    messages,
+                    user_message,
+                    agent_id,
+                    access_token,
+                    on_event,
+                )
+                .await;
+        }
+
         // If no image provided, use regular completion
         if image_base64.is_none() {
             return self
@@ -1687,6 +1966,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         _access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
+        Self::validate_provider_image_payload(image_base64, "OpenAI")?;
         // Build identity prompt for system message
         let identity_prompt = Self::build_identity_prompt(
             agent_name,
@@ -1702,7 +1982,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] OpenAI Vision streaming agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message with image",
@@ -1710,7 +1990,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Convert conversation history to OpenAI message format
@@ -1841,9 +2121,41 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         access_token: &str,
         execution_mode: RuntimeExecutionMode,
         agent_id: Option<&str>,
+        latest_user_message: &str,
         on_event: &Channel<StreamEvent>,
     ) -> String {
-        let (parsed_input, input_warning) = Self::coerce_runtime_tool_input(arguments_raw);
+        let executor_mode = tool_adapter::RuntimeExecutorMode::current();
+        let (mut parsed_input, input_warning) = Self::coerce_runtime_tool_input(arguments_raw);
+        if let Some(context_payload) =
+            Self::build_runtime_context_payload(
+                latest_user_message,
+                access_token,
+                &parsed_input,
+                tool_adapter::should_pre_read_attachment_content(
+                    executor_mode,
+                    &spec.implementation_key,
+                ),
+            )
+            .await
+        {
+            if let Some(input_obj) = parsed_input.as_object_mut() {
+                if let Some(message_context) = context_payload.get("messageContext") {
+                    if !input_obj.contains_key("messageContext") {
+                        input_obj.insert("messageContext".to_string(), message_context.clone());
+                    }
+                }
+                if let Some(attachments) = context_payload.get("attachments") {
+                    if !input_obj.contains_key("attachments") {
+                        input_obj.insert("attachments".to_string(), attachments.clone());
+                    }
+                }
+                if let Some(attachment_content) = context_payload.get("attachmentContent") {
+                    if !input_obj.contains_key("attachmentContent") {
+                        input_obj.insert("attachmentContent".to_string(), attachment_content.clone());
+                    }
+                }
+            }
+        }
 
         let _ = on_event.send(StreamEvent::Delta {
             content: format!("\n[tool:{}] starting {}\n", spec.implementation_key, spec.skill_id),
@@ -1853,6 +2165,20 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 content: format!("[tool:{}] {}\n", spec.implementation_key, message),
             });
         }
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool:{}] executor_mode={} execution_mode={}\n",
+                spec.implementation_key,
+                executor_mode.as_str(),
+                Self::execution_mode_label(execution_mode)
+            ),
+        });
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool:{}] branch=execute_runtime_tool_call skill_id={} version={}\n",
+                spec.implementation_key, spec.skill_id, spec.version
+            ),
+        });
 
         let client = match SkillsRegistryClient::from_env() {
             Ok(client) => client,
@@ -1877,8 +2203,31 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             execution_mode,
             timeout_seconds: 120,
         };
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool:{}] creating runtime run skill_id={} version={} execution_mode={}\n",
+                spec.implementation_key,
+                run_input.skill_id,
+                run_input.version,
+                Self::execution_mode_label(execution_mode)
+            ),
+        });
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool:{}] phase=create_run_attempt skill_id={} version={}\n",
+                spec.implementation_key, run_input.skill_id, run_input.version
+            ),
+        });
         let run = match client.create_runtime_run(access_token, run_input.clone()).await {
-            Ok(run) => run,
+            Ok(run) => {
+                let _ = on_event.send(StreamEvent::Delta {
+                    content: format!(
+                        "[tool:{}] phase=create_run_succeeded call_id={} run_id={}\n",
+                        spec.implementation_key, tool_call_id, run.run_id
+                    ),
+                });
+                run
+            }
             Err(error) => {
                 let fallback_run = if Self::is_not_found_runtime_error(&error) {
                     let installed = match client.list_installed_skills(access_token).await {
@@ -1932,6 +2281,25 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                                 .to_string();
                             }
                         }
+                    } else if spec.implementation_key == CORE_ATTACHMENT_READ_KEY {
+                        let _ = on_event.send(StreamEvent::Delta {
+                            content: format!(
+                                "[tool:{}] runtime skill mapping unavailable. Install and map an attachment_read runtime skill.\n",
+                                spec.implementation_key
+                            ),
+                        });
+                        return serde_json::json!({
+                            "toolCallId": tool_call_id,
+                            "status": "failed",
+                            "error": {
+                                "code": "runtime_skill_mapping_missing",
+                                "message": format!(
+                                    "No runnable runtime skill mapping found for '{}'. Install/map the runtime skill.",
+                                    spec.implementation_key
+                                )
+                            }
+                        })
+                        .to_string();
                     } else {
                         None
                     }
@@ -1943,7 +2311,14 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     retry_run
                 } else {
                 let _ = on_event.send(StreamEvent::Delta {
-                    content: format!("[tool:{}] create run failed: {}\n", spec.implementation_key, error),
+                    content: format!(
+                        "[tool:{}] create run failed skill_id={} version={} execution_mode={} error={}\n",
+                        spec.implementation_key,
+                        run_input.skill_id,
+                        run_input.version,
+                        Self::execution_mode_label(execution_mode),
+                        error
+                    ),
                 });
                 return serde_json::json!({
                     "toolCallId": tool_call_id,
@@ -2019,9 +2394,599 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "status": final_run.status,
             "output": final_run.output,
             "error": final_run.error,
-            "inputWarning": input_warning
+            "inputWarning": input_warning,
+            "executionMode": execution_mode,
+            "executorMode": executor_mode.as_str()
         })
         .to_string()
+    }
+
+    async fn build_runtime_context_payload(
+        latest_user_message: &str,
+        access_token: &str,
+        parsed_input: &serde_json::Value,
+        include_attachment_content: bool,
+    ) -> Option<serde_json::Value> {
+        let user_message = Self::strip_internal_tool_context(latest_user_message);
+        let markers = AttachmentReadService::extract_file_markers(latest_user_message);
+        if user_message.trim().is_empty() && markers.is_empty() {
+            return None;
+        }
+
+        let attachments = markers
+            .iter()
+            .map(|marker| {
+                serde_json::json!({
+                    "storagePath": Self::normalize_runtime_storage_path(&marker.storage_path),
+                    "fileName": marker.file_name,
+                    "fileType": marker.file_type
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut payload = serde_json::json!({
+            "messageContext": {
+                "userMessage": user_message,
+                "containsAttachmentMarkers": !markers.is_empty(),
+                "source": "runtime_tool_call"
+            },
+            "attachments": attachments
+        });
+
+        if include_attachment_content && !markers.is_empty() {
+            let mut attachment_read_args = serde_json::json!({
+                "maxAttachments": 5,
+                "maxChars": 8000,
+                "maxFileBytes": 5 * 1024 * 1024
+            });
+            if let Some(requested) = parsed_input.get("attachments").cloned() {
+                if let Some(args_obj) = attachment_read_args.as_object_mut() {
+                    args_obj.insert("attachments".to_string(), requested);
+                }
+            }
+            let read_output = AttachmentReadService::execute(
+                latest_user_message,
+                &attachment_read_args,
+                access_token,
+            )
+            .await;
+            let attachment_content = read_output
+                .get("results")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "storagePath": item.get("storagePath").cloned().unwrap_or(serde_json::Value::Null),
+                        "fileType": item.get("fileType").cloned().unwrap_or(serde_json::Value::Null),
+                        "summary": item.get("summary").cloned().unwrap_or(serde_json::Value::Null),
+                        "contentExcerpt": item.get("contentExcerpt").cloned().unwrap_or(serde_json::Value::Null),
+                        "truncated": item.get("truncated").cloned().unwrap_or(serde_json::Value::Bool(false)),
+                        "status": item.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "attachmentContent".to_string(),
+                    serde_json::Value::Array(attachment_content),
+                );
+            }
+        }
+
+        Some(payload)
+    }
+
+    async fn get_anthropic_completion_streaming_with_runtime_tools(
+        &self,
+        model_id: &str,
+        identity_prompt: String,
+        history: Vec<(String, String)>,
+        user_message: &str,
+        runtime_tools: Vec<RuntimeToolSpec>,
+        execution_mode: RuntimeExecutionMode,
+        access_token: &str,
+        agent_id: Option<&str>,
+        on_event: Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        on_event
+            .send(StreamEvent::Started)
+            .map_err(|e| format!("Failed to send Started event: {}", e))?;
+
+        let latest_user_message = Self::strip_internal_tool_context(user_message);
+        let primary_user_request = Self::extract_primary_user_request(&latest_user_message);
+        let heuristic_requires_tool = Self::should_require_runtime_tool(&primary_user_request);
+        let requires_tool =
+            self.tool_decision_policy.enforces_required_tool() && heuristic_requires_tool;
+        let max_tool_calls = 3usize;
+        let planned_tool_chain = if self.tool_decision_policy.uses_heuristic_planner() && requires_tool {
+            Self::build_runtime_tool_plan(&primary_user_request, &runtime_tools, max_tool_calls)
+        } else {
+            Vec::new()
+        };
+        let candidate_tool_names = runtime_tools
+            .iter()
+            .map(|tool| tool.tool_name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-selection] policy={:?} runnable tool count={} heuristic_requires_tool={} requires_tool={} user_message={}\n",
+                self.tool_decision_policy,
+                runtime_tools.len(),
+                heuristic_requires_tool,
+                requires_tool,
+                primary_user_request
+            ),
+        });
+        telemetry::emit_event(
+            &on_event,
+            telemetry::AGENT_TURN_STARTED,
+            "anthropic",
+            None,
+            "runtime loop started",
+        );
+        if requires_tool {
+            let _ = on_event.send(StreamEvent::Delta {
+                content: format!(
+                    "[tool-chain] phase=plan_created max_steps={} plan={}\n",
+                    max_tool_calls,
+                    planned_tool_chain.join(" -> ")
+                ),
+            });
+        }
+
+        let planned_tool_set: HashSet<String> = planned_tool_chain.iter().cloned().collect();
+        let effective_runtime_tools: Vec<RuntimeToolSpec> = if self.tool_decision_policy.uses_heuristic_planner()
+            && requires_tool
+            && !planned_tool_set.is_empty()
+        {
+                runtime_tools
+                    .iter()
+                    .filter(|tool| planned_tool_set.contains(&tool.tool_name))
+                    .cloned()
+                    .collect()
+        } else {
+            runtime_tools.clone()
+        };
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-chain] phase=planner_filtered callable_tools={}\n",
+                effective_runtime_tools
+                    .iter()
+                    .map(|tool| tool.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+        let acceptance_message = if requires_tool {
+            Some(Self::build_acceptance_message(
+                &effective_runtime_tools
+                    .iter()
+                    .map(|tool| tool.tool_name.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        } else {
+            None
+        };
+        let acceptance_timestamp_ms = acceptance_message
+            .as_ref()
+            .map(|_| Self::now_timestamp_ms());
+
+        let tools_json = effective_runtime_tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.tool_name,
+                    "description": format!(
+                        "{} (implementation_key: {}; key_inputs: {})",
+                        tool.description,
+                        tool.implementation_key,
+                        Self::schema_input_fields(&tool.parameters_schema).join(", ")
+                    ),
+                    "input_schema": tool.parameters_schema,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut tool_by_lookup: HashMap<String, RuntimeToolSpec> = HashMap::new();
+        for tool in effective_runtime_tools {
+            tool_by_lookup.insert(Self::normalize_tool_lookup_key(&tool.tool_name), tool.clone());
+            tool_by_lookup.insert(Self::normalize_tool_lookup_key(&tool.implementation_key), tool);
+        }
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-selection] registered_lookup_keys={}\n",
+                Self::tool_lookup_keys_for_log(&tool_by_lookup)
+            ),
+        });
+
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| "ANTHROPIC_API_KEY not set in environment".to_string())?;
+        let http_client = reqwest::Client::new();
+
+        let mut strict_retry_used = false;
+        let mut has_called_tool = false;
+        let mut task_satisfied = false;
+        let mut tool_calls_used = 0usize;
+        let mut persisted_tool_runs: Vec<PersistedToolRun> = Vec::new();
+        let mut run_index_by_call_id: HashMap<String, usize> = HashMap::new();
+        let mut messages_json = Self::anthropic_messages_from_history(history, user_message);
+
+        for _ in 0..6 {
+            let request_body = serde_json::json!({
+                "model": model_id,
+                "max_tokens": 4096,
+                "system": identity_prompt.clone(),
+                "messages": messages_json.clone(),
+                "tools": tools_json.clone(),
+                "temperature": 0.7,
+            });
+
+            let response = http_client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("Content-Type", "application/json")
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&request_body)
+                .send()
+                .await
+                .map_err(|e| format!("Anthropic tool-call API error: {}", e))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Err(format!(
+                    "Anthropic tool-call API error {}: {}",
+                    status, error_text
+                ));
+            }
+
+            let response_json = response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| format!("Failed to parse Anthropic tool response: {}", e))?;
+            let content_blocks = response_json
+                .get("content")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let (assistant_text, tool_uses) =
+                Self::extract_anthropic_text_and_tool_uses(&content_blocks);
+            messages_json.push(serde_json::json!({
+                "role": "assistant",
+                "content": content_blocks
+            }));
+
+            if tool_uses.is_empty() {
+                if requires_tool && !has_called_tool && !strict_retry_used {
+                    strict_retry_used = true;
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content:
+                            "[tool-selection] required tool was not called; retrying once with strict tool-use instruction.\n"
+                                .to_string(),
+                    });
+                    messages_json.push(serde_json::json!({
+                        "role": "user",
+                        "content": format!(
+                            "Retry policy: you must make at least one runtime tool call now. Candidate tools: {}. Return tool calls only until a tool result is available.",
+                            candidate_tool_names
+                        )
+                    }));
+                    continue;
+                }
+                if requires_tool && !task_satisfied && tool_calls_used >= max_tool_calls {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=budget_exhausted used={} max={}\n",
+                            tool_calls_used, max_tool_calls
+                        ),
+                    });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_BUDGET_EXHAUSTED,
+                        "anthropic",
+                        None,
+                        &format!("used={} max={}", tool_calls_used, max_tool_calls),
+                    );
+                    return Err(if has_called_tool {
+                        format!(
+                            "All planned tool steps failed before task completion (budget {}).",
+                            max_tool_calls
+                        )
+                    } else {
+                        format!(
+                            "Need additional tool steps but tool budget reached ({}).",
+                            max_tool_calls
+                        )
+                    });
+                }
+                if requires_tool && !has_called_tool {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content:
+                            "[tool-selection] required tool invocation was skipped after strict retry.\n"
+                                .to_string(),
+                    });
+                    return Err("Required runtime tool invocation was skipped by the model."
+                        .to_string());
+                }
+                if has_called_tool {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: "[tool-chain] phase=final_summarize\n".to_string(),
+                    });
+                }
+                let persisted_content = if has_called_tool || acceptance_message.is_some() {
+                    let payload = serde_json::json!({
+                        "acceptanceMessage": acceptance_message,
+                        "acceptanceTimestampMs": acceptance_timestamp_ms,
+                        "runs": persisted_tool_runs,
+                    });
+                    format!(
+                        "{}\n\n[ToolExecutionContext]\n{}\n[/ToolExecutionContext]",
+                        assistant_text, payload
+                    )
+                } else {
+                    assistant_text.clone()
+                };
+                if !assistant_text.is_empty() {
+                    on_event
+                        .send(StreamEvent::Delta {
+                            content: assistant_text.clone(),
+                        })
+                        .map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                }
+                on_event
+                    .send(StreamEvent::Done {
+                        full_content: persisted_content.clone(),
+                    })
+                    .map_err(|e| format!("Failed to send Done event: {}", e))?;
+                telemetry::emit_event(
+                    &on_event,
+                    telemetry::AGENT_TURN_COMPLETED,
+                    "anthropic",
+                    None,
+                    "runtime loop completed",
+                );
+                return Ok(persisted_content);
+            }
+
+            let mut tool_result_blocks: Vec<serde_json::Value> = Vec::new();
+            for tool_use in tool_uses {
+                has_called_tool = true;
+                if tool_calls_used >= max_tool_calls {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=budget_blocked call_id={} used={} max={}\n",
+                            tool_use.id, tool_calls_used, max_tool_calls
+                        ),
+                    });
+                    tool_result_blocks.push(serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": serde_json::json!({
+                            "toolCallId": tool_use.id,
+                            "status": "failed",
+                            "error": {
+                                "code": "tool_budget_exhausted",
+                                "message": format!("Tool budget reached ({}).", max_tool_calls)
+                            }
+                        }).to_string()
+                    }));
+                    continue;
+                }
+                tool_calls_used += 1;
+                let normalized_tool_name = Self::normalize_tool_lookup_key(&tool_use.name);
+                let tool_output = if let Some(spec) = tool_by_lookup.get(&normalized_tool_name) {
+                    let started_at_ms = Self::now_timestamp_ms();
+                    let client_run_id = format!("inferred-{}-{}", spec.implementation_key, tool_use.id);
+                    let run_index = persisted_tool_runs.len();
+                    run_index_by_call_id.insert(tool_use.id.clone(), run_index);
+                    persisted_tool_runs.push(PersistedToolRun {
+                        client_run_id: client_run_id.clone(),
+                        implementation_key: spec.implementation_key.clone(),
+                        run_id: None,
+                        status: "running".to_string(),
+                        started_at_ms,
+                        timeline: vec![PersistedToolTimelineEntry {
+                            id: format!("{}-start", client_run_id),
+                            message: format!("Starting {}", spec.implementation_key),
+                            level: "info".to_string(),
+                            timestamp_ms: started_at_ms,
+                            sequence: tool_calls_used,
+                        }],
+                    });
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=tool_step_started step={} tool={} call_id={}\n",
+                            tool_calls_used, spec.tool_name, tool_use.id
+                        ),
+                    });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_CALL_STARTED,
+                        "anthropic",
+                        Some(&spec.tool_name),
+                        &format!("step={} call_id={}", tool_calls_used, tool_use.id),
+                    );
+                    let call_arguments = serde_json::to_string(&tool_use.input).unwrap_or_else(|_| "{}".to_string());
+                    let output = self
+                        .execute_runtime_tool_call(
+                            spec,
+                            &tool_use.id,
+                            &call_arguments,
+                            access_token,
+                            execution_mode,
+                            agent_id,
+                            &latest_user_message,
+                            &on_event,
+                        )
+                        .await;
+                    if let Some(run_index) = run_index_by_call_id.get(&tool_use.id).copied() {
+                        let finished_at_ms = Self::now_timestamp_ms();
+                        if let Ok(parsed_output) = serde_json::from_str::<serde_json::Value>(&output) {
+                            let status = Self::effective_tool_status_from_payload(&parsed_output)
+                                .unwrap_or_else(|| "failed".to_string());
+                            let run_id = parsed_output
+                                .get("runId")
+                                .and_then(|value| value.as_str())
+                                .map(|value| value.to_string());
+                            if let Some(run) = persisted_tool_runs.get_mut(run_index) {
+                                run.status = status.clone();
+                                if run_id.is_some() {
+                                    run.run_id = run_id;
+                                }
+                                let timeline_message = format!("Run completed with status {}.", status);
+                                run.timeline.push(PersistedToolTimelineEntry {
+                                    id: format!("{}-done", run.client_run_id),
+                                    message: timeline_message.clone(),
+                                    level: Self::tool_timeline_level(&timeline_message, Some(&status)),
+                                    timestamp_ms: finished_at_ms,
+                                    sequence: tool_calls_used + max_tool_calls,
+                                });
+                                if spec.implementation_key == CORE_ATTACHMENT_READ_KEY {
+                                    if let Some(output_payload) =
+                                        Self::parse_runtime_output_payload(&parsed_output)
+                                    {
+                                        if let Some(summary) = output_payload
+                                            .get("summary")
+                                            .and_then(|value| value.as_str())
+                                        {
+                                            if !summary.trim().is_empty() {
+                                                run.timeline.push(PersistedToolTimelineEntry {
+                                                    id: format!("{}-summary", run.client_run_id),
+                                                    message: summary.trim().to_string(),
+                                                    level: "info".to_string(),
+                                                    timestamp_ms: finished_at_ms,
+                                                    sequence: tool_calls_used + (max_tool_calls * 2),
+                                                });
+                                            }
+                                        }
+                                        if let Some(results) = output_payload
+                                            .get("results")
+                                            .and_then(|value| value.as_array())
+                                        {
+                                            let mut failure_index = 0usize;
+                                            for item in results {
+                                                let item_status = item
+                                                    .get("status")
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_ascii_lowercase();
+                                                if item_status != "failed" {
+                                                    continue;
+                                                }
+                                                let summary = item
+                                                    .get("summary")
+                                                    .and_then(|value| value.as_str())
+                                                    .map(|value| value.trim().to_string())
+                                                    .filter(|value| !value.is_empty())
+                                                    .unwrap_or_else(|| {
+                                                        "Attachment could not be read.".to_string()
+                                                    });
+                                                run.timeline.push(PersistedToolTimelineEntry {
+                                                    id: format!(
+                                                        "{}-item-failure-{}",
+                                                        run.client_run_id, failure_index
+                                                    ),
+                                                    message: summary,
+                                                    level: "error".to_string(),
+                                                    timestamp_ms: finished_at_ms,
+                                                    sequence: tool_calls_used
+                                                        + (max_tool_calls * 3)
+                                                        + failure_index,
+                                                });
+                                                failure_index += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let tool_status = Self::parse_tool_output_status(&output);
+                    let run_id = Self::parse_tool_output_run_id(&output)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    if tool_status == "succeeded" {
+                        task_satisfied = true;
+                    }
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=tool_step_done step={} budget_remaining={}\n",
+                            tool_calls_used,
+                            max_tool_calls.saturating_sub(tool_calls_used)
+                        ),
+                    });
+                    let telemetry_code = if tool_status == "succeeded" {
+                        telemetry::TOOL_CALL_SUCCEEDED
+                    } else {
+                        telemetry::TOOL_CALL_FAILED
+                    };
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry_code,
+                        "anthropic",
+                        Some(&spec.tool_name),
+                        &format!(
+                            "step={} call_id={} run_id={} status={} execution_mode={} budget_remaining={}",
+                            tool_calls_used,
+                            tool_use.id,
+                            run_id,
+                            tool_status,
+                            Self::execution_mode_label(execution_mode),
+                            max_tool_calls.saturating_sub(tool_calls_used)
+                        ),
+                    );
+                    output
+                } else {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-selection] unregistered tool call requested by model: {} normalized={} available_keys={}\n",
+                            tool_use.name,
+                            normalized_tool_name,
+                            Self::tool_lookup_keys_for_log(&tool_by_lookup)
+                        ),
+                    });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_CALL_FAILED,
+                        "anthropic",
+                        Some(&tool_use.name),
+                        "tool_not_registered",
+                    );
+                    serde_json::json!({
+                        "toolCallId": tool_use.id,
+                        "status": "failed",
+                        "error": {
+                            "code": "tool_not_registered",
+                            "message": format!("Tool '{}' is not registered in runtime tools.", tool_use.name)
+                        }
+                    })
+                    .to_string()
+                };
+                tool_result_blocks.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": tool_output
+                }));
+            }
+            messages_json.push(serde_json::json!({
+                "role": "user",
+                "content": tool_result_blocks
+            }));
+        }
+
+        telemetry::emit_event(
+            &on_event,
+            telemetry::AGENT_TURN_COMPLETED,
+            "anthropic",
+            None,
+            "runtime loop exhausted without terminal response",
+        );
+        Err("Tool-call loop exceeded maximum iterations without terminal assistant response.".to_string())
     }
 
     async fn get_openai_completion_streaming_with_runtime_tools(
@@ -2042,9 +3007,11 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             Self::latest_user_message_text(&chat_messages).unwrap_or_default();
         let latest_user_message = Self::strip_internal_tool_context(&latest_user_message_raw);
         let primary_user_request = Self::extract_primary_user_request(&latest_user_message);
-        let requires_tool = Self::should_require_runtime_tool(&primary_user_request);
+        let heuristic_requires_tool = Self::should_require_runtime_tool(&primary_user_request);
+        let requires_tool =
+            self.tool_decision_policy.enforces_required_tool() && heuristic_requires_tool;
         let max_tool_calls = 3usize;
-        let planned_tool_chain = if requires_tool {
+        let planned_tool_chain = if self.tool_decision_policy.uses_heuristic_planner() && requires_tool {
             Self::build_runtime_tool_plan(&primary_user_request, &runtime_tools, max_tool_calls)
         } else {
             Vec::new()
@@ -2056,12 +3023,21 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .join(", ");
         let _ = on_event.send(StreamEvent::Delta {
             content: format!(
-                "[tool-selection] runnable tool count={} requires_tool={} user_message={}\n",
+                "[tool-selection] policy={:?} runnable tool count={} heuristic_requires_tool={} requires_tool={} user_message={}\n",
+                self.tool_decision_policy,
                 runtime_tools.len(),
+                heuristic_requires_tool,
                 requires_tool,
                 primary_user_request
             ),
         });
+        telemetry::emit_event(
+            &on_event,
+            telemetry::AGENT_TURN_STARTED,
+            "openai",
+            None,
+            "runtime tool loop started",
+        );
         if requires_tool {
             let _ = on_event.send(StreamEvent::Delta {
                 content: format!(
@@ -2117,7 +3093,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         }
 
         let planned_tool_set: HashSet<String> = planned_tool_chain.iter().cloned().collect();
-        let effective_runtime_tools: Vec<RuntimeToolSpec> = if requires_tool && !planned_tool_set.is_empty() {
+        let effective_runtime_tools: Vec<RuntimeToolSpec> = if self.tool_decision_policy.uses_heuristic_planner()
+            && requires_tool
+            && !planned_tool_set.is_empty()
+        {
             runtime_tools
                 .iter()
                 .filter(|tool| planned_tool_set.contains(&tool.tool_name))
@@ -2179,6 +3158,12 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 tool,
             );
         }
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-selection] registered_lookup_keys={}\n",
+                Self::tool_lookup_keys_for_log(&tool_by_lookup)
+            ),
+        });
 
         let mut strict_retry_used = false;
         let mut has_called_tool = false;
@@ -2234,6 +3219,13 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                             tool_calls_used, max_tool_calls
                         ),
                     });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_BUDGET_EXHAUSTED,
+                        "openai",
+                        None,
+                        &format!("used={} max={}", tool_calls_used, max_tool_calls),
+                    );
                     return Err(if has_called_tool {
                         format!(
                             "All planned tool steps failed before task completion (budget {}).",
@@ -2287,6 +3279,13 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         full_content: persisted_content.clone(),
                     })
                     .map_err(|e| format!("Failed to send Done event: {}", e))?;
+                telemetry::emit_event(
+                    &on_event,
+                    telemetry::AGENT_TURN_COMPLETED,
+                    "openai",
+                    None,
+                    "runtime loop completed",
+                );
                 return Ok(persisted_content);
             }
 
@@ -2335,9 +3334,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     continue;
                 }
                 tool_calls_used += 1;
-                let tool_output = if let Some(spec) =
-                    tool_by_lookup.get(&Self::normalize_tool_lookup_key(&call.function.name))
-                {
+                let normalized_tool_name = Self::normalize_tool_lookup_key(&call.function.name);
+                let tool_output = if let Some(spec) = tool_by_lookup.get(&normalized_tool_name) {
                     let started_at_ms = Self::now_timestamp_ms();
                     let client_run_id =
                         format!("inferred-{}-{}", spec.implementation_key, call.id);
@@ -2363,6 +3361,13 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                             tool_calls_used, spec.tool_name, call.id
                         ),
                     });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_CALL_STARTED,
+                        "openai",
+                        Some(&spec.tool_name),
+                        &format!("step={} call_id={}", tool_calls_used, call.id),
+                    );
                     let output = self
                         .execute_runtime_tool_call(
                         spec,
@@ -2371,17 +3376,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         access_token,
                         execution_mode,
                         agent_id,
+                        &latest_user_message,
                         &on_event,
                     )
                     .await;
                     if let Some(run_index) = run_index_by_call_id.get(&call.id).copied() {
                         let finished_at_ms = Self::now_timestamp_ms();
                         if let Ok(parsed_output) = serde_json::from_str::<serde_json::Value>(&output) {
-                            let status = parsed_output
-                                .get("status")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or("failed")
-                                .to_string();
+                            let status = Self::effective_tool_status_from_payload(&parsed_output)
+                                .unwrap_or_else(|| "failed".to_string());
                             let run_id = parsed_output
                                 .get("runId")
                                 .and_then(|value| value.as_str())
@@ -2403,10 +3406,70 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                                     timestamp_ms: finished_at_ms,
                                     sequence: tool_calls_used + max_tool_calls,
                                 });
+                                if spec.implementation_key == CORE_ATTACHMENT_READ_KEY {
+                                    if let Some(output_payload) =
+                                        Self::parse_runtime_output_payload(&parsed_output)
+                                    {
+                                        if let Some(summary) = output_payload
+                                            .get("summary")
+                                            .and_then(|value| value.as_str())
+                                        {
+                                            if !summary.trim().is_empty() {
+                                                run.timeline.push(PersistedToolTimelineEntry {
+                                                    id: format!("{}-summary", run.client_run_id),
+                                                    message: summary.trim().to_string(),
+                                                    level: "info".to_string(),
+                                                    timestamp_ms: finished_at_ms,
+                                                    sequence: tool_calls_used + (max_tool_calls * 2),
+                                                });
+                                            }
+                                        }
+                                        if let Some(results) = output_payload
+                                            .get("results")
+                                            .and_then(|value| value.as_array())
+                                        {
+                                            let mut failure_index = 0usize;
+                                            for item in results {
+                                                let item_status = item
+                                                    .get("status")
+                                                    .and_then(|value| value.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_ascii_lowercase();
+                                                if item_status != "failed" {
+                                                    continue;
+                                                }
+                                                let summary = item
+                                                    .get("summary")
+                                                    .and_then(|value| value.as_str())
+                                                    .map(|value| value.trim().to_string())
+                                                    .filter(|value| !value.is_empty())
+                                                    .unwrap_or_else(|| {
+                                                        "Attachment could not be read.".to_string()
+                                                    });
+                                                run.timeline.push(PersistedToolTimelineEntry {
+                                                    id: format!(
+                                                        "{}-item-failure-{}",
+                                                        run.client_run_id, failure_index
+                                                    ),
+                                                    message: summary,
+                                                    level: "error".to_string(),
+                                                    timestamp_ms: finished_at_ms,
+                                                    sequence: tool_calls_used
+                                                        + (max_tool_calls * 3)
+                                                        + failure_index,
+                                                });
+                                                failure_index += 1;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    if output.contains("\"status\":\"succeeded\"") {
+                    let tool_status = Self::parse_tool_output_status(&output);
+                    let run_id = Self::parse_tool_output_run_id(&output)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    if tool_status == "succeeded" {
                         task_satisfied = true;
                     }
                     let _ = on_event.send(StreamEvent::Delta {
@@ -2416,14 +3479,43 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                             max_tool_calls.saturating_sub(tool_calls_used)
                         ),
                     });
+                    let telemetry_code = if tool_status == "succeeded" {
+                        telemetry::TOOL_CALL_SUCCEEDED
+                    } else {
+                        telemetry::TOOL_CALL_FAILED
+                    };
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry_code,
+                        "openai",
+                        Some(&spec.tool_name),
+                        &format!(
+                            "step={} call_id={} run_id={} status={} execution_mode={} budget_remaining={}",
+                            tool_calls_used,
+                            call.id,
+                            run_id,
+                            tool_status,
+                            Self::execution_mode_label(execution_mode),
+                            max_tool_calls.saturating_sub(tool_calls_used)
+                        ),
+                    );
                     output
                 } else {
                     let _ = on_event.send(StreamEvent::Delta {
                         content: format!(
-                            "[tool-selection] unregistered tool call requested by model: {}\n",
-                            call.function.name
+                            "[tool-selection] unregistered tool call requested by model: {} normalized={} available_keys={}\n",
+                            call.function.name,
+                            normalized_tool_name,
+                            Self::tool_lookup_keys_for_log(&tool_by_lookup)
                         ),
                     });
+                    telemetry::emit_event(
+                        &on_event,
+                        telemetry::TOOL_CALL_FAILED,
+                        "openai",
+                        Some(&call.function.name),
+                        "tool_not_registered",
+                    );
                     serde_json::json!({
                         "toolCallId": call.id,
                         "status": "failed",
@@ -2444,6 +3536,13 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             }
         }
 
+        telemetry::emit_event(
+            &on_event,
+            telemetry::AGENT_TURN_COMPLETED,
+            "openai",
+            None,
+            "runtime loop exhausted without terminal response",
+        );
         Err("Tool-call loop exceeded maximum iterations without terminal assistant response.".to_string())
     }
 
@@ -2478,7 +3577,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         println!(
             "[AI_CLIENT] OpenAI streaming agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message",
@@ -2486,7 +3585,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
         // Convert conversation history to OpenAI message format
@@ -2662,11 +3761,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         user_profile: Option<&UserProfileData>,
         history: Vec<(String, String)>,
         user_message: &str,
-        _agent_id: Option<&str>,
-        _access_token: Option<&str>,
+        agent_id: Option<&str>,
+        access_token: Option<&str>,
         on_event: Channel<StreamEvent>,
     ) -> Result<String, String> {
-        // Build identity prompt for system message
         let identity_prompt = Self::build_identity_prompt(
             agent_name,
             persona,
@@ -2676,12 +3774,9 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             user_profile,
         );
 
-        // Create Anthropic streaming client (uses ANTHROPIC_API_KEY env var automatically)
-        let client = AnthropicStreamingClient::default();
-
         println!(
             "[AI_CLIENT] Anthropic streaming agent with identity prompt: {}",
-            &identity_prompt[..identity_prompt.len().min(50)]
+            Self::truncate_for_log(&identity_prompt, 50)
         );
         println!(
             "[AI_CLIENT] Processing {} history messages + current message",
@@ -2689,74 +3784,187 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         );
         println!(
             "[AI_CLIENT] Current user message: {}",
-            &user_message[..user_message.len().min(100)]
+            Self::truncate_for_log(user_message, 100)
         );
 
-        // Build messages list from history
-        let mut messages = Vec::new();
-
-        // Add conversation history
-        for (role, content) in history {
-            let message_role = match role.as_str() {
-                "user" => MessageRole::User,
-                "assistant" => MessageRole::Assistant,
-                _ => continue, // Skip unknown roles
-            };
-            messages.push(
-                MessageBuilder::default()
-                    .role(message_role)
-                    .content(content)
-                    .build()
-                    .map_err(|e| format!("Failed to build history message: {}", e))?,
+        let runtime_tools = Self::extract_runtime_tool_specs(constraints);
+        let requires_tool_for_message = Self::should_require_runtime_tool(user_message);
+        if !runtime_tools.is_empty() {
+            if let Some(token) = access_token {
+                let mode = Self::runtime_execution_mode_from_profile(user_profile);
+                let _ = on_event.send(StreamEvent::Delta {
+                    content: format!(
+                        "[tool-selection] runtime tools available (count={}) and auth token present.\n",
+                        runtime_tools.len()
+                    ),
+                });
+                return self
+                    .get_anthropic_completion_streaming_with_runtime_tools(
+                        model_id,
+                        identity_prompt,
+                        history,
+                        user_message,
+                        runtime_tools,
+                        mode,
+                        token,
+                        agent_id,
+                        on_event,
+                    )
+                    .await;
+            }
+            if requires_tool_for_message {
+                let _ = on_event.send(StreamEvent::Error {
+                    message: "Runtime tools are available but authentication is missing. Please sign in again to execute tools.".to_string(),
+                });
+                return Err(
+                    "Runtime tools are available but authentication is missing. Please sign in again to execute tools.".to_string(),
+                );
+            }
+            let _ = on_event.send(StreamEvent::Delta {
+                content: format!(
+                    "[tool-selection] runtime tools available (count={}) but auth token missing; falling back to text-only response.\n",
+                    runtime_tools.len()
+                ),
+            });
+            eprintln!(
+                "[AI_CLIENT] Runtime tools available but no auth token; skipping tool execution path."
             );
+        } else {
+            if requires_tool_for_message {
+                let _ = on_event.send(StreamEvent::Error {
+                    message:
+                        "No runnable runtime tools are available for this request. Enable or assign an appropriate tool."
+                            .to_string(),
+                });
+                return Err(
+                    "No runnable runtime tools are available for this request. Enable or assign an appropriate tool."
+                        .to_string(),
+                );
+            }
+            let _ = on_event.send(StreamEvent::Delta {
+                content:
+                    "[tool-selection] no runnable runtime tools available for this request.\n"
+                        .to_string(),
+            });
         }
 
-        // Add current user message
-        messages.push(
-            MessageBuilder::default()
-                .role(MessageRole::User)
-                .content(user_message.to_string())
-                .build()
-                .map_err(|e| format!("Failed to build user message: {}", e))?,
-        );
+        // Text-only Anthropic streaming via direct SSE transport.
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| "ANTHROPIC_API_KEY not set in environment".to_string())?;
+        let messages_json = Self::anthropic_messages_from_history(history, user_message);
+        let request_body = serde_json::json!({
+            "model": model_id,
+            "max_tokens": 4096,
+            "system": identity_prompt,
+            "messages": messages_json,
+            "stream": true,
+            "temperature": 0.7,
+        });
+        let http_client = reqwest::Client::new();
+        let response = http_client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("Content-Type", "application/json")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send Anthropic streaming request: {}", e))?;
 
-        // Build the streaming request
-        let request = CreateMessagesRequestBuilder::default()
-            .model(model_id)
-            .max_tokens(4096i32)
-            .system(identity_prompt)
-            .messages(messages)
-            .build()
-            .map_err(|e| format!("Failed to build Anthropic streaming request: {}", e))?;
-
-        // Create streaming response
-        let mut stream = client.messages().create_stream(request).await;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            let error_message = format!("Anthropic API error {}: {}", status, error_text);
+            let _ = on_event.send(StreamEvent::Error {
+                message: error_message.clone(),
+            });
+            return Err(error_message);
+        }
 
         let mut full_content = String::new();
         on_event
             .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(event) => {
-                    // Handle the ContentBlockDelta variant which contains text deltas
-                    if let MessagesStreamEvent::ContentBlockDelta { delta, .. } = event {
-                        if let ContentBlockDelta::TextDelta { text } = delta {
-                            full_content.push_str(&text);
-                            on_event
-                                .send(StreamEvent::Delta { content: text })
-                                .map_err(|e| format!("Failed to send Delta event: {}", e))?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    buffer.push_str(&chunk_str);
+                    while let Some(event_end) = buffer.find("\n\n") {
+                        let event_data = buffer[..event_end].to_string();
+                        buffer = buffer[event_end + 2..].to_string();
+                        for line in event_data.lines() {
+                            let Some(data) = line.strip_prefix("data: ") else {
+                                continue;
+                            };
+                            if data.trim() == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if event.get("type").and_then(|t| t.as_str())
+                                    == Some("content_block_delta")
+                                {
+                                    if let Some(delta) = event.get("delta") {
+                                        if delta.get("type").and_then(|t| t.as_str())
+                                            == Some("text_delta")
+                                        {
+                                            if let Some(text) =
+                                                delta.get("text").and_then(|t| t.as_str())
+                                            {
+                                                full_content.push_str(text);
+                                                on_event
+                                                    .send(StreamEvent::Delta {
+                                                        content: text.to_string(),
+                                                    })
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to send Delta event: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            }
+                                        }
+                                    }
+                                } else if event.get("type").and_then(|t| t.as_str()) == Some("error")
+                                {
+                                    let error_msg = event
+                                        .get("error")
+                                        .and_then(|e| e.get("message"))
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("Unknown error");
+                                    let normalized = format!(
+                                        "Anthropic streaming error: {}",
+                                        error_msg
+                                    );
+                                    on_event
+                                        .send(StreamEvent::Error {
+                                            message: normalized.clone(),
+                                        })
+                                        .map_err(|e| {
+                                            format!("Failed to send Error event: {}", e)
+                                        })?;
+                                    return Err(normalized);
+                                }
+                            }
                         }
                     }
                 }
                 Err(e) => {
+                    let normalized = format!("Anthropic streaming read error: {}", e);
                     on_event
                         .send(StreamEvent::Error {
-                            message: format!("Anthropic streaming error: {}", e),
+                            message: normalized.clone(),
                         })
-                        .map_err(|e| format!("Failed to send Error event: {}", e))?;
-                    return Err(format!("Anthropic streaming error: {}", e));
+                        .map_err(|send_error| {
+                            format!("Failed to send Error event: {}", send_error)
+                        })?;
+                    return Err(normalized);
                 }
             }
         }
@@ -2788,6 +3996,7 @@ mod tests {
     use crate::user_profile_service::UserProfileData;
     use chrono::Utc;
     use serde_json::json;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn make_profile(preferences: serde_json::Value) -> UserProfileData {
@@ -2907,6 +4116,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_lookup_keys_for_log_sorts_keys() {
+        let mut tool_by_lookup = HashMap::new();
+        tool_by_lookup.insert(
+            "z_key".to_string(),
+            super::RuntimeToolSpec {
+                tool_name: "z_key".to_string(),
+                implementation_key: "z.key".to_string(),
+                skill_id: "z.key".to_string(),
+                version: "latest".to_string(),
+                description: "Z".to_string(),
+                parameters_schema: json!({}),
+            },
+        );
+        tool_by_lookup.insert(
+            "a_key".to_string(),
+            super::RuntimeToolSpec {
+                tool_name: "a_key".to_string(),
+                implementation_key: "a.key".to_string(),
+                skill_id: "a.key".to_string(),
+                version: "latest".to_string(),
+                description: "A".to_string(),
+                parameters_schema: json!({}),
+            },
+        );
+        assert_eq!(AiClientManager::tool_lookup_keys_for_log(&tool_by_lookup), "a_key,z_key");
+    }
+
+    #[test]
     fn coerce_runtime_tool_input_wraps_invalid_json_as_text_payload() {
         let (payload, warning) = AiClientManager::coerce_runtime_tool_input("analyze this");
         assert_eq!(
@@ -2950,12 +4187,93 @@ mod tests {
     }
 
     #[test]
+    fn requires_runtime_tool_for_file_attachment_marker() {
+        assert!(AiClientManager::should_require_runtime_tool(
+            "[File:path:user-1/report.pdf|name:report.pdf|type:pdf]\nSummarize this."
+        ));
+    }
+
+    #[test]
+    fn requires_runtime_tool_for_screenshot_attachment_marker() {
+        assert!(AiClientManager::should_require_runtime_tool(
+            "[Screenshot:path:user-files/user-1/shot.jpg]\nSummarize this."
+        ));
+    }
+
+    #[test]
+    fn requires_runtime_tool_for_natural_language_screenshot_request() {
+        assert!(AiClientManager::should_require_runtime_tool(
+            "take a screenshot and summarize it"
+        ));
+    }
+
+    #[test]
+    fn image_requests_with_markers_use_runtime_loop_when_tools_and_auth_available() {
+        let constraints = json!({
+            "runtime_tools": [
+                {
+                    "implementation_key": "attachment_read",
+                    "enabled": true,
+                    "config": {}
+                }
+            ]
+        });
+        assert!(AiClientManager::should_use_runtime_loop_for_image_request(
+            "[File:path:user-1/report.pdf|name:report.pdf|type:pdf]\nSummarize.",
+            Some(&constraints),
+            Some("token")
+        ));
+    }
+
+    #[test]
+    fn image_requests_with_screenshot_marker_use_runtime_loop_when_tools_and_auth_available() {
+        let constraints = json!({
+            "runtime_tools": [
+                {
+                    "implementation_key": "attachment_read",
+                    "enabled": true,
+                    "config": {}
+                }
+            ]
+        });
+        assert!(AiClientManager::should_use_runtime_loop_for_image_request(
+            "[Screenshot:path:user-files/user-1/shot.jpg]\nSummarize.",
+            Some(&constraints),
+            Some("token")
+        ));
+    }
+
+    #[test]
+    fn image_requests_without_markers_keep_vision_path() {
+        let constraints = json!({
+            "runtime_tools": [
+                {
+                    "implementation_key": "attachment_read",
+                    "enabled": true,
+                    "config": {}
+                }
+            ]
+        });
+        assert!(!AiClientManager::should_use_runtime_loop_for_image_request(
+            "Summarize this screenshot.",
+            Some(&constraints),
+            Some("token")
+        ));
+    }
+
+    #[test]
     fn strip_internal_tool_context_removes_runtime_catalog_blocks() {
         let input = "[RuntimeToolContext]\ncatalog\n[/RuntimeToolContext]\nGenerate regex";
         assert_eq!(
             AiClientManager::strip_internal_tool_context(input),
             "Generate regex"
         );
+    }
+
+    #[test]
+    fn strip_internal_tool_context_removes_tool_execution_blocks() {
+        let input = "answer\n[ToolExecutionContext]\n{\"runs\":[]}\n[/ToolExecutionContext]";
+        assert_eq!(AiClientManager::strip_internal_tool_context(input), "answer");
     }
 
     #[test]
@@ -2992,6 +4310,56 @@ mod tests {
             "Generate a regex for invoice IDs\n\nRelevant prior context:\n[Memory 0.9] ...",
         );
         assert_eq!(primary, "Generate a regex for invoice IDs");
+    }
+
+    #[test]
+    fn extract_anthropic_text_and_tool_uses_reads_text_and_tool_calls() {
+        let blocks = vec![
+            json!({
+                "type": "text",
+                "text": "Working on it."
+            }),
+            json!({
+                "type": "tool_use",
+                "id": "toolu_123",
+                "name": "coreagent_rs_regex_advisor",
+                "input": {"query":"INV-2026-1234"}
+            }),
+        ];
+        let (text, tool_uses) = AiClientManager::extract_anthropic_text_and_tool_uses(&blocks);
+        assert_eq!(text, "Working on it.");
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0].id, "toolu_123");
+        assert_eq!(tool_uses[0].name, "coreagent_rs_regex_advisor");
+        assert_eq!(tool_uses[0].input, json!({"query":"INV-2026-1234"}));
+    }
+
+    #[test]
+    fn build_runtime_tool_plan_prefers_attachment_read_for_file_markers() {
+        let tools = vec![
+            super::RuntimeToolSpec {
+                tool_name: "coreagent_py_deep_analysis".to_string(),
+                implementation_key: "coreagent.py.deep_analysis".to_string(),
+                skill_id: "coreagent.py.deep_analysis".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Run deep numeric analysis.".to_string(),
+                parameters_schema: json!({}),
+            },
+            super::RuntimeToolSpec {
+                tool_name: "attachment_read".to_string(),
+                implementation_key: "attachment_read".to_string(),
+                skill_id: "attachment_read".to_string(),
+                version: "latest".to_string(),
+                description: "Read attached files.".to_string(),
+                parameters_schema: json!({}),
+            },
+        ];
+        let plan = AiClientManager::build_runtime_tool_plan(
+            "[File:path:user-1/manual.txt|name:manual.txt|type:txt]\nUse this.",
+            &tools,
+            3,
+        );
+        assert_eq!(plan.first().cloned(), Some("attachment_read".to_string()));
     }
 
     #[test]
@@ -3038,5 +4406,87 @@ mod tests {
         assert!(!AiClientManager::is_not_found_runtime_error(
             "Registry request failed (500): upstream unavailable"
         ));
+    }
+
+    #[test]
+    fn provider_image_payload_validation_rejects_images_over_5mb() {
+        let decoded_bytes = 5 * 1024 * 1024 + 1;
+        let oversized_base64_len = decoded_bytes.div_ceil(3) * 4;
+        let oversized_base64 = "A".repeat(oversized_base64_len);
+
+        let result =
+            AiClientManager::validate_provider_image_payload(&oversized_base64, "Anthropic");
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap_or_default()
+                .contains("exceeds 5MB limit")
+        );
+    }
+
+    #[test]
+    fn provider_image_payload_validation_accepts_images_at_or_below_5mb() {
+        let decoded_bytes = 5 * 1024 * 1024;
+        let base64_len = decoded_bytes.div_ceil(3) * 4;
+        let base64 = "A".repeat(base64_len);
+        let result = AiClientManager::validate_provider_image_payload(&base64, "OpenAI");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn truncate_for_log_handles_unicode_boundaries() {
+        let input = "take a screenshot – agent’s note";
+        let output = AiClientManager::truncate_for_log(input, 20);
+        assert_eq!(output.chars().count(), 20);
+        assert!(input.starts_with(&output));
+    }
+
+    #[test]
+    fn parse_tool_output_status_and_run_id_from_valid_json() {
+        let output = serde_json::json!({
+            "status": "failed",
+            "runId": "run_123"
+        })
+        .to_string();
+        assert_eq!(AiClientManager::parse_tool_output_status(&output), "failed");
+        assert_eq!(
+            AiClientManager::parse_tool_output_run_id(&output),
+            Some("run_123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_tool_output_status_defaults_to_failed_for_non_json() {
+        assert_eq!(
+            AiClientManager::parse_tool_output_status("not-json-output"),
+            "failed"
+        );
+        assert_eq!(AiClientManager::parse_tool_output_run_id("not-json-output"), None);
+    }
+
+    #[test]
+    fn parse_tool_output_status_prefers_failed_inner_output_status() {
+        let output = serde_json::json!({
+            "status": "succeeded",
+            "runId": "run_abc",
+            "output": {
+                "status": "failed",
+                "summary": "Read 0 of 1 attachment(s)."
+            }
+        })
+        .to_string();
+        assert_eq!(AiClientManager::parse_tool_output_status(&output), "failed");
+    }
+
+    #[test]
+    fn parse_tool_output_status_prefers_failed_inner_output_status_when_output_is_stringified_json() {
+        let output = serde_json::json!({
+            "status": "succeeded",
+            "runId": "run_abc",
+            "output": "{\"status\":\"failed\",\"summary\":\"Read 0 of 1 attachment(s).\"}"
+        })
+        .to_string();
+        assert_eq!(AiClientManager::parse_tool_output_status(&output), "failed");
     }
 }

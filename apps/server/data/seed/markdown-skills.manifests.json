@@ -55,7 +55,12 @@
         "required": ["topic"]
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "summary": { "type": "string" },
+          "findings": { "type": "array" },
+          "recommendations": { "type": "array" }
+        }
       },
       "permissions": [
         {
@@ -118,10 +123,22 @@
       "entrypoint": "SKILL.md",
       "runtime": "command",
       "input_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "decision_title": { "type": "string" },
+          "context": { "type": "string" },
+          "options_considered": { "type": "array" },
+          "selected_option": { "type": "string" }
+        },
+        "required": ["decision_title", "selected_option"]
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "decision": { "type": "string" },
+          "tradeoffs": { "type": "array" },
+          "validation_plan": { "type": "array" }
+        }
       },
       "permissions": [
         {
@@ -184,10 +201,22 @@
       "entrypoint": "SKILL.md",
       "runtime": "command",
       "input_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "goal": { "type": "string" },
+          "skill_id": { "type": "string" },
+          "agent_id": { "type": "string" },
+          "version": { "type": "string" }
+        },
+        "required": ["goal"]
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "action_plan": { "type": "array" },
+          "commands": { "type": "array" },
+          "failure_handling": { "type": "array" }
+        }
       },
       "permissions": [
         {
@@ -260,7 +289,11 @@
         }
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "summary": { "type": "object" },
+          "insight": { "type": "string" }
+        }
       },
       "permissions": [
         {
@@ -346,10 +379,27 @@
       "runtime": "command",
       "runtime_profile": "python",
       "input_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "team": { "type": "string" },
+                "score": { "type": "number" }
+              }
+            }
+          }
+        }
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "summary": { "type": "object" },
+          "top_rows": { "type": "array" },
+          "note": { "type": "string" }
+        }
       },
       "permissions": [
         {
@@ -371,6 +421,133 @@
         "min_app_version": "1.0.0"
       },
       "dependencies": ["pandas"],
+      "healthcheck": {},
+      "heartbeat_policy": {}
+    }
+  },
+  {
+    "skillId": "coreagent.py.attachment_read",
+    "implementationKey": "attachment_read",
+    "name": "Python Attachment Read",
+    "description": "Processes attachment context payloads and returns normalized attachment summaries.",
+    "version": "1.0.0",
+    "runtime": "command",
+    "entrypoint": "run.sh",
+    "artifactPath": "../skills/command/python-attachment-read/run.sh",
+    "riskLevel": "moderate",
+    "source": "coreagent_python_runtime_attachment",
+    "compatibilityMinAppVersion": "1.0.0",
+    "permissions": [
+      {
+        "permissionKey": "process.exec",
+        "required": true,
+        "riskLevel": "moderate",
+        "permissionScope": {}
+      }
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "storagePath": { "type": "string" },
+              "fileName": { "type": "string" },
+              "fileType": { "type": "string" }
+            }
+          }
+        },
+        "attachmentContent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "storagePath": { "type": "string" },
+              "summary": { "type": "string" },
+              "contentExcerpt": { "type": "string" },
+              "truncated": { "type": "boolean" },
+              "fileType": { "type": "string" }
+            }
+          }
+        },
+        "maxAttachments": { "type": "integer" },
+        "maxFileBytes": { "type": "integer" },
+        "maxChars": { "type": "integer" }
+      },
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" },
+        "summary": { "type": "string" },
+        "readCount": { "type": "number" },
+        "results": { "type": "array" }
+      }
+    },
+    "manifest": {
+      "skill_id": "coreagent.py.attachment_read",
+      "name": "Python Attachment Read",
+      "version": "1.0.0",
+      "description": "Processes attachment context payloads and returns normalized attachment summaries.",
+      "entrypoint": "run.sh",
+      "runtime": "command",
+      "runtime_profile": "python",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "storagePath": { "type": "string" },
+                "fileName": { "type": "string" },
+                "fileType": { "type": "string" }
+              }
+            }
+          },
+          "attachmentContent": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "storagePath": { "type": "string" },
+                "summary": { "type": "string" },
+                "contentExcerpt": { "type": "string" },
+                "truncated": { "type": "boolean" },
+                "fileType": { "type": "string" }
+              }
+            }
+          },
+          "maxAttachments": { "type": "integer" },
+          "maxFileBytes": { "type": "integer" },
+          "maxChars": { "type": "integer" }
+        },
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "summary": { "type": "string" },
+          "readCount": { "type": "number" },
+          "results": { "type": "array" }
+        }
+      },
+      "permissions": [
+        {
+          "permission_key": "process.exec",
+          "required": true,
+          "risk_level": "moderate",
+          "permission_scope": {}
+        }
+      ],
+      "compatibility": {
+        "min_app_version": "1.0.0"
+      },
       "healthcheck": {},
       "heartbeat_policy": {}
     }
@@ -427,10 +604,19 @@
       "runtime": "command",
       "runtime_profile": "default",
       "input_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "baseDate": { "type": "string" },
+          "offsetDays": { "type": "array", "items": { "type": "number" } }
+        }
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "timeline": { "type": "array" },
+          "generatedAt": { "type": "string" },
+          "note": { "type": "string" }
+        }
       },
       "permissions": [
         {
@@ -509,10 +695,20 @@
       "runtime": "command",
       "runtime_profile": "rust",
       "input_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "pattern": { "type": "string" }
+        }
       },
       "output_schema": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "patternUsed": { "type": "string" },
+          "matchCount": { "type": "number" },
+          "matches": { "type": "array" },
+          "advisory": { "type": "string" }
+        }
       },
       "permissions": [
         {

@@ -14,6 +14,10 @@ insert into storage.buckets (id, name)
 insert into storage.buckets (id, name)
   values ('audio', 'audio');
 
+-- User assets bucket (owner-only for all operations)
+insert into storage.buckets (id, name)
+  values ('user-files', 'user-files');
+
 -- Set up access controls for storage.
 -- Avatars bucket policies (public read, owner-only CRUD)
 create policy "Avatar images are publicly accessible." on storage.objects
@@ -86,6 +90,64 @@ create policy "Users can delete their own audio files." on storage.objects
     bucket_id = 'audio'
     and (select auth.uid())::text = (storage.foldername(name))[1]
   );
+
+create policy "Users can view their own files." on storage.objects
+  for select using (
+    bucket_id = 'user-files'
+    and (select auth.uid())::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can upload their own files." on storage.objects
+  for insert with check (
+    bucket_id = 'user-files'
+    and (select auth.uid())::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can update their own files." on storage.objects
+  for update using (
+    bucket_id = 'user-files'
+    and (select auth.uid())::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can delete their own files." on storage.objects
+  for delete using (
+    bucket_id = 'user-files'
+    and (select auth.uid())::text = (storage.foldername(name))[1]
+  );
+
+-- user_files catalog tracks uploaded assets for filtering/listing.
+-- Types were expanded to include both documents and image assets.
+create table user_files (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  storage_path text not null unique,
+  file_name text not null,
+  file_ext text not null check (file_ext in ('txt', 'pdf', 'doc', 'csv', 'png', 'jpg', 'jpeg', 'gif', 'webp')),
+  mime_type text not null,
+  size_bytes bigint not null check (size_bytes >= 0),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index idx_user_files_user_created_at
+  on user_files (user_id, created_at desc);
+
+create index idx_user_files_user_file_ext
+  on user_files (user_id, file_ext);
+
+alter table user_files enable row level security;
+
+create policy "Users can view their own user files" on user_files
+  for select using (auth.uid() = user_id);
+
+create policy "Users can insert their own user files" on user_files
+  for insert with check (auth.uid() = user_id);
+
+create policy "Users can update their own user files" on user_files
+  for update using (auth.uid() = user_id);
+
+create policy "Users can delete their own user files" on user_files
+  for delete using (auth.uid() = user_id);
 
 -- ============================================================================
 -- Agents and Conversations Schema
@@ -249,6 +311,9 @@ CREATE TRIGGER update_agents_updated_at BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_conversations_updated_at BEFORE UPDATE ON conversations
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_files_updated_at BEFORE UPDATE ON user_files
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================

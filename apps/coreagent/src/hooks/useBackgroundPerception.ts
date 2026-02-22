@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
-import { compressImage } from '@/lib/storage';
+import { compressImageToFitLimit, estimateBase64Bytes, MAX_ATTACHMENT_BYTES } from '@/lib/storage';
 import { abilityKeys, perceptionKeys } from '@/lib/query-keys';
 
 export interface ScreenshotResult {
@@ -83,9 +83,21 @@ export function useBackgroundPerception(options: BackgroundPerceptionOptions) {
       // Compress if enabled
       if (compress) {
         try {
-          imageToSend = await compressImage(result.image_base64, quality, maxWidth);
+          const compressed = await compressImageToFitLimit(result.image_base64, MAX_ATTACHMENT_BYTES, {
+            quality,
+            maxWidth,
+          });
+          imageToSend = compressed.base64;
         } catch (compressError) {
-          console.warn('Image compression failed, using original:', compressError);
+          console.warn('Image compression failed:', compressError);
+          throw compressError;
+        }
+      } else {
+        const rawBytes = estimateBase64Bytes(result.image_base64);
+        if (rawBytes > MAX_ATTACHMENT_BYTES) {
+          throw new Error(
+            `Background screenshot exceeds 5MB limit (${rawBytes} bytes). Enable compression for background perception.`
+          );
         }
       }
 

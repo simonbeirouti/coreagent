@@ -28,23 +28,59 @@ use std::fs;
 fn main() {
     let input = fs::read_to_string("/workspace/input.json").unwrap_or_else(|_| "{}".to_string());
     let payload: Value = serde_json::from_str(&input).unwrap_or_else(|_| json!({}));
+    let attachment_text = payload
+        .get("attachmentContent")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            let joined = items
+                .iter()
+                .filter_map(|item| {
+                    item.get("contentExcerpt")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("summary").and_then(Value::as_str))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.trim().is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        });
     let text = payload
         .get("text")
         .and_then(Value::as_str)
-        .unwrap_or("tickets: CORE-101 CORE-205 CORE-999");
+        .or_else(|| {
+            payload
+                .get("messageContext")
+                .and_then(Value::as_object)
+                .and_then(|ctx| ctx.get("userMessage"))
+                .and_then(Value::as_str)
+        })
+        .or(attachment_text.as_deref())
+        .unwrap_or("");
+    if text.trim().is_empty() {
+        eprintln!("VALIDATION_ERROR:missing required input text or messageContext.userMessage");
+        std::process::exit(1);
+    }
     let pattern = payload
         .get("pattern")
         .and_then(Value::as_str)
-        .unwrap_or(r"CORE-\d+");
-
-    let regex = Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"CORE-\d+").expect("valid fallback regex"));
+        .unwrap_or(r"[A-Za-z]+-\d+");
+    let regex = match Regex::new(pattern) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("VALIDATION_ERROR:invalid regex pattern provided");
+            std::process::exit(1);
+        }
+    };
     let matches: Vec<String> = regex.find_iter(text).map(|m| m.as_str().to_string()).collect();
 
     let output = json!({
         "patternUsed": regex.as_str(),
         "matchCount": matches.len(),
         "matches": matches,
-        "advisory": "Extracted ticket-like identifiers using regex crate installed at runtime."
+        "advisory": "Extracted regex matches from submitted runtime context (message and optional file excerpts)."
     });
 
     println!("{}", output);

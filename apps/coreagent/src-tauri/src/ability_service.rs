@@ -95,12 +95,13 @@ struct SkillDefinition<'a> {
 pub struct AbilityService;
 
 impl AbilityService {
-    const CORE_TOOL_KEYS: [&'static str; 5] = [
+    const CORE_TOOL_KEYS: [&'static str; 6] = [
         "memory_retrieval",
         "vision_screenshot",
         "vision_analysis",
         "audio_transcription",
         "voice_synthesis",
+        "attachment_read",
     ];
 
     fn identity_trends_enabled() -> bool {
@@ -191,6 +192,16 @@ impl AbilityService {
 
     fn is_core_category(category: &str) -> bool {
         matches!(category, "memory" | "perception" | "communication")
+    }
+
+    fn default_config_for_implementation_key(implementation_key: &str) -> serde_json::Value {
+        if implementation_key == "attachment_read" {
+            return serde_json::json!({
+                "skill_id": "coreagent.py.attachment_read",
+                "version": "1.0.0"
+            });
+        }
+        serde_json::json!({})
     }
 
     fn value_matches_schema_type(value: &serde_json::Value, expected_type: &str) -> bool {
@@ -398,40 +409,73 @@ impl AbilityService {
                 "General text conversation handling",
                 "communication",
                 "conversation",
+                serde_json::json!({}),
             ),
             (
                 "Vision Screenshot",
                 "Capture and analyze screenshots",
                 "perception",
                 "vision_screenshot",
+                serde_json::json!({}),
             ),
             (
                 "Vision Analysis",
                 "Analyze user-provided images",
                 "perception",
                 "vision_analysis",
+                serde_json::json!({}),
             ),
             (
                 "Audio Transcription",
                 "Transcribe voice to text",
                 "communication",
                 "audio_transcription",
+                serde_json::json!({}),
             ),
             (
                 "Voice Synthesis",
                 "Generate audio responses",
                 "communication",
                 "voice_synthesis",
+                serde_json::json!({}),
             ),
             (
                 "Memory Retrieval",
                 "Semantic memory lookup for prior context",
                 "memory",
                 "memory_retrieval",
+                serde_json::json!({}),
+            ),
+            (
+                "Attachment Read",
+                "Read attached documents and summarize attached images for chat context",
+                "memory",
+                "attachment_read",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "attachments": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "storagePath": { "type": "string" },
+                                    "path": { "type": "string" }
+                                },
+                                "additionalProperties": true
+                            }
+                        },
+                        "maxAttachments": { "type": "integer" },
+                        "maxFileBytes": { "type": "integer" },
+                        "maxChars": { "type": "integer" }
+                    },
+                    "required": [],
+                    "additionalProperties": true
+                }),
             ),
         ];
 
-        for (name, description, category, implementation_key) in defaults {
+        for (name, description, category, implementation_key, parameters_schema) in defaults {
             let exists = abilities::Entity::find()
                 .filter(abilities::Column::Name.eq(name))
                 .one(db)
@@ -446,7 +490,7 @@ impl AbilityService {
                     category: ActiveValue::Set(category.to_string()),
                     implementation_key: ActiveValue::Set(implementation_key.to_string()),
                     is_premium: ActiveValue::Set(false),
-                    parameters_schema: ActiveValue::Set(serde_json::json!({})),
+                    parameters_schema: ActiveValue::Set(parameters_schema),
                     created_at: ActiveValue::Set(chrono::Utc::now().into()),
                 };
 
@@ -475,30 +519,50 @@ impl AbilityService {
     async fn ensure_agent_ability_row(
         db: &DatabaseConnection,
         agent_id: Uuid,
-        ability_id: Uuid,
+        ability: &abilities::Model,
     ) -> Result<agent_abilities::Model, String> {
         let existing = agent_abilities::Entity::find()
             .filter(agent_abilities::Column::AgentId.eq(agent_id))
-            .filter(agent_abilities::Column::AbilityId.eq(ability_id))
+            .filter(agent_abilities::Column::AbilityId.eq(ability.id))
             .one(db)
             .await
             .map_err(|e| format!("Failed to query agent ability: {e}"))?;
 
         if let Some(row) = existing {
+            // Backfill legacy rows that predate explicit runtime skill mapping config.
+            if row
+                .config
+                .as_object()
+                .map(|obj| obj.is_empty())
+                .unwrap_or(false)
+            {
+                let default_config =
+                    Self::default_config_for_implementation_key(&ability.implementation_key);
+                if default_config.as_object().is_some_and(|obj| !obj.is_empty()) {
+                    let mut active: agent_abilities::ActiveModel = row.clone().into();
+                    active.config = Set(default_config);
+                    return active
+                        .update(db)
+                        .await
+                        .map_err(|e| format!("Failed backfilling ability config: {e}"));
+                }
+            }
             return Ok(row);
         }
 
         let model = agent_abilities::ActiveModel {
             id: ActiveValue::Set(Uuid::new_v4()),
             agent_id: ActiveValue::Set(agent_id),
-            ability_id: ActiveValue::Set(ability_id),
+            ability_id: ActiveValue::Set(ability.id),
             acquired_at: ActiveValue::Set(chrono::Utc::now().into()),
             usage_count: ActiveValue::Set(0),
             success_count: ActiveValue::Set(0),
             proficiency: ActiveValue::Set(0.0),
             last_used_at: ActiveValue::Set(None),
             enabled: ActiveValue::Set(true),
-            config: ActiveValue::Set(serde_json::json!({})),
+            config: ActiveValue::Set(Self::default_config_for_implementation_key(
+                &ability.implementation_key,
+            )),
         };
 
         model
@@ -542,7 +606,7 @@ impl AbilityService {
 
         let mut out = Vec::with_capacity(abilities.len());
         for ability in abilities {
-            let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+            let row = Self::ensure_agent_ability_row(db, agent_id, &ability).await?;
             out.push(Self::to_tool_setting(agent_id, &ability, &row));
         }
 
@@ -563,7 +627,7 @@ impl AbilityService {
                 ability.category
             ));
         }
-        let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+        let row = Self::ensure_agent_ability_row(db, agent_id, &ability).await?;
 
         let mut active: agent_abilities::ActiveModel = row.into();
         active.enabled = Set(enabled);
@@ -585,7 +649,7 @@ impl AbilityService {
         let ability = Self::find_ability_by_implementation_key(db, &implementation_key).await?;
         Self::validate_config_against_schema(&config, &ability.parameters_schema)?;
 
-        let row = Self::ensure_agent_ability_row(db, agent_id, ability.id).await?;
+        let row = Self::ensure_agent_ability_row(db, agent_id, &ability).await?;
         let mut active: agent_abilities::ActiveModel = row.into();
         active.config = Set(config);
         let updated = active
@@ -662,7 +726,9 @@ impl AbilityService {
                     proficiency: ActiveValue::Set(proficiency),
                     last_used_at: ActiveValue::Set(Some(chrono::Utc::now().into())),
                     enabled: ActiveValue::Set(true),
-                    config: ActiveValue::Set(serde_json::json!({})),
+                    config: ActiveValue::Set(Self::default_config_for_implementation_key(
+                        implementation_key,
+                    )),
                 };
                 model
                     .insert(db)
@@ -990,5 +1056,23 @@ mod tests {
         assert!(AbilityService::is_core_category("perception"));
         assert!(AbilityService::is_core_category("communication"));
         assert!(!AbilityService::is_core_category("automation"));
+    }
+
+    #[test]
+    fn default_attachment_read_config_sets_runtime_skill_mapping() {
+        let config = AbilityService::default_config_for_implementation_key("attachment_read");
+        assert_eq!(
+            config,
+            json!({
+                "skill_id": "coreagent.py.attachment_read",
+                "version": "1.0.0"
+            })
+        );
+    }
+
+    #[test]
+    fn non_attachment_tools_default_to_empty_config() {
+        let config = AbilityService::default_config_for_implementation_key("vision_analysis");
+        assert_eq!(config, json!({}));
     }
 }

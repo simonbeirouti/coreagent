@@ -117,6 +117,9 @@ function toUserFriendlyStreamingDelta(raw: string): string {
   if (value.startsWith('[tool:')) {
     return '';
   }
+  if (value.startsWith('[event:')) {
+    return '';
+  }
   return raw;
 }
 
@@ -145,6 +148,16 @@ type PersistedInferredToolRun = {
     sequence: number;
   }>;
 };
+
+function normalizeInferredImplementationKey(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  return trimmed
+    .replace(/^coreagent_(rs|py|js|md)_/, '')
+    .replace(/^coreagent_(rs|py|js|md)\./, '')
+    .replace(/^coreagent\.(rs|py|js|md)\./, '')
+    .trim();
+}
 
 function inferTimelineLevelFromProgress(message: string, status?: string | null): 'info' | 'success' | 'error' {
   const normalized = `${status ?? ''} ${message}`.toLowerCase();
@@ -206,7 +219,11 @@ function normalizePlannedToolLabel(raw: string): string {
 }
 
 function buildAcceptanceMessageFromLine(line: string): string | null {
-  if (!line.startsWith('[tool-chain] phase=') && !line.startsWith('[tool:')) {
+  if (
+    !line.startsWith('[tool-chain] phase=') &&
+    !line.startsWith('[tool:') &&
+    !line.startsWith('[event:')
+  ) {
     return null;
   }
 
@@ -225,6 +242,31 @@ function buildAcceptanceMessageFromLine(line: string): string | null {
   }
 
   return 'Accepted. I will run the required tool steps and then summarize the results.';
+}
+
+function inferStatusFromToolEvent(eventCode: string, rawMessage: string): string {
+  const normalized = `${eventCode} ${rawMessage}`.toLowerCase();
+  if (
+    normalized.includes('succeeded') ||
+    normalized.includes('success') ||
+    normalized.includes('completed')
+  ) {
+    return 'succeeded';
+  }
+  if (normalized.includes('cancelled')) {
+    return 'cancelled';
+  }
+  if (normalized.includes('timed_out') || normalized.includes('timed out')) {
+    return 'timed_out';
+  }
+  if (
+    normalized.includes('failed') ||
+    normalized.includes('error') ||
+    normalized.includes('budget_exhausted')
+  ) {
+    return 'failed';
+  }
+  return 'running';
 }
 
 // Fetch conversations for an agent
@@ -767,7 +809,9 @@ export function useSendMessageStreaming() {
   const [toolAcceptanceMessage, setToolAcceptanceMessage] = useState<string | null>(null);
   const [toolAcceptanceTimestampMs, setToolAcceptanceTimestampMs] = useState<number | null>(null);
   const [inferredToolProgress, setInferredToolProgress] = useState<InferredToolProgressEvent[]>([]);
+  const inferredToolProgressRef = useRef<InferredToolProgressEvent[]>([]);
   const inferredRunByToolRef = useRef<Map<string, string>>(new Map());
+  const inferredRunByCallIdRef = useRef<Map<string, string>>(new Map());
   const inferredSequenceRef = useRef(0);
   const inferredRunCounterRef = useRef(0);
   const hasPublishedToolAcceptanceRef = useRef(false);
@@ -781,7 +825,9 @@ export function useSendMessageStreaming() {
     setToolAcceptanceMessage('Accepted. Working on your request now.');
     setToolAcceptanceTimestampMs(acceptanceNow);
     setInferredToolProgress([]);
+    inferredToolProgressRef.current = [];
     inferredRunByToolRef.current = new Map();
+    inferredRunByCallIdRef.current = new Map();
     inferredSequenceRef.current = 0;
     hasPublishedToolAcceptanceRef.current = false;
 
@@ -835,13 +881,56 @@ export function useSendMessageStreaming() {
                     setToolAcceptanceTimestampMs(Date.now());
                   }
                 }
-                if (!line.startsWith('[tool:')) continue;
-                const startMatch = line.match(/^\[tool:([^\]]+)\]\s+starting\s+(.+)$/);
-                if (startMatch) {
-                  const implementationKey = startMatch[1].trim();
+                const structuredEventMatch = line.match(
+                  /^\[event:([^\]]+)\]\[provider:([^\]]+)\](?:\[tool:([^\]]+)\])?\s*(.*)$/
+                );
+                if (structuredEventMatch) {
+                  const eventCode = structuredEventMatch[1].trim();
+                  const toolKeyRaw = (structuredEventMatch[3] ?? '').trim();
+                  const toolKey = normalizeInferredImplementationKey(toolKeyRaw);
+                  const rawMessage = (structuredEventMatch[4] ?? '').trim();
+                  if (!toolKey) {
+                    continue;
+                  }
+                  const callId = rawMessage.match(/\bcall_id=([^\s]+)/)?.[1] ?? null;
+                  let clientRunId = callId
+                    ? inferredRunByCallIdRef.current.get(callId)
+                    : inferredRunByToolRef.current.get(toolKey);
+                  if (!clientRunId) {
+                    inferredRunCounterRef.current += 1;
+                    clientRunId = callId
+                      ? `inferred-${toolKey}-${callId}`
+                      : `inferred-${toolKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                    inferredRunByToolRef.current.set(toolKey, clientRunId);
+                    if (callId) {
+                      inferredRunByCallIdRef.current.set(callId, clientRunId);
+                    }
+                  }
+                  inferredSequenceRef.current += 1;
+                  progressBatch.push({
+                    clientRunId,
+                    conversationId: request.conversation_id,
+                    implementationKey: toolKey,
+                    runId: rawMessage.match(/\brun_id=([^\s]+)/)?.[1] ?? null,
+                    status: inferStatusFromToolEvent(eventCode, rawMessage),
+                    message: rawMessage || eventCode.replace(/_/g, ' '),
+                    sequence: inferredSequenceRef.current,
+                    timestampMs: Date.now(),
+                  });
+                  continue;
+                }
+
+                const toolStepStartMatch = line.match(
+                  /^\[tool-chain\]\s+phase=tool_step_started\s+step=\d+\s+tool=([^\s]+)\s+call_id=([^\s]+)$/
+                );
+                if (toolStepStartMatch) {
+                  const toolName = toolStepStartMatch[1].trim();
+                  const callId = toolStepStartMatch[2].trim();
+                  const implementationKey = normalizeInferredImplementationKey(toolName);
                   inferredRunCounterRef.current += 1;
-                  const clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                  const clientRunId = `inferred-${implementationKey}-${callId}`;
                   inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                  inferredRunByCallIdRef.current.set(callId, clientRunId);
                   inferredSequenceRef.current += 1;
                   progressBatch.push({
                     clientRunId,
@@ -856,41 +945,68 @@ export function useSendMessageStreaming() {
                   continue;
                 }
 
-                const toolMatch = line.match(/^\[tool:([^\]]+)\](?:\[([^\]]+)\])?\s+(.+)$/);
-                if (!toolMatch) continue;
-                const implementationKey = toolMatch[1].trim();
-                const sourceType = (toolMatch[2] || '').toLowerCase();
-                const message = toolMatch[3].trim();
-                let clientRunId = inferredRunByToolRef.current.get(implementationKey);
-                if (!clientRunId) {
-                  inferredRunCounterRef.current += 1;
-                  clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
-                  inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                if (line.startsWith('[tool:')) {
+                  const startMatch = line.match(/^\[tool:([^\]]+)\]\s+starting\s+(.+)$/);
+                  if (startMatch) {
+                    const implementationKey = normalizeInferredImplementationKey(startMatch[1]);
+                    let clientRunId = inferredRunByToolRef.current.get(implementationKey);
+                    if (!clientRunId) {
+                      inferredRunCounterRef.current += 1;
+                      clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                      inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                    }
+                    inferredSequenceRef.current += 1;
+                    progressBatch.push({
+                      clientRunId,
+                      conversationId: request.conversation_id,
+                      implementationKey,
+                      runId: null,
+                      status: 'running',
+                      message: `Starting ${implementationKey}`,
+                      sequence: inferredSequenceRef.current,
+                      timestampMs: Date.now(),
+                    });
+                    continue;
+                  }
+
+                  const toolMatch = line.match(/^\[tool:([^\]]+)\](?:\[([^\]]+)\])?\s+(.+)$/);
+                  if (!toolMatch) continue;
+                  const implementationKey = normalizeInferredImplementationKey(toolMatch[1]);
+                  const sourceType = (toolMatch[2] || '').toLowerCase();
+                  const message = toolMatch[3].trim();
+                  let clientRunId = inferredRunByToolRef.current.get(implementationKey);
+                  if (!clientRunId) {
+                    inferredRunCounterRef.current += 1;
+                    clientRunId = `inferred-${implementationKey}-${Date.now()}-${inferredRunCounterRef.current}`;
+                    inferredRunByToolRef.current.set(implementationKey, clientRunId);
+                  }
+                  const normalized = `${sourceType} ${message}`.toLowerCase();
+                  const status = normalized.includes('succeeded')
+                    ? 'succeeded'
+                    : normalized.includes('failed') || normalized.includes('error')
+                    ? 'failed'
+                    : normalized.includes('cancelled')
+                    ? 'cancelled'
+                    : normalized.includes('timed_out')
+                    ? 'timed_out'
+                    : 'running';
+                  inferredSequenceRef.current += 1;
+                  progressBatch.push({
+                    clientRunId,
+                    conversationId: request.conversation_id,
+                    implementationKey,
+                    runId: null,
+                    status,
+                    message,
+                    sequence: inferredSequenceRef.current,
+                    timestampMs: Date.now(),
+                  });
                 }
-                const normalized = `${sourceType} ${message}`.toLowerCase();
-                const status = normalized.includes('succeeded')
-                  ? 'succeeded'
-                  : normalized.includes('failed') || normalized.includes('error')
-                  ? 'failed'
-                  : normalized.includes('cancelled')
-                  ? 'cancelled'
-                  : normalized.includes('timed_out')
-                  ? 'timed_out'
-                  : 'running';
-                inferredSequenceRef.current += 1;
-                progressBatch.push({
-                  clientRunId,
-                  conversationId: request.conversation_id,
-                  implementationKey,
-                  runId: null,
-                  status,
-                  message,
-                  sequence: inferredSequenceRef.current,
-                  timestampMs: Date.now(),
-                });
               }
               if (progressBatch.length > 0) {
-                setInferredToolProgress((prev) => [...prev, ...progressBatch]);
+                const nextProgress = [...inferredToolProgressRef.current, ...progressBatch];
+                inferredToolProgressRef.current = nextProgress;
+                setInferredToolProgress(nextProgress);
               }
             }
             setStreamingContent(prev => prev + toUserFriendlyStreamingDelta(event.data.content));
@@ -945,7 +1061,7 @@ export function useSendMessageStreaming() {
           setStreamingConversationId(null);
 
           const agentId = getAgentIdForConversation(queryClient, request.conversation_id);
-          const persistedRuns = groupInferredRunsForPersistence(inferredToolProgress);
+          const persistedRuns = groupInferredRunsForPersistence(inferredToolProgressRef.current);
           const inferredMetadata: Record<string, unknown> = {
             ...(message.metadata ?? {}),
           };
@@ -1013,7 +1129,6 @@ export function useSendMessageStreaming() {
     });
   }, [
     queryClient,
-    inferredToolProgress,
     toolAcceptanceMessage,
     toolAcceptanceTimestampMs,
   ]);

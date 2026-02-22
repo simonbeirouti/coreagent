@@ -2,7 +2,12 @@ import React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { invoke } from '@tauri-apps/api/core';
 import { startRecording as pluginStartRecording, stopRecording as pluginStopRecording } from 'tauri-plugin-mic-recorder-api';
-import { uploadScreenshot, compressImage } from '@/lib/storage';
+import {
+  uploadScreenshot,
+  compressImageToFitLimit,
+  estimateBase64Bytes,
+  MAX_ATTACHMENT_BYTES,
+} from '@/lib/storage';
 import { useAuth } from '@/hooks/use-auth';
 import { abilityKeys, perceptionKeys } from '@/lib/query-keys';
 import { dynamic30sQueryPolicy } from '@/lib/query-policies';
@@ -46,40 +51,44 @@ export function useVision(agentId: string) {
     }): Promise<ScreenshotResult> => {
       // Capture the screenshot via Rust (full quality PNG)
       const result: ScreenshotResult = await invoke('capture_screenshot', { agentId });
-      
+      const shouldCompress = options?.compress !== false;
+      let imageToUpload = result.image_base64;
+      let isJpeg = false;
+
+      if (shouldCompress) {
+        const quality = options?.quality ?? 0.8;
+        const maxWidth = options?.maxWidth ?? 1920;
+        const compressed = await compressImageToFitLimit(result.image_base64, MAX_ATTACHMENT_BYTES, {
+          quality,
+          maxWidth,
+        });
+        imageToUpload = compressed.base64;
+        isJpeg = true;
+        console.log(
+          `Screenshot compressed to ${compressed.sizeBytes} bytes (quality=${compressed.quality}, maxWidth=${compressed.maxWidth})`
+        );
+      } else {
+        const rawBytes = estimateBase64Bytes(result.image_base64);
+        if (rawBytes > MAX_ATTACHMENT_BYTES) {
+          throw new Error(
+            `Screenshot exceeds 5MB limit (${rawBytes} bytes). Enable compression or capture a smaller area.`
+          );
+        }
+      }
+
       // Auto-upload to Supabase Storage if user is authenticated and option is enabled
       // Default to true for automatic upload
       const shouldUpload = options?.autoUpload !== false && user?.id;
       
       if (shouldUpload && user?.id) {
         try {
-          // Compress the image before upload (default: enabled)
-          const shouldCompress = options?.compress !== false;
-          let imageToUpload = result.image_base64;
-          let isJpeg = false;
-          
-          if (shouldCompress) {
-            const quality = options?.quality ?? 0.8;
-            const maxWidth = options?.maxWidth ?? 1920;
-            
-            console.log(`Compressing screenshot (quality: ${quality}, maxWidth: ${maxWidth}px)...`);
-            imageToUpload = await compressImage(result.image_base64, quality, maxWidth);
-            isJpeg = true;
-            
-            // Log compression stats
-            const originalSize = result.image_base64.length;
-            const compressedSize = imageToUpload.length;
-            const reduction = ((1 - compressedSize / originalSize) * 100).toFixed(1);
-            console.log(`Compression complete: ${reduction}% size reduction`);
-          }
-          
           // Upload to Supabase Storage - returns path and signed URL
           const uploadResult = await uploadScreenshot(imageToUpload, user.id, { isJpeg });
           
           // Log the perception with the actual storage path
           await invoke('log_screenshot_perception', {
             agentId,
-            storagePath: `screenshots/${uploadResult.storagePath}`,
+            storagePath: `user-files/${uploadResult.storagePath}`,
             conversationId: options?.conversationId || null,
           });
           
@@ -87,17 +96,24 @@ export function useVision(agentId: string) {
           // Note: image_base64 still contains full quality PNG for preview
           return {
             ...result,
-            storage_path: `screenshots/${uploadResult.storagePath}`,
+            image_base64: imageToUpload,
+            storage_path: `user-files/${uploadResult.storagePath}`,
             signed_url: uploadResult.signedUrl,
           };
         } catch (uploadError) {
           console.error('Screenshot upload failed:', uploadError);
-          // Return result without upload - still usable locally
-          return result;
+          // Return compressed result without upload; still usable in local context.
+          return {
+            ...result,
+            image_base64: imageToUpload,
+          };
         }
       }
       
-      return result;
+      return {
+        ...result,
+        image_base64: imageToUpload,
+      };
     },
     onError: (error) => {
       console.error('Screenshot capture failed:', error);

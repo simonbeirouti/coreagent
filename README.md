@@ -75,10 +75,21 @@ pnpm build
 - Runner execution modes:
   - `remote`: executes skill artifacts in Docker on the runner host (requires Docker + `RUNTIME_ENABLE_REMOTE_DOCKER=true`).
   - `local_docker`: executes the same Docker-isolated flow with local-mode gating (`RUNTIME_ENABLE_LOCAL_DOCKER=true`).
+- Runtime tool execution security:
+  - Tool calling runs in Docker-isolated environments as the primary security boundary.
+  - This applies to both `remote` and `local_docker` execution paths.
 - Container image selection is profile-based via `RUNTIME_LOCAL_DOCKER_IMAGE_PROFILES` using canonical language profiles (`default`, `node`, `python`, `rust`). Aliases like `js/javascript`, `py`, and `rs` normalize to those canonical profiles.
 - Runtime image warmup now dedupes alias profiles so each language pulls a single canonical image.
 - Chat runtime UX now renders direct tool runs inline with conversation order, dedupes repeated progress events, and auto-scrolls while tool progress is streaming.
 - On reload, internal direct-tool context payloads are hidden from user bubbles and used to hydrate tool run accordions instead.
+- User file library + attachments:
+  - Assets are stored in `user-files` and are user-scoped.
+  - Files uploaded in chat are available on the Files page, and Files page uploads are available in chat.
+  - Current allowed file extensions include docs and images (`txt`, `pdf`, `doc`, `csv`, `png`, `jpg`, `jpeg`, `gif`, `webp`).
+  - Chat attaches files by marker reference; file content is fetched through runtime tools (not auto-inlined).
+- New core runtime tool:
+  - `attachment_read`: reads attached docs and summarizes attached images with guarded limits.
+  - Available as a core tool by default; surfaced via runtime tool execution timeline.
 
 ## Current Test Milestone (2026-02-20)
 
@@ -88,20 +99,28 @@ pnpm build
   - `apps/server/scripts/seed-open-skills.mjs`
 - Registry now includes starter markdown skills plus `coreagent.py.deep_analysis` (runtime package install test path).
 
+## Current Delivery Update (2026-02-22)
+
+- Runtime tools execute successfully in both modes during active development validation:
+  - `remote`
+  - `local_docker`
+- Attachment-read capability has been integrated as a core runtime tool.
+- File asset management is unified and reusable across chat and Files route workflows.
+
 ## Next Validation Steps
 
 1. Start services:
    - `pnpm dev:runtime`
    - `pnpm dev:coreagent`
 2. In CoreAgent settings, verify runtime mode behavior:
-   - `remote` shows neutral status
-   - `local_docker` checks Docker readiness and auto-falls back to remote if unavailable
-3. Install and assign a seeded skill from Tools.
-4. Execute one run in `remote` and one in `local_docker`.
-5. Verify runtime results:
-   - `GET /v1/runtime/runs/:runId` reaches `succeeded`
-   - `GET /v1/runtime/runs/:runId/events` includes streamed `log` events
-6. Run automated parity verification:
+   - `remote` shows healthy status
+   - `local_docker` checks Docker readiness and remediates gracefully when unavailable
+3. Verify selected runtime mode is passed through all run creation paths (remaining wiring hardening).
+4. Validate attachment-read outputs in chat timeline for:
+   - text/csv/pdf/doc extraction
+   - image summary path
+   - truncation/error guardrail messaging
+5. Run automated parity verification:
    - Ensure env toggles are set:
      - `apps/server/.env`: `ENABLE_RUNTIME_QUEUE=true`
      - `apps/runner/.env`: `RUNTIME_ENABLE_REMOTE_DOCKER=true` and `RUNTIME_ENABLE_LOCAL_DOCKER=true`

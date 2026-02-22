@@ -9,7 +9,21 @@ import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { MessageSquare, Send, Plus, X, Image as ImageIcon, Loader2, MoreHorizontal, Pencil, Trash2, ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import {
+  MessageSquare,
+  Send,
+  Plus,
+  X,
+  Image as ImageIcon,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
+  Check,
+  Paperclip,
+} from 'lucide-react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   DropdownMenu,
@@ -42,13 +56,15 @@ import { useConversationDimensionFeedback } from '@/hooks/useFeedback';
 import { useAgentRegistrySkills, useAgentToolSettings } from '@/hooks/useAbilities';
 import { useVision } from '@/hooks/usePerception';
 import { useInstalledSkills } from '@/hooks/useRegistrySkills';
-import { getScreenshotSignedUrl } from '@/lib/storage';
+import { getScreenshotSignedUrl, getUserFileSignedUrl } from '@/lib/storage';
+import type { UserFileRecord } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
 import { invoke } from '@tauri-apps/api/core';
 
 // Maximum message length (matches backend validation)
 const MAX_MESSAGE_LENGTH = 32000;
+const MAX_PENDING_USER_FILES = 10;
 const CORE_RUNTIME_TOOLS = new Set([
   'conversation',
   'memory_retrieval',
@@ -56,6 +72,7 @@ const CORE_RUNTIME_TOOLS = new Set([
   'vision_analysis',
   'audio_transcription',
   'voice_synthesis',
+  'attachment_read',
 ]);
 const DIRECT_TOOL_INTENT_VERBS = [
   'run',
@@ -252,6 +269,40 @@ function appendUniqueTimelineEntries(
   });
 }
 
+function normalizeRuntimeImplementationKey(raw: string | null | undefined): string {
+  const value = (raw ?? '').trim();
+  if (!value) return '';
+  return value
+    .replace(/^coreagent_(rs|py|js|md)_/, '')
+    .replace(/^coreagent_(rs|py|js|md)\./, '')
+    .replace(/^coreagent\.(rs|py|js|md)\./, '')
+    .trim();
+}
+
+function findRunIndexByCorrelation(
+  runs: DirectToolRunViewModel[],
+  payload: Pick<DirectRuntimeToolProgressEvent, 'clientRunId' | 'runId' | 'implementationKey'>
+): number {
+  const byClient = runs.findIndex((run) => run.clientRunId === payload.clientRunId);
+  if (byClient !== -1) return byClient;
+
+  if (payload.runId) {
+    const byRunId = runs.findIndex((run) => run.runId === payload.runId);
+    if (byRunId !== -1) return byRunId;
+  }
+
+  const normalizedKey = normalizeRuntimeImplementationKey(payload.implementationKey);
+  if (normalizedKey) {
+    const byKey = runs.findIndex((run) => {
+      if (run.status !== 'running') return false;
+      return normalizeRuntimeImplementationKey(run.implementationKey) === normalizedKey;
+    });
+    if (byKey !== -1) return byKey;
+  }
+
+  return -1;
+}
+
 function formatToolRunLabel(implementationKey: string): string {
   const shortKey = implementationKey.split('.').pop() || implementationKey;
   return shortKey.replace(/[_-]+/g, ' ').trim();
@@ -325,11 +376,35 @@ function extractLegacyImageUrl(content: string): string | null {
   return match ? match[1] : null;
 }
 
+type ParsedFileMarker = {
+  storagePath: string;
+  fileName: string;
+  fileType: string;
+};
+
+function extractFileMarkers(content: string): ParsedFileMarker[] {
+  const markers: ParsedFileMarker[] = [];
+  const regex = /\[File:path:([^\]|]+)\|name:([^\]|]+)\|type:([^\]]+)\]/g;
+  let match: RegExpExecArray | null = regex.exec(content);
+
+  while (match) {
+    markers.push({
+      storagePath: match[1],
+      fileName: decodeURIComponent(match[2]),
+      fileType: match[3],
+    });
+    match = regex.exec(content);
+  }
+
+  return markers;
+}
+
 // Helper to get text content without the screenshot/image markers (handles both formats)
 function getTextContent(content: string): string {
   return content
     .replace(/\[Screenshot:path:[^\]]+\]\n?/g, '') // New path format
     .replace(/\[Screenshot: https?:\/\/[^\]]+\]\n?/g, '') // Legacy URL format
+    .replace(/\[File:path:[^\]|]+\|name:[^\]|]+\|type:[^\]]+\]\n?/g, '') // File marker format
     .replace(/\[Image Description: [\s\S]*?\]\n?/g, '') // Image description (for AI, not display)
     .replace(/\[RuntimeToolContext\][\s\S]*?\[\/RuntimeToolContext\]\n?/g, '') // Runtime tool context (for AI, not display)
     .replace(/\[DirectToolResultContext\][\s\S]*?\[\/DirectToolResultContext\]\n?/g, '') // Direct tool result context (for AI, not display)
@@ -530,8 +605,10 @@ function MessageImage({ content }: { content: string }) {
 
       // New path format: get signed URL
       if (storagePath) {
-        // Remove "screenshots/" prefix if present since getScreenshotSignedUrl expects just the path
-        const pathWithoutBucket = storagePath.replace(/^screenshots\//, '');
+        // Remove legacy/new bucket prefixes since helper expects just object path
+        const pathWithoutBucket = storagePath
+          .replace(/^screenshots\//, '')
+          .replace(/^user-files\//, '');
         
         // Check cache first
         const cached = signedUrlCache.get(pathWithoutBucket);
@@ -750,6 +827,7 @@ function AgentChatPage() {
     storagePath?: string; // Path in Supabase storage
     signedUrl?: string; // Temporary signed URL for immediate display
   } | null>(null);
+  const [pendingUserFiles, setPendingUserFiles] = useState<UserFileRecord[]>([]);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isDirectToolRunning, setIsDirectToolRunning] = useState(false);
   const [directToolRuns, setDirectToolRuns] = useState<DirectToolRunViewModel[]>([]);
@@ -760,7 +838,7 @@ function AgentChatPage() {
     sendMessageStreaming.streamingConversationId === activeConversationId;
   const applyToolProgressEvent = useCallback((payload: DirectRuntimeToolProgressEvent) => {
     setDirectToolRuns((prev) => {
-      const index = prev.findIndex((run) => run.clientRunId === payload.clientRunId);
+      const index = findRunIndexByCorrelation(prev, payload);
       if (index === -1) {
         // Ignore orphan events from runs started in another chat/view.
         return prev;
@@ -777,6 +855,7 @@ function AgentChatPage() {
       const target = next[index];
       next[index] = {
         ...target,
+        clientRunId: payload.clientRunId || target.clientRunId,
         implementationKey: payload.implementationKey || target.implementationKey,
         runId: payload.runId ?? target.runId,
         status: (payload.status as DirectToolRunStatus) || target.status,
@@ -1072,7 +1151,7 @@ function AgentChatPage() {
         continue;
       }
       setDirectToolRuns((prev) => {
-        if (prev.some((run) => run.clientRunId === event.clientRunId)) {
+        if (findRunIndexByCorrelation(prev, event as DirectRuntimeToolProgressEvent) !== -1) {
           return prev;
         }
         return [
@@ -1343,7 +1422,7 @@ function AgentChatPage() {
           )
         );
         toast.error(errorMessage || `Failed to execute ${tool.label}`);
-        return true;
+        return false;
       } finally {
         setIsDirectToolRunning(false);
       }
@@ -1386,7 +1465,7 @@ function AgentChatPage() {
   };
 
   const handleSendMessage = async () => {
-    if (!messageInput.trim() && !pendingScreenshot) return;
+    if (!messageInput.trim() && !pendingScreenshot && pendingUserFiles.length === 0) return;
     const trimmedMessageInput = messageInput.trim();
     const imageBase64 = pendingScreenshot?.base64;
     const includeRuntimeToolContext =
@@ -1411,10 +1490,48 @@ function AgentChatPage() {
           console.warn('Screenshot was captured but not uploaded to storage');
         }
       }
+      if (pendingUserFiles.length > 0) {
+        const preflightChecks = await Promise.all(
+          pendingUserFiles.map(async (file) => ({
+            file,
+            signedUrl: await getUserFileSignedUrl(file.storage_path, 60),
+          }))
+        );
+        const hasVerifiedAttachment = preflightChecks.some((entry) => Boolean(entry.signedUrl));
+        const validFiles = hasVerifiedAttachment
+          ? preflightChecks.filter((entry) => Boolean(entry.signedUrl)).map((entry) => entry.file)
+          : pendingUserFiles;
+        const staleFiles = hasVerifiedAttachment
+          ? preflightChecks.filter((entry) => !entry.signedUrl).map((entry) => entry.file.file_name)
+          : [];
+        if (staleFiles.length > 0) {
+          toast.warning(
+            `Some attachments are no longer available in storage and were skipped: ${staleFiles.join(', ')}`
+          );
+        }
+        if (!hasVerifiedAttachment) {
+          console.warn('Attachment storage preflight verification unavailable; proceeding with selected attachments.');
+        }
+        if (validFiles.length === 0 && !trimmedMessageInput && !pendingScreenshot) {
+          toast.error('All selected attachments are unavailable. Re-upload the files and try again.');
+          return;
+        }
+
+        const markers = validFiles.map((file) => {
+          const encodedName = encodeURIComponent(file.file_name);
+          return `[File:path:${file.storage_path}|name:${encodedName}|type:${file.file_ext}]`;
+        });
+        if (markers.length > 0) {
+          const markerBlock = `${markers.join('\n')}\n`;
+          contentWithoutRuntimeToolContext = `${markerBlock}${contentWithoutRuntimeToolContext}`;
+          finalContent = `${markerBlock}${finalContent}`;
+        }
+      }
       if (!finalContent.trim()) return;
 
       setMessageInput('');
       setPendingScreenshot(null);
+      setPendingUserFiles([]);
       await sendPreparedMessage(finalContent, imageBase64);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error ?? '');
@@ -1470,14 +1587,41 @@ function AgentChatPage() {
     setPendingScreenshot({ base64: imageBase64, storagePath, signedUrl });
 
     if (storagePath) {
-      toast.success('Screenshot ready - send your message to include it');
+      toast.success('Screenshot ready');
     } else {
       toast.warning('Screenshot captured but not saved to storage');
     }
   };
 
+  const handleAttachUserFile = (file: UserFileRecord) => {
+    if (file.id.startsWith('temp-') || file.storage_path.startsWith('pending/')) {
+      toast.warning('File is still uploading. Please wait and attach it again once ready.');
+      return;
+    }
+
+    const alreadyAttached = pendingUserFiles.some(
+      (entry) => entry.id === file.id || entry.storage_path === file.storage_path
+    );
+    if (alreadyAttached) {
+      toast.info(`${file.file_name} is already attached`);
+      return;
+    }
+
+    if (pendingUserFiles.length >= MAX_PENDING_USER_FILES) {
+      toast.warning(`You can attach up to ${MAX_PENDING_USER_FILES} files per message`);
+      return;
+    }
+
+    setPendingUserFiles((prev) => [...prev, file]);
+    toast.success(`${file.file_name} attached`);
+  };
+
   const clearPendingScreenshot = () => {
     setPendingScreenshot(null);
+  };
+
+  const clearPendingUserFile = (fileId: string) => {
+    setPendingUserFiles((prev) => prev.filter((file) => file.id !== fileId));
   };
 
   const handleDeleteConversation = async (conversationId: string) => {
@@ -1608,6 +1752,7 @@ function AgentChatPage() {
         const branchInfo = branchInfoMap.get(message.id);
         const isEditing = editingMessageId === message.id;
         const isUserMessage = message.role === 'user';
+        const fileMarkers = extractFileMarkers(message.content);
 
         return (
           <div key={item.id} className="group min-w-0">
@@ -1718,6 +1863,20 @@ function AgentChatPage() {
                       <>
                         {/* Render screenshot if present */}
                         <MessageImage content={message.content} />
+                        {fileMarkers.length > 0 && (
+                          <div className="mb-2 flex flex-wrap gap-2">
+                            {fileMarkers.map((file) => (
+                              <div
+                                key={`${message.id}-${file.storagePath}`}
+                                className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-2 py-1 text-xs text-foreground"
+                              >
+                                <Paperclip className="h-3 w-3" />
+                                <span className="max-w-[200px] truncate">{file.fileName}</span>
+                                <span className="uppercase text-muted-foreground">{file.fileType}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         {/* Render text content */}
                         {getTextContent(message.content) && (
                           <MarkdownContent
@@ -2030,7 +2189,28 @@ function AgentChatPage() {
                 </div>
               </div>
             )}
-
+            {pendingUserFiles.length > 0 && (
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                {pendingUserFiles.map((file) => (
+                  <div
+                    key={file.id}
+                    className="inline-flex max-w-full items-center gap-2 rounded-md border bg-muted/60 px-2 py-1 text-xs"
+                  >
+                    <Paperclip className="h-3 w-3" />
+                    <span className="max-w-[180px] truncate">{file.file_name}</span>
+                    <span className="uppercase text-muted-foreground">{file.file_ext}</span>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-5 w-5"
+                      onClick={() => clearPendingUserFile(file.id)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
             {/* Message Input Row */}
             <div className="flex w-full gap-2">
               <MicrophoneButton
@@ -2047,7 +2227,7 @@ function AgentChatPage() {
                 disabled={sendMessage.isPending || isDirectToolRunning}
               />
               <AttachButton
-                onAttach={handleScreenshot}
+                onAttach={handleAttachUserFile}
                 disabled={sendMessage.isPending || isDirectToolRunning}
               />
               <div className="relative flex-1">
@@ -2082,7 +2262,7 @@ function AgentChatPage() {
               </div>
               <Button
                 onClick={handleSendMessage}
-                disabled={(!messageInput.trim() && !pendingScreenshot) || sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
+                disabled={(!messageInput.trim() && !pendingScreenshot && pendingUserFiles.length === 0) || sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
                 size="icon"
               >
                 {isDirectToolRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

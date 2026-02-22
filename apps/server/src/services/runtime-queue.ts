@@ -38,6 +38,9 @@ type EnqueueRuntimeRunInput = {
   executionMode: RuntimeExecutionMode;
   timeoutSeconds: number;
   input: Record<string, unknown>;
+  messageContext?: Record<string, unknown>;
+  attachments?: Record<string, unknown>[];
+  attachmentContent?: Record<string, unknown>[];
   skillRuntime: {
     runtimeType: "command" | "http" | "wasm";
     entrypoint: string;

@@ -27,3 +27,10 @@ dist-ssr
 
 # Variables
 .env
+
+# Cargo
+.cargo-local
+cargo-local
+
+# Artifacts
+artifacts

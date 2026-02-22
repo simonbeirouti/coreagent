@@ -12,6 +12,37 @@ const createRunBodySchema = z.object({
   version: z.string().trim().min(1).optional().default("latest"),
   agentId: z.string().uuid().optional(),
   input: z.record(z.string(), z.unknown()).optional().default({}),
+  messageContext: z
+    .object({
+      userMessage: z.string().trim().min(1).max(32_000),
+      source: z.string().trim().max(128).optional(),
+      conversationId: z.string().uuid().optional()
+    })
+    .optional(),
+  attachments: z
+    .array(
+      z.object({
+        storagePath: z.string().trim().min(1).max(512),
+        fileName: z.string().trim().min(1).max(256).optional(),
+        fileType: z.string().trim().min(1).max(32).optional(),
+        sizeBytes: z.coerce.number().int().min(1).max(5 * 1024 * 1024).optional()
+      })
+    )
+    .max(10)
+    .optional(),
+  attachmentContent: z
+    .array(
+      z.object({
+        storagePath: z.string().trim().min(1).max(512),
+        fileType: z.string().trim().min(1).max(32).optional(),
+        contentExcerpt: z.string().max(64_000).optional(),
+        summary: z.string().max(16_000).optional(),
+        truncated: z.boolean().optional(),
+        sizeBytes: z.coerce.number().int().min(1).max(5 * 1024 * 1024).optional()
+      })
+    )
+    .max(10)
+    .optional(),
   executionMode: z.enum(["remote", "local_docker"]).optional().default("remote"),
   timeoutSeconds: z.coerce.number().int().min(1).max(3600).optional().default(120)
 });
@@ -59,6 +90,19 @@ export const runtimeRunRoutes: FastifyPluginAsync<RuntimeRunRoutesOptions> = asy
     if (!body) {
       return;
     }
+    const enrichedInput: Record<string, unknown> = {
+      ...body.input
+    };
+    if (body.messageContext) {
+      enrichedInput.messageContext = body.messageContext;
+    }
+    if (body.attachments) {
+      enrichedInput.attachments = body.attachments;
+    }
+    if (body.attachmentContent) {
+      enrichedInput.attachmentContent = body.attachmentContent;
+    }
+
     let run;
     try {
       run = await options.runtimeRunStore.createRun({
@@ -68,7 +112,7 @@ export const runtimeRunRoutes: FastifyPluginAsync<RuntimeRunRoutesOptions> = asy
         agentId: body.agentId ?? null,
         executionMode: body.executionMode,
         timeoutSeconds: body.timeoutSeconds,
-        input: body.input
+        input: enrichedInput
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create runtime run.";
@@ -128,6 +172,19 @@ export const runtimeRunRoutes: FastifyPluginAsync<RuntimeRunRoutesOptions> = asy
           throw new Error(`Skill runtime metadata not found: ${run.skillId}@${run.version}`);
         }
 
+        const messageContext =
+          run.input && typeof run.input.messageContext === "object" && run.input.messageContext
+            ? (run.input.messageContext as Record<string, unknown>)
+            : null;
+        const attachments =
+          run.input && Array.isArray(run.input.attachments)
+            ? (run.input.attachments as Record<string, unknown>[])
+            : null;
+        const attachmentContent =
+          run.input && Array.isArray(run.input.attachmentContent)
+            ? (run.input.attachmentContent as Record<string, unknown>[])
+            : null;
+
         const queueResult = await options.runtimeQueue.enqueueRun({
           runId: run.runId,
           userId: run.userId,
@@ -136,6 +193,9 @@ export const runtimeRunRoutes: FastifyPluginAsync<RuntimeRunRoutesOptions> = asy
           executionMode: run.executionMode,
           timeoutSeconds: run.timeoutSeconds,
           input: run.input,
+          ...(messageContext ? { messageContext } : {}),
+          ...(attachments ? { attachments } : {}),
+          ...(attachmentContent ? { attachmentContent } : {}),
           skillRuntime,
           requestedPermissions: permissionRows.rows
         });

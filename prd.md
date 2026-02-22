@@ -1,8 +1,8 @@
 # CoreAgent Unified Delivery PRD
 
 ## Document Status
-- Version: 5.6
-- Last Updated: 2026-02-20
+- Version: 5.7
+- Last Updated: 2026-02-22
 - Owner: CoreAgent Product + Platform Engineering
 - Scope: Single source of truth for skills registry, tools/runtime integration, skills graph MVP, and next-iteration orchestration + automation
 
@@ -27,6 +27,33 @@
   - derive the correct tool from user message intent more reliably
   - ensure user text submitted with a tool call is included in the final tool output/context
 - [ ] Add automatic fallback to `remote` execution whenever local runtime is unavailable/not found.
+
+## Status Update (2026-02-22)
+
+### Attachment Files + Core Tool Progress
+- Completed now:
+  - User file library flow shipped with shared storage bucket model (`user-files`) and user-scoped access policy.
+  - Chat + Files route integration shipped:
+    - Upload from chat attach control.
+    - Upload/manage from dedicated Files route.
+    - Shared visibility both directions (chat uploads visible on Files page and vice versa).
+  - Reusable file browser/list/filter UI added and reused across page/dialog contexts.
+  - Attachment lifecycle enhancements shipped:
+    - delete support
+    - responsive container-based file card grid
+    - mobile-friendly icon-first actions
+  - Attachment behavior hardening shipped:
+    - files are attached by marker reference, not automatically inlined into prompt context
+    - model reads attachment content only through tool path
+  - Core runtime tool shipped: `attachment_read` (enabled as core).
+    - parses chat attachment markers (`[File:path:...|name:...|type:...]`)
+    - reads `txt/csv/pdf/doc`
+    - summarizes image attachments (`png/jpg/jpeg/gif/webp`) via vision path
+    - enforces guardrails (max files/bytes/chars) and structured fallback errors
+  - Runtime mode validation completed in active development flow:
+    - local tool execution path works repeatedly
+    - remote tool execution path works repeatedly
+  - Docker isolation is now the standard security boundary for tool execution paths.
 
 ## Status Update (2026-02-20)
 
@@ -287,23 +314,23 @@ This checklist is the detailed tracker and is ordered by importance and implemen
 - [x] Block local mode selection and show remediation guidance when preflight/pre-pull fails.
 - [ ] Route selected runtime mode into runtime run creation path from CoreAgent.
 - [ ] Add CoreAgent runtime run panel to show run status + streamed `skill_run_events` logs.
-- [ ] Execute and record local execution validation:
+- [x] Execute and record local execution validation:
   - choose `local_docker` mode in CoreAgent
   - run a registry skill with local mode
   - verify run reaches `succeeded`
   - verify streamed `log` events appear in run events feed
-- [ ] Execute and record remote execution validation:
+- [x] Execute and record remote execution validation:
   - choose `remote` mode in CoreAgent
   - run a registry skill with remote mode
   - verify run reaches `succeeded`
   - verify streamed `log` events appear in run events feed
 
 ### Immediate Next Steps (Validation Pass)
-1. Execute one seeded skill in `remote` mode and confirm `succeeded` plus log events.
-2. Execute one seeded skill in `local_docker` mode and confirm `succeeded` plus log events.
-3. Execute `coreagent.py.deep_analysis` with profile-aware local image mapping and verify numeric JSON output.
-4. Capture run IDs and event evidence, then mark `1A` local/remote validation checklist items complete.
-5. Complete wiring so selected runtime mode is used in all CoreAgent run creation paths.
+1. Complete wiring so selected runtime mode is used in all CoreAgent run creation paths.
+2. Add CoreAgent runtime run panel for status + streamed `skill_run_events` logs.
+3. Refine tool routing reliability (intent-to-tool selection quality and deterministic tool planning).
+4. Improve `attachment_read` extraction quality for complex docs and add richer parse diagnostics.
+5. Add automatic `local_docker` -> `remote` fallback when local runtime is unavailable.
 
 ### 2. Runtime And Sync Hardening
 - [ ] Add startup skills bootstrap flow (installed skills sync + diagnostics status).

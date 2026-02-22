@@ -1,29 +1,43 @@
-# Research Brief Composer
+# Research Brief
 
-## Purpose
-Create a concise research brief from mixed notes, links, or findings.
+## Topic
+{{topic}}
 
-## Inputs
-- `topic`: primary topic to summarize
-- `notes`: optional raw notes or references
-- `audience`: optional audience (`engineering`, `product`, `ops`, `exec`)
-- `depth`: optional output depth (`short`, `standard`, `deep`)
+## Audience + Depth
+- **Audience:** {{audience}}
+- **Depth:** {{depth}}
 
-## Workflow
-1. Restate the goal in one sentence.
-2. Extract key facts and unresolved unknowns.
-3. Cluster findings into 3-6 themes.
-4. Produce recommendations with confidence labels.
-5. End with a focused next-steps checklist.
+## Notes
+{{notes}}
 
-## Output Format
-- `Summary`: 3-5 bullets
-- `Key Findings`: grouped bullets
-- `Risks / Unknowns`: explicit gaps and blockers
-- `Recommendations`: actionable, ordered by impact
-- `Next Steps`: numbered list with owners if available
+{{#if messageContext.userMessage}}
+## Request Context
+{{messageContext.userMessage}}
+{{/if}}
 
-## Guardrails
-- Do not invent facts.
-- Mark assumptions explicitly.
-- Prefer concise output over exhaustive narrative.
+## Attachment Signals
+{{#each attachmentContent}}
+- **{{this.storagePath}}** ({{this.fileType}})
+  - Summary: {{this.summary}}
+  - Excerpt: {{this.contentExcerpt}}
+{{/each}}
+
+## Key Findings
+{{#each findings}}
+- {{this}}
+{{/each}}
+
+## Risks / Unknowns
+{{#each risks}}
+- {{this}}
+{{/each}}
+
+## Recommendations
+{{#each recommendations}}
+1. {{this}}
+{{/each}}
+
+## Next Steps
+{{#each next_steps}}
+1. {{this}}
+{{/each}}

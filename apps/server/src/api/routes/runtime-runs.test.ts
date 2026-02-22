@@ -134,6 +134,48 @@ describe("runtime run routes", () => {
     });
   });
 
+  it("creates a runtime run for mapped attachment_read skill id", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/runtime/runs",
+      headers: authHeader(),
+      payload: {
+        skillId: "coreagent.py.attachment_read",
+        version: "1.0.0",
+        executionMode: "remote",
+        input: {
+          attachments: [
+            {
+              storagePath: "user-files/1111/report.txt",
+              fileName: "report.txt",
+              fileType: "txt"
+            }
+          ],
+          attachmentContent: [
+            {
+              storagePath: "user-files/1111/report.txt",
+              fileType: "txt",
+              summary: "Report summary",
+              contentExcerpt: "Line one.",
+              truncated: false
+            }
+          ]
+        }
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.json()).toMatchObject({
+      data: {
+        skillId: "coreagent.py.attachment_read",
+        status: "queued"
+      }
+    });
+  });
+
   it("rejects unauthenticated run creation", async () => {
     const app = buildApp(testEnv);
     appsToClose.push(app);
@@ -274,6 +316,120 @@ describe("runtime run routes", () => {
       payload: {
         skillId: "coreagent.repo.search",
         executionMode: "edge_runtime"
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json()).toMatchObject({
+      message: "Invalid request payload."
+    });
+  });
+
+  it("propagates message and attachment context into run input", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/runtime/runs",
+      headers: authHeader(),
+      payload: {
+        skillId: "coreagent.md.research_brief",
+        input: {
+          topic: "Runtime context propagation"
+        },
+        messageContext: {
+          userMessage: "Summarize this file for release notes.",
+          source: "chat",
+          conversationId: "11111111-1111-4111-8111-111111111111"
+        },
+        attachments: [
+          {
+            storagePath: "user-files/1111/report.txt",
+            fileName: "report.txt",
+            fileType: "txt"
+          }
+        ],
+        attachmentContent: [
+          {
+            storagePath: "user-files/1111/report.txt",
+            fileType: "txt",
+            contentExcerpt: "Quarterly metrics improved by 14%.",
+            summary: "Metrics summary",
+            truncated: false
+          }
+        ]
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.json()).toMatchObject({
+      data: {
+        input: {
+          topic: "Runtime context propagation",
+          messageContext: {
+            userMessage: "Summarize this file for release notes.",
+            source: "chat"
+          },
+          attachments: [
+            {
+              storagePath: "user-files/1111/report.txt",
+              fileName: "report.txt",
+              fileType: "txt"
+            }
+          ],
+          attachmentContent: [
+            {
+              storagePath: "user-files/1111/report.txt",
+              fileType: "txt",
+              summary: "Metrics summary",
+              truncated: false
+            }
+          ]
+        }
+      }
+    });
+  });
+
+  it("rejects oversize attachment context payloads", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/runtime/runs",
+      headers: authHeader(),
+      payload: {
+        skillId: "coreagent.md.research_brief",
+        attachmentContent: new Array(11).fill({
+          storagePath: "user-files/1111/report.txt"
+        })
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json()).toMatchObject({
+      message: "Invalid request payload."
+    });
+  });
+
+  it("rejects attachment size metadata above 5MB", async () => {
+    const app = buildApp(testEnv);
+    appsToClose.push(app);
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/v1/runtime/runs",
+      headers: authHeader(),
+      payload: {
+        skillId: "coreagent.md.research_brief",
+        attachments: [
+          {
+            storagePath: "user-files/1111/report.png",
+            fileType: "png",
+            sizeBytes: 5 * 1024 * 1024 + 1
+          }
+        ]
       }
     });
 
