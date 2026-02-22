@@ -77,6 +77,45 @@ impl From<messages::Model> for MessageData {
 pub struct ConversationService;
 
 impl ConversationService {
+    fn strip_marker_block(input: &str, start: &str, end: &str) -> String {
+        let mut output = String::with_capacity(input.len());
+        let mut remaining = input;
+        loop {
+            let Some(start_idx) = remaining.find(start) else {
+                output.push_str(remaining);
+                break;
+            };
+            output.push_str(&remaining[..start_idx]);
+            let after_start = &remaining[start_idx + start.len()..];
+            if let Some(end_idx) = after_start.find(end) {
+                remaining = &after_start[end_idx + end.len()..];
+            } else {
+                // Unbalanced marker: drop trailing section from start marker onward.
+                break;
+            }
+        }
+        output
+    }
+
+    fn strip_internal_context_markers(input: &str) -> String {
+        let without_runtime = Self::strip_marker_block(
+            input,
+            "[RuntimeToolContext]",
+            "[/RuntimeToolContext]",
+        );
+        let without_direct = Self::strip_marker_block(
+            &without_runtime,
+            "[DirectToolResultContext]",
+            "[/DirectToolResultContext]",
+        );
+        let without_execution = Self::strip_marker_block(
+            &without_direct,
+            "[ToolExecutionContext]",
+            "[/ToolExecutionContext]",
+        );
+        without_execution.trim().to_string()
+    }
+
     fn ability_enabled(runtime_tools: &[AgentRuntimeCapability], implementation_key: &str) -> bool {
         if runtime_tools.is_empty() {
             return true;
@@ -277,11 +316,14 @@ impl ConversationService {
             history.len()
         );
 
+        let memory_safe_user_content =
+            Self::strip_internal_context_markers(&sanitized_content.content);
+
         // Add semantic memory context if available (best-effort).
-        let mut final_prompt = content.clone();
+        let mut final_prompt = memory_safe_user_content.clone();
         if let Ok(memories) = MemoryService::get_relevant_context(
             db,
-            &sanitized_content.content,
+            &memory_safe_user_content,
             conversation.agent_id,
             Some(conversation_id),
         )
@@ -295,17 +337,35 @@ impl ConversationService {
             )
             .await;
             if !memories.is_empty() {
+                let memory_context = memories
+                    .into_iter()
+                    .map(|entry| Self::strip_internal_context_markers(&entry))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
-                    content,
-                    memories.join("\n")
+                    memory_safe_user_content,
+                    memory_context
                 );
             }
         }
 
-        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
-            .await
-            .unwrap_or_default();
+        let runtime_tools = match AgentService::resolve_enabled_tools(db, conversation.agent_id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[CONVERSATION] Failed to resolve runtime tools for conversation {} (agent {}): {}. Falling back to empty tool catalog.",
+                    conversation_id, conversation.agent_id, error
+                );
+                Vec::new()
+            }
+        };
+        if runtime_tools.is_empty() {
+            eprintln!(
+                "[CONVERSATION] Runtime tool catalog is empty for conversation {} (agent {}).",
+                conversation_id, conversation.agent_id
+            );
+        }
         let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
             image_base64
         } else {
@@ -343,11 +403,18 @@ impl ConversationService {
         Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
-        let _ =
-            MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content)
-                .await;
-        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content)
-            .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            user_message_id,
+            &Self::strip_internal_context_markers(&sanitized_content.content),
+        )
+        .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            saved_message.id,
+            &Self::strip_internal_context_markers(&saved_message.content),
+        )
+        .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -442,11 +509,14 @@ impl ConversationService {
             history.len()
         );
 
+        let memory_safe_user_content =
+            Self::strip_internal_context_markers(&sanitized_content.content);
+
         // Add semantic memory context if available (best-effort).
-        let mut final_prompt = content.clone();
+        let mut final_prompt = memory_safe_user_content.clone();
         if let Ok(memories) = MemoryService::get_relevant_context(
             db,
-            &sanitized_content.content,
+            &memory_safe_user_content,
             conversation.agent_id,
             Some(conversation_id),
         )
@@ -460,17 +530,35 @@ impl ConversationService {
             )
             .await;
             if !memories.is_empty() {
+                let memory_context = memories
+                    .into_iter()
+                    .map(|entry| Self::strip_internal_context_markers(&entry))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
-                    content,
-                    memories.join("\n")
+                    memory_safe_user_content,
+                    memory_context
                 );
             }
         }
 
-        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
-            .await
-            .unwrap_or_default();
+        let runtime_tools = match AgentService::resolve_enabled_tools(db, conversation.agent_id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[CONVERSATION] Failed to resolve runtime tools for streaming conversation {} (agent {}): {}. Falling back to empty tool catalog.",
+                    conversation_id, conversation.agent_id, error
+                );
+                Vec::new()
+            }
+        };
+        if runtime_tools.is_empty() {
+            eprintln!(
+                "[CONVERSATION] Streaming runtime tool catalog is empty for conversation {} (agent {}).",
+                conversation_id, conversation.agent_id
+            );
+        }
         let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
             image_base64
         } else {
@@ -509,11 +597,18 @@ impl ConversationService {
         Self::spawn_message_quality_scoring(db, saved_message.id);
 
         // Embed user + assistant messages (best-effort, non-fatal).
-        let _ =
-            MemoryService::embed_message_content(db, user_message_id, &sanitized_content.content)
-                .await;
-        let _ = MemoryService::embed_message_content(db, saved_message.id, &saved_message.content)
-            .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            user_message_id,
+            &Self::strip_internal_context_markers(&sanitized_content.content),
+        )
+        .await;
+        let _ = MemoryService::embed_message_content(
+            db,
+            saved_message.id,
+            &Self::strip_internal_context_markers(&saved_message.content),
+        )
+        .await;
 
         // Update conversation timestamp
         let mut conversation_model: conversations::ActiveModel = conversation.into();
@@ -795,11 +890,14 @@ impl ConversationService {
             history.len()
         );
 
+        let memory_safe_user_content =
+            Self::strip_internal_context_markers(&sanitized_content.content);
+
         // Add semantic memory context if available (best-effort).
-        let mut final_prompt = new_content.clone();
+        let mut final_prompt = memory_safe_user_content.clone();
         if let Ok(memories) = MemoryService::get_relevant_context(
             db,
-            &sanitized_content.content,
+            &memory_safe_user_content,
             conversation.agent_id,
             Some(original_message.conversation_id),
         )
@@ -813,17 +911,35 @@ impl ConversationService {
             )
             .await;
             if !memories.is_empty() {
+                let memory_context = memories
+                    .into_iter()
+                    .map(|entry| Self::strip_internal_context_markers(&entry))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
-                    new_content,
-                    memories.join("\n")
+                    memory_safe_user_content,
+                    memory_context
                 );
             }
         }
 
-        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
-            .await
-            .unwrap_or_default();
+        let runtime_tools = match AgentService::resolve_enabled_tools(db, conversation.agent_id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[CONVERSATION] Failed to resolve runtime tools for edit branch conversation {} (agent {}): {}. Falling back to empty tool catalog.",
+                    original_message.conversation_id, conversation.agent_id, error
+                );
+                Vec::new()
+            }
+        };
+        if runtime_tools.is_empty() {
+            eprintln!(
+                "[CONVERSATION] Edit branch runtime tool catalog is empty for conversation {} (agent {}).",
+                original_message.conversation_id, conversation.agent_id
+            );
+        }
         let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
             image_base64
         } else {
@@ -864,13 +980,13 @@ impl ConversationService {
         let _ = MemoryService::embed_message_content(
             db,
             new_user_message_id,
-            &sanitized_content.content,
+            &Self::strip_internal_context_markers(&sanitized_content.content),
         )
         .await;
         let _ = MemoryService::embed_message_content(
             db,
             saved_assistant_message.id,
-            &saved_assistant_message.content,
+            &Self::strip_internal_context_markers(&saved_assistant_message.content),
         )
         .await;
 
@@ -979,11 +1095,14 @@ impl ConversationService {
             history.len()
         );
 
+        let memory_safe_user_content =
+            Self::strip_internal_context_markers(&sanitized_content.content);
+
         // Add semantic memory context if available (best-effort).
-        let mut final_prompt = new_content.clone();
+        let mut final_prompt = memory_safe_user_content.clone();
         if let Ok(memories) = MemoryService::get_relevant_context(
             db,
-            &sanitized_content.content,
+            &memory_safe_user_content,
             conversation.agent_id,
             Some(original_message.conversation_id),
         )
@@ -997,17 +1116,35 @@ impl ConversationService {
             )
             .await;
             if !memories.is_empty() {
+                let memory_context = memories
+                    .into_iter()
+                    .map(|entry| Self::strip_internal_context_markers(&entry))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 final_prompt = format!(
                     "{}\n\nRelevant prior context:\n{}",
-                    new_content,
-                    memories.join("\n")
+                    memory_safe_user_content,
+                    memory_context
                 );
             }
         }
 
-        let runtime_tools = AgentService::resolve_enabled_tools(db, conversation.agent_id)
-            .await
-            .unwrap_or_default();
+        let runtime_tools = match AgentService::resolve_enabled_tools(db, conversation.agent_id).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!(
+                    "[CONVERSATION] Failed to resolve runtime tools for streaming edit branch conversation {} (agent {}): {}. Falling back to empty tool catalog.",
+                    original_message.conversation_id, conversation.agent_id, error
+                );
+                Vec::new()
+            }
+        };
+        if runtime_tools.is_empty() {
+            eprintln!(
+                "[CONVERSATION] Streaming edit branch runtime tool catalog is empty for conversation {} (agent {}).",
+                original_message.conversation_id, conversation.agent_id
+            );
+        }
         let image_base64 = if Self::ability_enabled(&runtime_tools, "vision_analysis") {
             image_base64
         } else {
@@ -1049,13 +1186,13 @@ impl ConversationService {
         let _ = MemoryService::embed_message_content(
             db,
             new_user_message_id,
-            &sanitized_content.content,
+            &Self::strip_internal_context_markers(&sanitized_content.content),
         )
         .await;
         let _ = MemoryService::embed_message_content(
             db,
             saved_assistant_message.id,
-            &saved_assistant_message.content,
+            &Self::strip_internal_context_markers(&saved_assistant_message.content),
         )
         .await;
 
@@ -1141,9 +1278,12 @@ impl ConversationService {
             }
 
             saved_messages.push(saved.into());
-            let _ =
-                MemoryService::embed_message_content(db, new_message_id, &sanitized_text_content)
-                    .await;
+            let _ = MemoryService::embed_message_content(
+                db,
+                new_message_id,
+                &Self::strip_internal_context_markers(&sanitized_text_content),
+            )
+            .await;
             // Chain: next message's parent is this message
             last_message_id = Some(new_message_id);
         }
@@ -1210,10 +1350,30 @@ mod tests {
             implementation_key: "vision_analysis".to_string(),
             enabled: false,
             config: json!({}),
+            parameters_schema: json!({}),
         }];
         assert!(!ConversationService::ability_enabled(
             &tools,
             "vision_analysis"
         ));
+    }
+
+    #[test]
+    fn strip_internal_context_markers_removes_runtime_blocks() {
+        let input = "[RuntimeToolContext]\nfoo\n[/RuntimeToolContext]\nhello world";
+        assert_eq!(
+            ConversationService::strip_internal_context_markers(input),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn strip_internal_context_markers_removes_direct_tool_blocks() {
+        let input =
+            "before\n[DirectToolResultContext]\ninternal\n[/DirectToolResultContext]\nafter";
+        assert_eq!(
+            ConversationService::strip_internal_context_markers(input),
+            "before\nafter"
+        );
     }
 }

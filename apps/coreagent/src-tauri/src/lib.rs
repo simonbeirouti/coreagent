@@ -45,7 +45,7 @@ use orchestration_service::{
 use perception_tracker::{PerceptionStat, PerceptionTracker};
 use user_profile_service::UserProfileService;
 use serde::Serialize;
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::DatabaseConnection;
 use serde_json::Value;
 use skills_registry_client::{
     AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
@@ -1681,56 +1681,30 @@ async fn submit_message_feedback(
     let db_for_task = (*db).clone();
     tauri::async_runtime::spawn(async move {
         let adaptation_started = std::time::Instant::now();
-        let message = match entities::messages::Entity::find_by_id(message_id)
-            .one(&db_for_task)
-            .await
+        let agent_id = match FeedbackService::resolve_agent_id_for_message(&db_for_task, message_id).await
         {
-            Ok(message) => message,
+            Ok(agent_id) => agent_id,
             Err(err) => {
                 eprintln!(
-                    "[FEEDBACK] Background adaptation skipped: message lookup failed: {}",
+                    "[FEEDBACK] Background adaptation skipped: failed to resolve message context: {}",
                     err
                 );
                 return;
             }
         };
 
-        let Some(message) = message else {
-            return;
-        };
-
-        let conversation =
-            match entities::conversations::Entity::find_by_id(message.conversation_id)
-                .one(&db_for_task)
-                .await
-            {
-                Ok(conversation) => conversation,
-                Err(err) => {
-                    eprintln!(
-                        "[FEEDBACK] Background adaptation skipped: conversation lookup failed: {}",
-                        err
-                    );
-                    return;
-                }
-            };
-
-        let Some(conversation) = conversation else {
-            return;
-        };
-
-        if let Err(err) =
-            FeedbackService::run_adaptation_cycle(&db_for_task, conversation.agent_id).await
+        if let Err(err) = FeedbackService::run_adaptation_cycle(&db_for_task, agent_id).await
         {
             eprintln!(
                 "[FEEDBACK] Adaptive cycle execution failed for agent {}: {}",
-                conversation.agent_id, err
+                agent_id, err
             );
             return;
         }
 
         eprintln!(
             "[FEEDBACK] Background adaptation completed for agent {} in {}ms",
-            conversation.agent_id,
+            agent_id,
             adaptation_started.elapsed().as_millis()
         );
     });

@@ -79,7 +79,64 @@ function slugifySlashToken(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-function parseDirectToolInput(argsText: string): Record<string, unknown> {
+function asObjectRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function choosePreferredTextField(
+  parametersSchema?: Record<string, unknown>
+): string | null {
+  const schema = asObjectRecord(parametersSchema);
+  const properties = asObjectRecord(schema?.properties);
+  if (!properties) {
+    return null;
+  }
+
+  const preferredKeys = ['text', 'query', 'prompt', 'input', 'message', 'content', 'instructions'];
+  for (const key of preferredKeys) {
+    const property = asObjectRecord(properties[key]);
+    if (property?.type === 'string') {
+      return key;
+    }
+  }
+
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  for (const requiredKey of required) {
+    if (typeof requiredKey !== 'string') continue;
+    const property = asObjectRecord(properties[requiredKey]);
+    if (property?.type === 'string') {
+      return requiredKey;
+    }
+  }
+
+  return null;
+}
+
+function toTextEnvelope(rawText: string, parametersSchema?: Record<string, unknown>): Record<string, unknown> {
+  const text = rawText.trim();
+  if (!text) {
+    return {};
+  }
+
+  const envelope: Record<string, unknown> = {
+    text,
+    query: text,
+    input: text,
+  };
+  const preferredField = choosePreferredTextField(parametersSchema);
+  if (preferredField) {
+    envelope[preferredField] = text;
+  }
+  return envelope;
+}
+
+function parseDirectToolInput(
+  argsText: string,
+  options?: { parametersSchema?: Record<string, unknown> }
+): Record<string, unknown> {
   if (!argsText) {
     return {};
   }
@@ -89,9 +146,12 @@ function parseDirectToolInput(argsText: string): Record<string, unknown> {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
+    if (typeof parsed === 'string') {
+      return toTextEnvelope(parsed, options?.parametersSchema);
+    }
     return { input: parsed };
   } catch {
-    return { query: argsText };
+    return toTextEnvelope(argsText, options?.parametersSchema);
   }
 }
 
@@ -103,6 +163,7 @@ type SlashCommand = {
   description: string;
   implementationKey: string;
   skillId?: string;
+  parametersSchema?: Record<string, unknown>;
   executionMode: 'agent_runtime' | 'registry_direct';
   kind: 'runtime' | 'screenshot';
 };
@@ -197,12 +258,36 @@ function formatToolRunLabel(implementationKey: string): string {
 }
 
 function shouldAttachRuntimeToolContext(content: string): boolean {
-  if (/\b(tool|tools|skill|skills|ability|abilities|command|commands)\b/i.test(content)) {
-    return true;
+  const normalized = content.trim();
+  if (!normalized || normalized.startsWith('/')) {
+    return false;
   }
 
-  const actionPattern = new RegExp(`\\b(?:${DIRECT_TOOL_INTENT_VERBS.join('|')})\\b`, 'i');
-  return actionPattern.test(content);
+  const hasToolNoun = /\b(tool|tools|skill|skills|ability|abilities|command|commands)\b/i.test(
+    normalized
+  );
+  const hasActionVerb = new RegExp(`\\b(?:${DIRECT_TOOL_INTENT_VERBS.join('|')})\\b`, 'i').test(
+    normalized
+  );
+  const hasExplicitSelection = /\b(use|choose|pick|select|best|right|appropriate)\s+(tool|skill|ability|command)s?\b/i.test(
+    normalized
+  );
+  const hasDiscoveryRequest = /\b(what|which|list|show)\b[\s\S]*\b(tool|skill|ability|command)s?\b/i.test(
+    normalized
+  );
+  const hasImplementationKeyLikeToken = /\b[a-z0-9]+(?:[._-][a-z0-9]+){2,}\b/i.test(normalized);
+  const hasInvokeWithToolNoun =
+    /\b(run|execute|launch|start|trigger)\b[\s\S]*\b(tool|skill|ability|command)\b/i.test(
+      normalized
+    );
+
+  return (
+    hasImplementationKeyLikeToken ||
+    hasExplicitSelection ||
+    hasDiscoveryRequest ||
+    hasInvokeWithToolNoun ||
+    (hasToolNoun && hasActionVerb)
+  );
 }
 
 function toRuntimeToolContext(tools: SlashCommand[]): string {
@@ -248,7 +333,16 @@ function getTextContent(content: string): string {
     .replace(/\[Image Description: [\s\S]*?\]\n?/g, '') // Image description (for AI, not display)
     .replace(/\[RuntimeToolContext\][\s\S]*?\[\/RuntimeToolContext\]\n?/g, '') // Runtime tool context (for AI, not display)
     .replace(/\[DirectToolResultContext\][\s\S]*?\[\/DirectToolResultContext\]\n?/g, '') // Direct tool result context (for AI, not display)
+    .replace(/\[ToolExecutionContext\][\s\S]*?\[\/ToolExecutionContext\]\n?/g, '') // Tool execution context (for reload hydration)
     .trim();
+}
+
+function parseToolExecutionContext(content: string): Record<string, unknown> | null {
+  const match = content.match(
+    /\[ToolExecutionContext\]([\s\S]*?)\[\/ToolExecutionContext\]/
+  );
+  if (!match?.[1]) return null;
+  return safeParseObjectJson(match[1].trim());
 }
 
 function isDirectToolResultContextContent(content: string): boolean {
@@ -285,15 +379,93 @@ function safeParseObjectJson(value: string | null): Record<string, unknown> | nu
   }
 }
 
-function parsePersistedDirectToolRun(message: Message): DirectToolRunViewModel | null {
-  if (message.role !== 'user') return null;
+function parsePersistedDirectToolRuns(message: Message): DirectToolRunViewModel[] {
+  const runs: DirectToolRunViewModel[] = [];
+  const contextPayload = parseToolExecutionContext(message.content);
+
+  const metadataRuns = Array.isArray(message.metadata?.inferred_tool_runs)
+    ? (message.metadata.inferred_tool_runs as Array<Record<string, unknown>>)
+    : Array.isArray(contextPayload?.runs)
+    ? (contextPayload.runs as Array<Record<string, unknown>>)
+    : [];
+  for (const rawRun of metadataRuns) {
+    const implementationKey =
+      typeof rawRun.implementationKey === 'string' ? rawRun.implementationKey : null;
+    if (!implementationKey) continue;
+    const timelineRaw = Array.isArray(rawRun.timeline) ? rawRun.timeline : [];
+    const timeline: DirectToolTimelineEntry[] = timelineRaw
+      .map((entry, idx) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const item = entry as Record<string, unknown>;
+        const entryMessage = typeof item.message === 'string' ? item.message : '';
+        if (!entryMessage) return null;
+        const timestampMs =
+          typeof item.timestampMs === 'number'
+            ? item.timestampMs
+            : Date.parse(message.created_at) || Date.now();
+        const sequence = typeof item.sequence === 'number' ? item.sequence : idx;
+        const level =
+          item.level === 'success' || item.level === 'error' || item.level === 'info'
+            ? (item.level as DirectToolTimelineEntry['level'])
+            : inferTimelineLevel(
+                entryMessage,
+                typeof rawRun.status === 'string' ? rawRun.status : null
+              );
+        return {
+          id:
+            typeof item.id === 'string'
+              ? item.id
+              : `persisted-${message.id}-${implementationKey}-${sequence}`,
+          message: entryMessage,
+          level,
+          timestampMs,
+          sequence,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    const status = parseDirectToolRunStatus(
+      typeof rawRun.status === 'string' ? rawRun.status : undefined
+    );
+    const startedAtMs =
+      typeof rawRun.startedAtMs === 'number'
+        ? rawRun.startedAtMs
+        : timeline[0]?.timestampMs || Date.parse(message.created_at) || Date.now();
+    runs.push({
+      clientRunId:
+        typeof rawRun.clientRunId === 'string'
+          ? rawRun.clientRunId
+          : `persisted-meta-${message.id}-${implementationKey}`,
+      startedAtMs,
+      implementationKey,
+      runId: typeof rawRun.runId === 'string' ? rawRun.runId : undefined,
+      status,
+      timeline:
+        timeline.length > 0
+          ? timeline
+          : [
+              {
+                id: `persisted-meta-${message.id}-${implementationKey}-completed`,
+                message: `Run completed with status ${status}.`,
+                level: inferTimelineLevel(`Run completed with status ${status}.`, status),
+                timestampMs: startedAtMs,
+                sequence: Number.MAX_SAFE_INTEGER,
+              },
+            ],
+    });
+  }
+
+  if (runs.length > 0) {
+    return runs;
+  }
+
+  if (message.role !== 'user') return [];
   const match = message.content.match(
     /\[DirectToolResultContext\]([\s\S]*?)\[\/DirectToolResultContext\]/
   );
-  if (!match?.[1]) return null;
+  if (!match?.[1]) return [];
   const block = match[1];
   const tool = block.match(/^\s*Tool:\s*(.+)$/m)?.[1]?.trim();
-  if (!tool) return null;
+  if (!tool) return [];
   const runId = block.match(/^\s*Run ID:\s*(.+)$/m)?.[1]?.trim();
   const statusValue = block.match(/^\s*Status:\s*(.+)$/m)?.[1]?.trim();
   const executionMode = block.match(/^\s*Execution mode:\s*(.+)$/m)?.[1]?.trim();
@@ -311,7 +483,7 @@ function parsePersistedDirectToolRun(message: Message): DirectToolRunViewModel |
   const status = parseDirectToolRunStatus(statusValue);
   const startedAtMs = Date.parse(message.created_at) || Date.now();
   const completedMessage = `Run completed with status ${status}.`;
-  return {
+  return [{
     clientRunId: `persisted-${runId || message.id}`,
     startedAtMs,
     implementationKey: tool,
@@ -330,7 +502,7 @@ function parsePersistedDirectToolRun(message: Message): DirectToolRunViewModel |
         sequence: Number.MAX_SAFE_INTEGER,
       },
     ],
-  };
+  }];
 }
 
 // Cache for signed URLs to avoid regenerating on every render
@@ -450,17 +622,17 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
       <CardContent className="min-w-0 p-3">
         <Accordion type="single" collapsible>
           <AccordionItem value={`run-${run.clientRunId}`} className="border-b-0">
-            <AccordionTrigger className="py-1 hover:no-underline">
-              <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
-                <div className="flex min-w-0 items-center gap-2">
+            <AccordionTrigger className="min-w-0 py-1 hover:no-underline">
+              <div className="flex min-w-0 w-full flex-1 flex-col items-start gap-1 overflow-hidden">
+                <div className="flex min-w-0 w-full items-center gap-2 overflow-hidden">
                   {run.status === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                  <span className="truncate text-sm font-medium">
+                  <span className="truncate text-sm font-medium min-w-0">
                     {formatToolRunLabel(run.implementationKey)}
                   </span>
                   <span className={cn('text-xs capitalize', statusToneClass)}>{statusLabel}</span>
                 </div>
                 {latestEntry ? (
-                  <div className="truncate text-xs text-muted-foreground">
+                  <div className="line-clamp-1 w-full max-w-full overflow-hidden break-all text-xs text-muted-foreground">
                     {latestEntry.message}
                   </div>
                 ) : null}
@@ -478,10 +650,10 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                     run id: <span className="font-medium">{run.runId}</span>
                   </div>
                 ) : null}
-                <div className="space-y-1.5 rounded-md border bg-background p-2">
+                <div className="min-w-0 space-y-1.5 rounded-md border bg-background p-2">
                   {run.timeline.length > 0 ? (
                     run.timeline.map((entry) => (
-                      <div key={entry.id} className="text-xs break-words">
+                      <div key={entry.id} className="min-w-0 max-w-full text-xs break-all">
                         <span
                           className={cn(
                             'mr-2 font-medium',
@@ -494,7 +666,7 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
                         >
                           {new Date(entry.timestampMs).toLocaleTimeString()}
                         </span>
-                        <span>{entry.message}</span>
+                        <span className="break-all">{entry.message}</span>
                       </div>
                     ))
                   ) : (
@@ -582,6 +754,38 @@ function AgentChatPage() {
   const [isDirectToolRunning, setIsDirectToolRunning] = useState(false);
   const [directToolRuns, setDirectToolRuns] = useState<DirectToolRunViewModel[]>([]);
   const [showSlashCommands, setShowSlashCommands] = useState(false);
+  const isActiveConversationStreaming =
+    sendMessageStreaming.isStreaming &&
+    Boolean(activeConversationId) &&
+    sendMessageStreaming.streamingConversationId === activeConversationId;
+  const applyToolProgressEvent = useCallback((payload: DirectRuntimeToolProgressEvent) => {
+    setDirectToolRuns((prev) => {
+      const index = prev.findIndex((run) => run.clientRunId === payload.clientRunId);
+      if (index === -1) {
+        // Ignore orphan events from runs started in another chat/view.
+        return prev;
+      }
+      const timelineEntry: DirectToolTimelineEntry = {
+        id: `${payload.clientRunId}-progress-${payload.sequence}`,
+        message: payload.message,
+        level: inferTimelineLevel(payload.message, payload.status),
+        timestampMs: payload.timestampMs || Date.now(),
+        sequence: payload.sequence,
+      };
+
+      const next = [...prev];
+      const target = next[index];
+      next[index] = {
+        ...target,
+        implementationKey: payload.implementationKey || target.implementationKey,
+        runId: payload.runId ?? target.runId,
+        status: (payload.status as DirectToolRunStatus) || target.status,
+        timeline: appendUniqueTimelineEntries(target.timeline, [timelineEntry]),
+      };
+      return next;
+    });
+  }, []);
+
 
   // Message branching state
   const [branchSelections, setBranchSelections] = useState<BranchSelections>({});
@@ -611,8 +815,38 @@ function AgentChatPage() {
   const persistedToolRuns = useMemo(
     () =>
       visibleMessages
-        .map((message) => parsePersistedDirectToolRun(message))
+        .flatMap((message) => parsePersistedDirectToolRuns(message))
         .filter((run): run is DirectToolRunViewModel => run !== null),
+    [visibleMessages]
+  );
+  const persistedAcceptanceItems = useMemo(
+    () =>
+      visibleMessages
+        .map((message) => {
+          if (message.role !== 'assistant') return null;
+          const contextPayload = parseToolExecutionContext(message.content);
+          const content =
+            typeof message.metadata?.tool_acceptance_message === 'string'
+              ? message.metadata.tool_acceptance_message
+              : typeof contextPayload?.acceptanceMessage === 'string'
+              ? contextPayload.acceptanceMessage
+              : null;
+          if (!content) return null;
+          const metadataTimestamp =
+            typeof message.metadata?.tool_acceptance_timestamp_ms === 'number'
+              ? message.metadata.tool_acceptance_timestamp_ms
+              : typeof contextPayload?.acceptanceTimestampMs === 'number'
+              ? contextPayload.acceptanceTimestampMs
+              : null;
+          return {
+            kind: 'acceptance' as const,
+            id: `acceptance-${message.id}`,
+            timestampMs: metadataTimestamp ?? Math.max(0, (Date.parse(message.created_at) || 0) - 1),
+            index: 0,
+            content,
+          };
+        })
+        .filter((item): item is { kind: 'acceptance'; id: string; timestampMs: number; index: number; content: string } => item !== null),
     [visibleMessages]
   );
   const allToolRuns = useMemo(() => {
@@ -647,16 +881,54 @@ function AgentChatPage() {
       index,
       run,
     }));
-    return [...messageItems, ...runItems].sort((a, b) => {
+    const firstRunTimestampMs =
+      runItems.length > 0 ? Math.min(...runItems.map((item) => item.timestampMs)) : null;
+    const acceptanceTimestampMs =
+      firstRunTimestampMs !== null
+        ? Math.max(
+            0,
+            Math.min(
+              sendMessageStreaming.toolAcceptanceTimestampMs ?? firstRunTimestampMs,
+              firstRunTimestampMs - 1
+            )
+          )
+        : sendMessageStreaming.toolAcceptanceTimestampMs;
+    const acceptanceItems =
+      isActiveConversationStreaming &&
+      sendMessageStreaming.toolAcceptanceMessage &&
+      acceptanceTimestampMs
+        ? [
+            {
+              kind: 'acceptance' as const,
+              id: 'streaming-tool-acceptance',
+              timestampMs: acceptanceTimestampMs,
+              index: Number.MAX_SAFE_INTEGER - 1,
+              content: sendMessageStreaming.toolAcceptanceMessage,
+            },
+          ]
+        : [];
+    return [...messageItems, ...persistedAcceptanceItems, ...acceptanceItems, ...runItems].sort((a, b) => {
       if (a.timestampMs !== b.timestampMs) {
         return a.timestampMs - b.timestampMs;
       }
       if (a.kind !== b.kind) {
-        return a.kind === 'message' ? 1 : -1;
+        if (a.kind === 'message') return -1;
+        if (b.kind === 'message') return 1;
+        if (a.kind === 'acceptance') return -1;
+        if (b.kind === 'acceptance') return 1;
+        return 0;
       }
       return a.index - b.index;
     });
-  }, [displayMessages, allToolRuns]);
+  }, [
+    displayMessages,
+    allToolRuns,
+    sendMessageStreaming.isStreaming,
+    isActiveConversationStreaming,
+    sendMessageStreaming.toolAcceptanceMessage,
+    sendMessageStreaming.toolAcceptanceTimestampMs,
+    persistedAcceptanceItems,
+  ]);
   const runtimeSlashCommands = useMemo<SlashCommand[]>(() => {
     return toolSettings
       .filter((tool) => tool.enabled && !CORE_RUNTIME_TOOLS.has(tool.implementation_key))
@@ -669,6 +941,7 @@ function AgentChatPage() {
           insertText: `/${commandToken} `,
           description: tool.description || `Run ${tool.ability_name}`,
           implementationKey: tool.implementation_key,
+          parametersSchema: tool.parameters_schema,
           executionMode: 'agent_runtime' as const,
           kind: 'runtime' as const,
         };
@@ -775,43 +1048,7 @@ function AgentChatPage() {
 
     listen<DirectRuntimeToolProgressEvent>('direct-runtime-tool-progress', (event) => {
       if (cancelled) return;
-      const payload = event.payload;
-
-      setDirectToolRuns((prev) => {
-        const index = prev.findIndex((run) => run.clientRunId === payload.clientRunId);
-        const timelineEntry: DirectToolTimelineEntry = {
-          id: `${payload.clientRunId}-progress-${payload.sequence}`,
-          message: payload.message,
-          level: inferTimelineLevel(payload.message, payload.status),
-          timestampMs: payload.timestampMs || Date.now(),
-          sequence: payload.sequence,
-        };
-
-        if (index === -1) {
-          return [
-            ...prev,
-            {
-              clientRunId: payload.clientRunId,
-              startedAtMs: timelineEntry.timestampMs,
-              implementationKey: payload.implementationKey,
-              runId: payload.runId ?? undefined,
-              status: (payload.status as DirectToolRunStatus) || 'running',
-              timeline: [timelineEntry],
-            },
-          ];
-        }
-
-        const next = [...prev];
-        const target = next[index];
-        next[index] = {
-          ...target,
-          implementationKey: payload.implementationKey || target.implementationKey,
-          runId: payload.runId ?? target.runId,
-          status: (payload.status as DirectToolRunStatus) || target.status,
-          timeline: appendUniqueTimelineEntries(target.timeline, [timelineEntry]),
-        };
-        return next;
-      });
+      applyToolProgressEvent(event.payload);
     })
       .then((unlisten) => {
         dispose = unlisten;
@@ -826,7 +1063,33 @@ function AgentChatPage() {
         dispose();
       }
     };
-  }, []);
+  }, [applyToolProgressEvent]);
+
+  useEffect(() => {
+    if (!sendMessageStreaming.inferredToolProgress.length) return;
+    for (const event of sendMessageStreaming.inferredToolProgress) {
+      if (!activeConversationId || event.conversationId !== activeConversationId) {
+        continue;
+      }
+      setDirectToolRuns((prev) => {
+        if (prev.some((run) => run.clientRunId === event.clientRunId)) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            clientRunId: event.clientRunId,
+            startedAtMs: event.timestampMs || Date.now(),
+            implementationKey: event.implementationKey,
+            runId: event.runId ?? undefined,
+            status: (event.status as DirectToolRunStatus) || 'running',
+            timeline: [],
+          },
+        ];
+      });
+      applyToolProgressEvent(event as DirectRuntimeToolProgressEvent);
+    }
+  }, [sendMessageStreaming.inferredToolProgress, applyToolProgressEvent, activeConversationId]);
 
   // Reset branch selections when switching conversations
   useEffect(() => {
@@ -945,7 +1208,11 @@ function AgentChatPage() {
   );
 
   const executeDirectRuntimeTool = useCallback(
-    async (tool: SlashCommand, parsedInput: Record<string, unknown>): Promise<boolean> => {
+    async (
+      tool: SlashCommand,
+      parsedInput: Record<string, unknown>,
+      rawInputText: string
+    ): Promise<boolean> => {
       const clientRunId =
         typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
           ? crypto.randomUUID()
@@ -1041,6 +1308,7 @@ function AgentChatPage() {
           `Run ID: ${result.runId}`,
           `Status: ${result.status}`,
           `Execution mode: ${result.executionMode}`,
+          `User-provided tool text: ${rawInputText || '(none)'}`,
           `Tool input: ${JSON.stringify(parsedInput)}`,
           `Tool output JSON: ${JSON.stringify(result.output ?? {}, null, 2)}`,
           `Tool error JSON: ${JSON.stringify(result.error ?? null, null, 2)}`,
@@ -1110,8 +1378,11 @@ function AgentChatPage() {
       return false;
     }
 
-    const parsedInput = parseDirectToolInput(rest.join(' ').trim());
-    return executeDirectRuntimeTool(tool, parsedInput);
+    const rawArgsText = rest.join(' ').trim();
+    const parsedInput = parseDirectToolInput(rawArgsText, {
+      parametersSchema: tool.parametersSchema,
+    });
+    return executeDirectRuntimeTool(tool, parsedInput, rawArgsText);
   };
 
   const handleSendMessage = async () => {
@@ -1313,8 +1584,22 @@ function AgentChatPage() {
       chatTimelineItems.map((item) => {
         if (item.kind === 'run') {
           return (
-            <div key={item.id} className="flex min-w-0 justify-start">
+            <div key={item.id} className="flex min-w-0 max-w-full justify-start overflow-hidden">
               <DirectToolRunCard run={item.run} />
+            </div>
+          );
+        }
+        if (item.kind === 'acceptance') {
+          return (
+            <div key={item.id} className="flex justify-start">
+              <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                <CardContent className="min-w-0 p-3">
+                  <MarkdownContent
+                    content={item.content}
+                    className="min-w-0 max-w-full overflow-x-auto"
+                  />
+                </CardContent>
+              </Card>
             </div>
           );
         }
@@ -1638,9 +1923,9 @@ function AgentChatPage() {
                 </div>
               ))}
             </div>
-          ) : ((chatTimelineItems.length > 0) || sendMessageStreaming.isStreaming || editMessageStreaming.isStreaming) ? (
+          ) : ((chatTimelineItems.length > 0) || isActiveConversationStreaming || editMessageStreaming.isStreaming) ? (
             <ScrollArea className="h-full w-full">
-              <div className="w-full min-w-0 space-y-4 px-4 pb-4 pt-4">
+              <div className="w-full min-w-0 space-y-4 px-4 pt-4">
                 {renderedTimelineItems}
                 {/* Streaming message display for edit */}
                 {editMessageStreaming.isStreaming && editMessageStreaming.streamingContent && (
@@ -1660,30 +1945,36 @@ function AgentChatPage() {
                   </div>
                 )}
                 {/* Streaming message display for new message */}
-                {sendMessageStreaming.isStreaming && (
-                  <div className="flex justify-start">
-                    <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
-                      <CardContent className="min-w-0 p-3">
-                        {sendMessageStreaming.streamingContent ? (
-                          <MarkdownContent
-                            content={sendMessageStreaming.streamingContent}
-                            className="min-w-0 max-w-full overflow-x-auto"
-                          />
-                        ) : (
-                          <div className="flex items-center gap-2">
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                            <span className="text-xs opacity-70">AI is thinking...</span>
-                          </div>
-                        )}
-                        {sendMessageStreaming.streamingContent && (
-                          <div className="flex items-center gap-2 mt-2">
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                            <span className="text-xs opacity-70">AI is typing...</span>
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  </div>
+                {isActiveConversationStreaming && (
+                  <>
+                    {sendMessageStreaming.streamingContent ? (
+                      <div className="flex justify-start">
+                        <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                          <CardContent className="min-w-0 p-3">
+                            <MarkdownContent
+                              content={sendMessageStreaming.streamingContent}
+                              className="min-w-0 max-w-full overflow-x-auto"
+                            />
+                            <div className="flex items-center gap-2 mt-2">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <span className="text-xs opacity-70">AI is typing...</span>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </div>
+                    ) : (
+                      <div className="flex justify-start">
+                        <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                          <CardContent className="min-w-0 p-3">
+                            <div className="flex items-center gap-2">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <span className="text-xs opacity-70">AI is thinking...</span>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </div>
+                    )}
+                  </>
                 )}
                 <div ref={messagesEndRef} />
               </div>
@@ -1776,7 +2067,7 @@ function AgentChatPage() {
                     }}
                     onKeyPress={handleKeyPress}
                     placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
-                    disabled={sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
+                    disabled={sendMessage.isPending || isDirectToolRunning}
                     className={cn("w-full pr-16", isTranscribing && "pl-9")}
                     maxLength={MAX_MESSAGE_LENGTH}
                   />

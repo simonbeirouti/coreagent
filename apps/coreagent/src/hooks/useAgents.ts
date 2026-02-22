@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { invoke } from '@tauri-apps/api/core';
 import { Agent, CreateAgentRequest, UpdateAgentRequest } from '../types';
 import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 import { agentKeys } from '@/lib/query-keys';
+import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
+import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 export { agentKeys };
 
@@ -14,11 +15,12 @@ export function useAgents(userId: string) {
   return useQuery({
     queryKey: agentKeys.list(userId),
     queryFn: async (): Promise<Agent[]> => {
-      return await invoke('list_agents', { userId });
+      return tauriCommandClient.listAgents(userId);
     },
     enabled: !!userId,
     initialData,
     initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
@@ -30,11 +32,12 @@ export function useAgent(agentId: string) {
   return useQuery({
     queryKey: agentKeys.detail(agentId),
     queryFn: async (): Promise<Agent> => {
-      return await invoke('get_agent', { agentId });
+      return tauriCommandClient.getAgent(agentId);
     },
     enabled: !!agentId,
     initialData,
     initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
   });
 }
 
@@ -44,7 +47,7 @@ export function useCreateAgent() {
 
   return useMutation({
     mutationFn: async (request: CreateAgentRequest): Promise<Agent> => {
-      return await invoke('create_agent', { request });
+      return tauriCommandClient.createAgent(request);
     },
     onMutate: async (request) => {
       // Cancel outgoing refetches
@@ -106,7 +109,7 @@ export function useUpdateAgent() {
       agentId: string;
       updates: UpdateAgentRequest;
     }): Promise<Agent> => {
-      return await invoke('update_agent', { agentId, updates });
+      return tauriCommandClient.updateAgent(agentId, updates);
     },
     onMutate: async ({ agentId, updates }) => {
       // Cancel outgoing refetches
@@ -166,7 +169,7 @@ export function useDeleteAgent() {
 
   return useMutation({
     mutationFn: async (agentId: string): Promise<void> => {
-      return await invoke('delete_agent', { agentId });
+      return tauriCommandClient.deleteAgent(agentId);
     },
     onMutate: async (agentId) => {
       // Cancel outgoing refetches

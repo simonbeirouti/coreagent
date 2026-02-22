@@ -43,7 +43,7 @@ function AgentLayout() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Menubar */}
-      <div className="shrink-0 bg-background px-4 pb-2 pt-0">
+      <div className="shrink-0 bg-background px-4 pt-0">
 
         <Menubar className="border-b border-border">
           <MenubarMenu>

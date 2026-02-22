@@ -53,6 +53,14 @@ vi.mock("@/hooks/useAbilities", () => ({
         ability_name: "Deep Analysis",
         description: "Run deep analysis",
         enabled: true,
+        parameters_schema: {
+          type: "object",
+          properties: {
+            text: { type: "string" },
+          },
+          required: ["text"],
+          additionalProperties: true,
+        },
       },
     ],
   }),
@@ -230,6 +238,56 @@ describe("chat route runtime", () => {
     expect(payload?.content).toBe("hello there");
   });
 
+  it("adds runtime tool context for explicit tool-selection prompts", async () => {
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
+
+    fireEvent.change(composerInput, { target: { value: "choose the best tool for this task" } });
+    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    expect(payload?.content).toContain("[RuntimeToolContext]");
+  });
+
+  it("does not add runtime tool context for generic action prompts without tool intent", async () => {
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
+
+    fireEvent.change(composerInput, { target: { value: "run a quick summary of this" } });
+    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
+
+    await waitFor(() => {
+      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
+      | { content?: string }
+      | undefined;
+    expect(payload?.content).not.toContain("[RuntimeToolContext]");
+  });
+
   it("retries once without runtime tool context on tool-call loop errors", async () => {
     mocks.sendMessageStreaming
       .mockRejectedValueOnce(
@@ -311,6 +369,47 @@ describe("chat route runtime", () => {
     expect(payload?.content).toContain("A direct runtime tool run has completed.");
     expect(payload?.content).toContain("Tool: coreagent.py.deep_analysis");
     expect(payload?.content).toContain("Status: failed");
+  });
+
+  it("maps raw slash-command text into schema-aware tool input envelope", async () => {
+    mocks.invoke.mockResolvedValueOnce({
+      implementationKey: "coreagent.py.deep_analysis",
+      skillId: "skill.deep.analysis",
+      version: "1.0.0",
+      executionMode: "local_docker",
+      runId: "run-123",
+      status: "succeeded",
+      output: {},
+      error: null,
+      logMessages: [],
+    });
+
+    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatComponent />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
+    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
+    fireEvent.change(composerInput, { target: { value: "/coreagent.py.deep_analysis analyze this csv" } });
+    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
+
+    await waitFor(() => {
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "run_agent_runtime_tool",
+        expect.objectContaining({
+          implementationKey: "coreagent.py.deep_analysis",
+          input: expect.objectContaining({
+            text: "analyze this csv",
+            query: "analyze this csv",
+            input: "analyze this csv",
+          }),
+        })
+      );
+    });
   });
 
   it("keeps direct tool timeline ordered by progress sequence", async () => {

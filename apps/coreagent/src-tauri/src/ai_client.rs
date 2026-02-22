@@ -12,7 +12,7 @@ use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
 use rig::providers::anthropic;
 use rig::providers::openai;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 pub use tauri::ipc::Channel;
 use tokio::time::{sleep, Duration};
@@ -58,7 +58,38 @@ struct RuntimeToolSpec {
     skill_id: String,
     version: String,
     description: String,
+    parameters_schema: serde_json::Value,
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedToolTimelineEntry {
+    id: String,
+    message: String,
+    level: String,
+    timestamp_ms: i64,
+    sequence: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedToolRun {
+    client_run_id: String,
+    implementation_key: String,
+    run_id: Option<String>,
+    status: String,
+    started_at_ms: i64,
+    timeline: Vec<PersistedToolTimelineEntry>,
+}
+
+const NON_REGISTRY_RUNTIME_TOOL_KEYS: &[&str] = &[
+    "conversation",
+    "memory_retrieval",
+    "vision_screenshot",
+    "vision_analysis",
+    "audio_transcription",
+    "voice_synthesis",
+];
 
 /// AI Client manager for handling OpenAI and Anthropic connections
 pub struct AiClientManager {
@@ -347,6 +378,353 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         name
     }
 
+    fn normalize_tool_parameters_schema(schema: Option<&serde_json::Value>) -> serde_json::Value {
+        let Some(schema_obj) = schema.and_then(|value| value.as_object()) else {
+            return serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true
+            });
+        };
+
+        let mut normalized = serde_json::Map::new();
+        normalized.insert(
+            "type".to_string(),
+            schema_obj
+                .get("type")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::String("object".to_string())),
+        );
+        normalized.insert(
+            "properties".to_string(),
+            schema_obj
+                .get("properties")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        );
+        normalized.insert(
+            "required".to_string(),
+            schema_obj
+                .get("required")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        );
+        normalized.insert(
+            "additionalProperties".to_string(),
+            schema_obj
+                .get("additionalProperties")
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(true)),
+        );
+        for (key, value) in schema_obj {
+            if !normalized.contains_key(key) {
+                normalized.insert(key.clone(), value.clone());
+            }
+        }
+
+        serde_json::Value::Object(normalized)
+    }
+
+    fn normalize_tool_lookup_key(raw: &str) -> String {
+        Self::sanitize_tool_name(raw)
+            .to_ascii_lowercase()
+            .replace('-', "_")
+    }
+
+    fn coerce_runtime_tool_input(arguments_raw: &str) -> (serde_json::Value, Option<String>) {
+        let trimmed = arguments_raw.trim();
+        if trimmed.is_empty() {
+            return (serde_json::json!({}), None);
+        }
+
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Object(obj)) => (serde_json::Value::Object(obj), None),
+            Ok(serde_json::Value::String(text)) => {
+                let payload = serde_json::json!({
+                    "text": text,
+                    "query": text,
+                    "input": text
+                });
+                (
+                    payload,
+                    Some("Tool arguments were a JSON string and were coerced into text/query/input.".to_string()),
+                )
+            }
+            Ok(other) => (
+                serde_json::json!({ "input": other }),
+                Some("Tool arguments were a non-object JSON value and were wrapped in 'input'.".to_string()),
+            ),
+            Err(_) => {
+                let payload = serde_json::json!({
+                    "text": trimmed,
+                    "query": trimmed,
+                    "input": trimmed
+                });
+                (
+                    payload,
+                    Some("Tool arguments were not valid JSON; raw text was coerced into text/query/input.".to_string()),
+                )
+            }
+        }
+    }
+
+    fn latest_user_message_text(chat_messages: &[ChatCompletionRequestMessage]) -> Option<String> {
+        chat_messages.iter().rev().find_map(|message| match message {
+            ChatCompletionRequestMessage::User(user_message) => match &user_message.content {
+                ChatCompletionRequestUserMessageContent::Text(text) => Some(text.clone()),
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    let text = parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            ChatCompletionRequestUserMessageContentPart::Text(text_part) => {
+                                Some(text_part.text.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
+                }
+            },
+            _ => None,
+        })
+    }
+
+    fn should_require_runtime_tool(user_message: &str) -> bool {
+        let normalized = user_message.to_ascii_lowercase();
+        let tool_explicit_keywords = [
+            "tool",
+            "tools",
+            "skill",
+            "skills",
+            "ability",
+            "abilities",
+            "regex",
+            "pattern",
+        ];
+        if tool_explicit_keywords
+            .iter()
+            .any(|keyword| normalized.contains(keyword))
+        {
+            return true;
+        }
+
+        let action_keywords = [
+            "run ",
+            "execute ",
+            "use ",
+            "choose ",
+            "select ",
+            "pick ",
+            "fetch ",
+            "lookup ",
+            "analyze ",
+            "generate ",
+            "summarize ",
+            "process ",
+            "extract ",
+        ];
+        let objective_keywords = [
+            "dataset",
+            "csv",
+            "json",
+            "file",
+            "invoice",
+            "id",
+            "latest",
+            "current",
+            "external",
+            "real-time",
+        ];
+        action_keywords
+            .iter()
+            .any(|keyword| normalized.contains(keyword))
+            && objective_keywords
+                .iter()
+                .any(|keyword| normalized.contains(keyword))
+    }
+
+    fn extract_primary_user_request(user_message: &str) -> String {
+        user_message
+            .split("\n\nRelevant prior context:")
+            .next()
+            .unwrap_or(user_message)
+            .trim()
+            .to_string()
+    }
+
+    fn strip_internal_tool_context(input: &str) -> String {
+        fn strip_block(input: &str, start: &str, end: &str) -> String {
+            let mut output = String::with_capacity(input.len());
+            let mut remaining = input;
+            loop {
+                let Some(start_idx) = remaining.find(start) else {
+                    output.push_str(remaining);
+                    break;
+                };
+                output.push_str(&remaining[..start_idx]);
+                let after_start = &remaining[start_idx + start.len()..];
+                if let Some(end_idx) = after_start.find(end) {
+                    remaining = &after_start[end_idx + end.len()..];
+                } else {
+                    break;
+                }
+            }
+            output
+        }
+
+        let without_runtime =
+            strip_block(input, "[RuntimeToolContext]", "[/RuntimeToolContext]");
+        let without_direct = strip_block(
+            &without_runtime,
+            "[DirectToolResultContext]",
+            "[/DirectToolResultContext]",
+        );
+        let without_execution = strip_block(
+            &without_direct,
+            "[ToolExecutionContext]",
+            "[/ToolExecutionContext]",
+        );
+        without_execution.trim().to_string()
+    }
+
+    fn now_timestamp_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default()
+    }
+
+    fn tool_timeline_level(message: &str, status: Option<&str>) -> String {
+        let normalized = format!(
+            "{} {}",
+            status.unwrap_or_default().to_ascii_lowercase(),
+            message.to_ascii_lowercase()
+        );
+        if normalized.contains("failed")
+            || normalized.contains("error")
+            || normalized.contains("timed_out")
+            || normalized.contains("cancelled")
+        {
+            return "error".to_string();
+        }
+        if normalized.contains("succeeded") || normalized.contains("success") {
+            return "success".to_string();
+        }
+        "info".to_string()
+    }
+
+    fn normalize_tool_label(tool_name: &str) -> String {
+        let without_prefix = tool_name
+            .strip_prefix("coreagent_rs_")
+            .or_else(|| tool_name.strip_prefix("coreagent_py_"))
+            .or_else(|| tool_name.strip_prefix("coreagent_js_"))
+            .or_else(|| tool_name.strip_prefix("coreagent_md_"))
+            .unwrap_or(tool_name);
+        without_prefix
+            .replace(['_', '-'], " ")
+            .trim()
+            .to_string()
+    }
+
+    fn build_acceptance_message(tool_names: &[String]) -> String {
+        let labels = tool_names
+            .iter()
+            .map(|name| Self::normalize_tool_label(name))
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        if labels.len() == 1 {
+            return format!(
+                "Accepted. I will run {} and then summarize the result.",
+                labels[0]
+            );
+        }
+        if labels.len() > 1 {
+            return format!(
+                "Accepted. I will run {} and then summarize the combined results.",
+                labels.join(", ")
+            );
+        }
+        "Accepted. I will run the required tool steps and then summarize the results.".to_string()
+    }
+
+    fn schema_input_fields(schema: &serde_json::Value) -> Vec<String> {
+        schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .map(|props| props.keys().take(5).cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    }
+
+    fn score_runtime_tool_for_message(user_message: &str, tool: &RuntimeToolSpec) -> i32 {
+        let message = user_message.to_ascii_lowercase();
+        let tool_key = tool.implementation_key.to_ascii_lowercase();
+        let tool_name = tool.tool_name.to_ascii_lowercase();
+        let description = tool.description.to_ascii_lowercase();
+        let mut score = 0i32;
+
+        for token in message.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            let token = token.trim();
+            if token.is_empty() || token.len() < 3 {
+                continue;
+            }
+            if tool_key.contains(token) || tool_name.contains(token) {
+                score += 6;
+            }
+            if description.contains(token) {
+                score += 3;
+            }
+        }
+
+        if message.contains("regex") && (tool_key.contains("regex") || description.contains("regex")) {
+            score += 20;
+        }
+        if (message.contains("analysis") || message.contains("analyze"))
+            && (tool_key.contains("analysis") || description.contains("analysis"))
+        {
+            score += 12;
+        }
+        if message.contains("timeline")
+            && (tool_key.contains("timeline") || description.contains("timeline"))
+        {
+            score += 10;
+        }
+
+        score
+    }
+
+    fn build_runtime_tool_plan(
+        user_message: &str,
+        runtime_tools: &[RuntimeToolSpec],
+        max_steps: usize,
+    ) -> Vec<String> {
+        let mut scored = runtime_tools
+            .iter()
+            .map(|tool| (tool.tool_name.clone(), Self::score_runtime_tool_for_message(user_message, tool)))
+            .collect::<Vec<_>>();
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut plan = scored
+            .into_iter()
+            .filter(|(_, score)| *score > 0)
+            .map(|(name, _)| name)
+            .take(max_steps)
+            .collect::<Vec<_>>();
+        if plan.is_empty() {
+            // Ambiguous fallback: prefer one default tool, not a broad multi-tool fanout.
+            if let Some(first) = runtime_tools.first() {
+                plan.push(first.tool_name.clone());
+            }
+        }
+        plan
+    }
+
     fn extract_runtime_tool_specs(
         constraints: Option<&serde_json::Value>,
     ) -> Vec<RuntimeToolSpec> {
@@ -365,14 +743,26 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 .map(str::trim)
                 .filter(|item| !item.is_empty())
             else {
+                eprintln!("[AI_CLIENT] Skipping runtime tool without implementation_key.");
                 continue;
             };
+            if NON_REGISTRY_RUNTIME_TOOL_KEYS.contains(&implementation_key) {
+                eprintln!(
+                    "[AI_CLIENT] Filtering non-runnable runtime tool '{}' from LLM catalog.",
+                    implementation_key
+                );
+                continue;
+            }
 
             let enabled = value
                 .get("enabled")
                 .and_then(|item| item.as_bool())
                 .unwrap_or(true);
             if !enabled {
+                eprintln!(
+                    "[AI_CLIENT] Skipping disabled runtime tool '{}' from LLM catalog.",
+                    implementation_key
+                );
                 continue;
             }
 
@@ -410,15 +800,22 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 })
                 .unwrap_or_else(|| format!("Execute runtime skill '{}'.", implementation_key));
             let tool_name = Self::sanitize_tool_name(implementation_key);
+            let parameters_schema =
+                Self::normalize_tool_parameters_schema(value.get("parameters_schema"));
             specs.push(RuntimeToolSpec {
                 tool_name,
                 implementation_key: implementation_key.to_string(),
                 skill_id,
                 version,
                 description,
+                parameters_schema,
             });
         }
 
+        eprintln!(
+            "[AI_CLIENT] Runtime tool extraction produced {} runnable tool specs.",
+            specs.len()
+        );
         specs
     }
 
@@ -1446,15 +1843,16 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         agent_id: Option<&str>,
         on_event: &Channel<StreamEvent>,
     ) -> String {
-        let parsed_input = serde_json::from_str::<serde_json::Value>(arguments_raw)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .map(serde_json::Value::Object)
-            .unwrap_or_else(|| serde_json::json!({}));
+        let (parsed_input, input_warning) = Self::coerce_runtime_tool_input(arguments_raw);
 
         let _ = on_event.send(StreamEvent::Delta {
             content: format!("\n[tool:{}] starting {}\n", spec.implementation_key, spec.skill_id),
         });
+        if let Some(message) = input_warning.as_ref() {
+            let _ = on_event.send(StreamEvent::Delta {
+                content: format!("[tool:{}] {}\n", spec.implementation_key, message),
+            });
+        }
 
         let client = match SkillsRegistryClient::from_env() {
             Ok(client) => client,
@@ -1561,13 +1959,18 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         };
 
         let mut cursor = 0usize;
+        let mut seen_event_ids: HashSet<String> = HashSet::new();
         let mut final_run: RuntimeRunSummary = run.clone();
         for _ in 0..240 {
             if let Ok(events) = client
                 .list_runtime_run_events(access_token, &run.run_id, cursor, 200)
                 .await
             {
+                let events_len = events.data.len();
                 for event in events.data {
+                    if !seen_event_ids.insert(event.event_id.clone()) {
+                        continue;
+                    }
                     if let Some(message) = event.message {
                         let _ = on_event.send(StreamEvent::Delta {
                             content: format!(
@@ -1582,7 +1985,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     .next_cursor
                     .as_deref()
                     .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(cursor);
+                    .unwrap_or_else(|| cursor.saturating_add(events_len));
             }
 
             match client.get_runtime_run(access_token, &run.run_id).await {
@@ -1615,7 +2018,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "runId": final_run.run_id,
             "status": final_run.status,
             "output": final_run.output,
-            "error": final_run.error
+            "error": final_run.error,
+            "inputWarning": input_warning
         })
         .to_string()
     }
@@ -1634,6 +2038,39 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         on_event
             .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
+        let latest_user_message_raw =
+            Self::latest_user_message_text(&chat_messages).unwrap_or_default();
+        let latest_user_message = Self::strip_internal_tool_context(&latest_user_message_raw);
+        let primary_user_request = Self::extract_primary_user_request(&latest_user_message);
+        let requires_tool = Self::should_require_runtime_tool(&primary_user_request);
+        let max_tool_calls = 3usize;
+        let planned_tool_chain = if requires_tool {
+            Self::build_runtime_tool_plan(&primary_user_request, &runtime_tools, max_tool_calls)
+        } else {
+            Vec::new()
+        };
+        let candidate_tool_names = runtime_tools
+            .iter()
+            .map(|tool| tool.tool_name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-selection] runnable tool count={} requires_tool={} user_message={}\n",
+                runtime_tools.len(),
+                requires_tool,
+                primary_user_request
+            ),
+        });
+        if requires_tool {
+            let _ = on_event.send(StreamEvent::Delta {
+                content: format!(
+                    "[tool-chain] phase=plan_created max_steps={} plan={}\n",
+                    max_tool_calls,
+                    planned_tool_chain.join(" -> ")
+                ),
+            });
+        }
 
         // Nudge the model to prefer tool usage when the user asks for fresh/external data.
         chat_messages.insert(
@@ -1641,36 +2078,114 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             ChatCompletionRequestMessage::System(
                 async_openai::types::chat::ChatCompletionRequestSystemMessage {
                     content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
-                        "You have runtime tools available. For requests requiring real-time, external, or environment-specific data, call an appropriate tool first. Do not claim lack of access before attempting a relevant tool call.".to_string(),
+                        "You have runtime tools available. For requests requiring real-time, external, or environment-specific data, call the best matching tool first. Use an exact tool name from the provided tool list, and provide valid JSON object arguments that match the tool parameter schema. Do not claim lack of access before attempting a relevant tool call.".to_string(),
                     ),
                     name: None,
                 },
             ),
         );
+        if requires_tool {
+            chat_messages.insert(
+                2,
+                ChatCompletionRequestMessage::System(
+                    async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                        content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                            format!(
+                                "This request requires a runtime tool call before answering. Pick the single best tool from: {}. If you cannot identify a matching tool, explain that no suitable tool is currently available instead of fabricating execution.",
+                                candidate_tool_names
+                            ),
+                        ),
+                        name: None,
+                    },
+                ),
+            );
+            chat_messages.insert(
+                3,
+                ChatCompletionRequestMessage::System(
+                    async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                        content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                            format!(
+                                "Execution plan (ordered) with max {} tool calls: {}. Follow this plan unless tool output clearly indicates a better next step.",
+                                max_tool_calls,
+                                planned_tool_chain.join(" -> ")
+                            ),
+                        ),
+                        name: None,
+                    },
+                ),
+            );
+        }
 
-        let tool_defs: Vec<ChatCompletionTools> = runtime_tools
+        let planned_tool_set: HashSet<String> = planned_tool_chain.iter().cloned().collect();
+        let effective_runtime_tools: Vec<RuntimeToolSpec> = if requires_tool && !planned_tool_set.is_empty() {
+            runtime_tools
+                .iter()
+                .filter(|tool| planned_tool_set.contains(&tool.tool_name))
+                .cloned()
+                .collect()
+        } else {
+            runtime_tools.clone()
+        };
+        let _ = on_event.send(StreamEvent::Delta {
+            content: format!(
+                "[tool-chain] phase=planner_filtered callable_tools={}\n",
+                effective_runtime_tools
+                    .iter()
+                    .map(|tool| tool.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+        let acceptance_message = if requires_tool {
+            Some(Self::build_acceptance_message(
+                &effective_runtime_tools
+                    .iter()
+                    .map(|tool| tool.tool_name.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        } else {
+            None
+        };
+        let acceptance_timestamp_ms = acceptance_message
+            .as_ref()
+            .map(|_| Self::now_timestamp_ms());
+
+        let tool_defs: Vec<ChatCompletionTools> = effective_runtime_tools
             .iter()
             .map(|tool| {
                 ChatCompletionTools::Function(ChatCompletionTool {
                     function: FunctionObject {
                         name: tool.tool_name.clone(),
-                        description: Some(tool.description.clone()),
-                        parameters: Some(serde_json::json!({
-                            "type": "object",
-                            "properties": {},
-                            "required": [],
-                            "additionalProperties": true
-                        })),
+                        description: Some(format!(
+                            "{} (implementation_key: {}; key_inputs: {})",
+                            tool.description,
+                            tool.implementation_key,
+                            Self::schema_input_fields(&tool.parameters_schema).join(", ")
+                        )),
+                        parameters: Some(tool.parameters_schema.clone()),
                         strict: None,
                     },
                 })
             })
             .collect();
-        let tool_by_name: HashMap<String, RuntimeToolSpec> = runtime_tools
-            .into_iter()
-            .map(|tool| (tool.tool_name.clone(), tool))
-            .collect();
+        let mut tool_by_lookup: HashMap<String, RuntimeToolSpec> = HashMap::new();
+        for tool in effective_runtime_tools {
+            tool_by_lookup.insert(
+                Self::normalize_tool_lookup_key(&tool.tool_name),
+                tool.clone(),
+            );
+            tool_by_lookup.insert(
+                Self::normalize_tool_lookup_key(&tool.implementation_key),
+                tool,
+            );
+        }
 
+        let mut strict_retry_used = false;
+        let mut has_called_tool = false;
+        let mut task_satisfied = false;
+        let mut tool_calls_used = 0usize;
+        let mut persisted_tool_runs: Vec<PersistedToolRun> = Vec::new();
+        let mut run_index_by_call_id: HashMap<String, usize> = HashMap::new();
         for _ in 0..6 {
             let request = CreateChatCompletionRequestArgs::default()
                 .model(model_id)
@@ -1693,7 +2208,73 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
             let finish_reason = choice.finish_reason.unwrap_or(FinishReason::Stop);
             if tool_calls.is_empty() || finish_reason != FinishReason::ToolCalls {
+                if requires_tool && !has_called_tool && !strict_retry_used {
+                    strict_retry_used = true;
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: "[tool-selection] required tool was not called; retrying once with strict tool-use instruction.\n".to_string(),
+                    });
+                    chat_messages.push(ChatCompletionRequestMessage::System(
+                        async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                            content:
+                                async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                                    format!(
+                                        "Retry policy: you must make at least one runtime tool call now. Candidate tools: {}. Return tool calls only until a tool result is available.",
+                                        candidate_tool_names
+                                    ),
+                                ),
+                            name: None,
+                        },
+                    ));
+                    continue;
+                }
+                if requires_tool && !task_satisfied && tool_calls_used >= max_tool_calls {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=budget_exhausted used={} max={}\n",
+                            tool_calls_used, max_tool_calls
+                        ),
+                    });
+                    return Err(if has_called_tool {
+                        format!(
+                            "All planned tool steps failed before task completion (budget {}).",
+                            max_tool_calls
+                        )
+                    } else {
+                        format!(
+                            "Need additional tool steps but tool budget reached ({}).",
+                            max_tool_calls
+                        )
+                    });
+                }
+                if requires_tool && !has_called_tool {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: "[tool-selection] required tool invocation was skipped after strict retry.\n"
+                            .to_string(),
+                    });
+                    return Err(
+                        "Required runtime tool invocation was skipped by the model.".to_string(),
+                    );
+                }
                 let content = choice.message.content.clone().unwrap_or_default();
+                if has_called_tool {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: "[tool-chain] phase=final_summarize\n".to_string(),
+                    });
+                }
+                let persisted_content = if has_called_tool || acceptance_message.is_some() {
+                    let payload = serde_json::json!({
+                        "acceptanceMessage": acceptance_message,
+                        "acceptanceTimestampMs": acceptance_timestamp_ms,
+                        "runs": persisted_tool_runs,
+                    });
+                    format!(
+                        "{}\n\n[ToolExecutionContext]\n{}\n[/ToolExecutionContext]",
+                        content,
+                        payload
+                    )
+                } else {
+                    content.clone()
+                };
                 if !content.is_empty() {
                     on_event
                         .send(StreamEvent::Delta {
@@ -1703,10 +2284,10 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 }
                 on_event
                     .send(StreamEvent::Done {
-                        full_content: content.clone(),
+                        full_content: persisted_content.clone(),
                     })
                     .map_err(|e| format!("Failed to send Done event: {}", e))?;
-                return Ok(content);
+                return Ok(persisted_content);
             }
 
             chat_messages.push(ChatCompletionRequestMessage::Assistant(
@@ -1728,8 +2309,62 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                 let ChatCompletionMessageToolCalls::Function(call) = tool_call else {
                     continue;
                 };
-                let tool_output = if let Some(spec) = tool_by_name.get(&call.function.name) {
-                    self.execute_runtime_tool_call(
+                has_called_tool = true;
+                if tool_calls_used >= max_tool_calls {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=budget_blocked call_id={} used={} max={}\n",
+                            call.id, tool_calls_used, max_tool_calls
+                        ),
+                    });
+                    let tool_output = serde_json::json!({
+                        "toolCallId": call.id,
+                        "status": "failed",
+                        "error": {
+                            "code": "tool_budget_exhausted",
+                            "message": format!("Tool budget reached ({}).", max_tool_calls)
+                        }
+                    })
+                    .to_string();
+                    chat_messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(tool_output),
+                            tool_call_id: call.id,
+                        },
+                    ));
+                    continue;
+                }
+                tool_calls_used += 1;
+                let tool_output = if let Some(spec) =
+                    tool_by_lookup.get(&Self::normalize_tool_lookup_key(&call.function.name))
+                {
+                    let started_at_ms = Self::now_timestamp_ms();
+                    let client_run_id =
+                        format!("inferred-{}-{}", spec.implementation_key, call.id);
+                    let run_index = persisted_tool_runs.len();
+                    run_index_by_call_id.insert(call.id.clone(), run_index);
+                    persisted_tool_runs.push(PersistedToolRun {
+                        client_run_id: client_run_id.clone(),
+                        implementation_key: spec.implementation_key.clone(),
+                        run_id: None,
+                        status: "running".to_string(),
+                        started_at_ms,
+                        timeline: vec![PersistedToolTimelineEntry {
+                            id: format!("{}-start", client_run_id),
+                            message: format!("Starting {}", spec.implementation_key),
+                            level: "info".to_string(),
+                            timestamp_ms: started_at_ms,
+                            sequence: tool_calls_used,
+                        }],
+                    });
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=tool_step_started step={} tool={} call_id={}\n",
+                            tool_calls_used, spec.tool_name, call.id
+                        ),
+                    });
+                    let output = self
+                        .execute_runtime_tool_call(
                         spec,
                         &call.id,
                         &call.function.arguments,
@@ -1738,8 +2373,57 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         agent_id,
                         &on_event,
                     )
-                    .await
+                    .await;
+                    if let Some(run_index) = run_index_by_call_id.get(&call.id).copied() {
+                        let finished_at_ms = Self::now_timestamp_ms();
+                        if let Ok(parsed_output) = serde_json::from_str::<serde_json::Value>(&output) {
+                            let status = parsed_output
+                                .get("status")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("failed")
+                                .to_string();
+                            let run_id = parsed_output
+                                .get("runId")
+                                .and_then(|value| value.as_str())
+                                .map(|value| value.to_string());
+                            if let Some(run) = persisted_tool_runs.get_mut(run_index) {
+                                run.status = status.clone();
+                                if run_id.is_some() {
+                                    run.run_id = run_id;
+                                }
+                                let timeline_message =
+                                    format!("Run completed with status {}.", status);
+                                run.timeline.push(PersistedToolTimelineEntry {
+                                    id: format!("{}-done", run.client_run_id),
+                                    message: timeline_message.clone(),
+                                    level: Self::tool_timeline_level(
+                                        &timeline_message,
+                                        Some(&status),
+                                    ),
+                                    timestamp_ms: finished_at_ms,
+                                    sequence: tool_calls_used + max_tool_calls,
+                                });
+                            }
+                        }
+                    }
+                    if output.contains("\"status\":\"succeeded\"") {
+                        task_satisfied = true;
+                    }
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-chain] phase=tool_step_done step={} budget_remaining={}\n",
+                            tool_calls_used,
+                            max_tool_calls.saturating_sub(tool_calls_used)
+                        ),
+                    });
+                    output
                 } else {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-selection] unregistered tool call requested by model: {}\n",
+                            call.function.name
+                        ),
+                    });
                     serde_json::json!({
                         "toolCallId": call.id,
                         "status": "failed",
@@ -1851,9 +2535,16 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         ));
 
         let runtime_tools = Self::extract_runtime_tool_specs(constraints);
+        let requires_tool_for_message = Self::should_require_runtime_tool(user_message);
         if !runtime_tools.is_empty() {
             if let Some(token) = access_token {
                 let mode = Self::runtime_execution_mode_from_profile(user_profile);
+                let _ = on_event.send(StreamEvent::Delta {
+                    content: format!(
+                        "[tool-selection] runtime tools available (count={}) and auth token present.\n",
+                        runtime_tools.len()
+                    ),
+                });
                 return self
                     .get_openai_completion_streaming_with_runtime_tools(
                         model_id,
@@ -1866,9 +2557,40 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     )
                     .await;
             }
+            if requires_tool_for_message {
+                let _ = on_event.send(StreamEvent::Error {
+                    message: "Runtime tools are available but authentication is missing. Please sign in again to execute tools.".to_string(),
+                });
+                return Err(
+                    "Runtime tools are available but authentication is missing. Please sign in again to execute tools.".to_string(),
+                );
+            }
+            let _ = on_event.send(StreamEvent::Delta {
+                content: format!(
+                    "[tool-selection] runtime tools available (count={}) but auth token missing; falling back to text-only response.\n",
+                    runtime_tools.len()
+                ),
+            });
             eprintln!(
                 "[AI_CLIENT] Runtime tools available but no auth token; skipping tool execution path."
             );
+        } else {
+            if requires_tool_for_message {
+                let _ = on_event.send(StreamEvent::Error {
+                    message:
+                        "No runnable runtime tools are available for this request. Enable or assign an appropriate tool."
+                            .to_string(),
+                });
+                return Err(
+                    "No runnable runtime tools are available for this request. Enable or assign an appropriate tool."
+                        .to_string(),
+                );
+            }
+            let _ = on_event.send(StreamEvent::Delta {
+                content:
+                    "[tool-selection] no runnable runtime tools available for this request.\n"
+                        .to_string(),
+            });
         }
 
         // Build the streaming request
@@ -2104,6 +2826,11 @@ mod tests {
         let constraints = json!({
             "runtime_tools": [
                 {
+                    "implementation_key": "vision_analysis",
+                    "enabled": true,
+                    "config": {}
+                },
+                {
                     "implementation_key": "coreagent.py.deep-analysis",
                     "enabled": true,
                     "config": {
@@ -2125,6 +2852,146 @@ mod tests {
         assert_eq!(tools[0].tool_name, "coreagent_py_deep-analysis");
         assert_eq!(tools[0].skill_id, "coreagent.py.deep_analysis");
         assert_eq!(tools[0].version, "1.2.3");
+        assert_eq!(
+            tools[0].parameters_schema,
+            json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true
+            })
+        );
+    }
+
+    #[test]
+    fn extract_runtime_tools_preserves_parameters_schema() {
+        let constraints = json!({
+            "runtime_tools": [
+                {
+                    "implementation_key": "coreagent.py.deep_analysis",
+                    "enabled": true,
+                    "parameters_schema": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" }
+                        },
+                        "required": ["text"],
+                        "additionalProperties": false
+                    },
+                    "config": {}
+                }
+            ]
+        });
+
+        let tools = AiClientManager::extract_runtime_tool_specs(Some(&constraints));
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].parameters_schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_tool_lookup_key_handles_runtime_alias_variants() {
+        let from_tool_name = AiClientManager::normalize_tool_lookup_key("coreagent_py_deep-analysis");
+        let from_implementation_key =
+            AiClientManager::normalize_tool_lookup_key("coreagent.py.deep_analysis");
+        assert_eq!(from_tool_name, from_implementation_key);
+    }
+
+    #[test]
+    fn coerce_runtime_tool_input_wraps_invalid_json_as_text_payload() {
+        let (payload, warning) = AiClientManager::coerce_runtime_tool_input("analyze this");
+        assert_eq!(
+            payload,
+            json!({
+                "text": "analyze this",
+                "query": "analyze this",
+                "input": "analyze this"
+            })
+        );
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn coerce_runtime_tool_input_accepts_json_object_without_warning() {
+        let (payload, warning) =
+            AiClientManager::coerce_runtime_tool_input(r#"{"text":"analyze this"}"#);
+        assert_eq!(payload, json!({ "text": "analyze this" }));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn requires_runtime_tool_for_regex_request() {
+        assert!(AiClientManager::should_require_runtime_tool(
+            "Generate a regex for invoice IDs like INV-2026-1234"
+        ));
+    }
+
+    #[test]
+    fn does_not_require_runtime_tool_for_plain_chitchat() {
+        assert!(!AiClientManager::should_require_runtime_tool(
+            "How has your day been?"
+        ));
+    }
+
+    #[test]
+    fn requires_runtime_tool_for_explicit_deep_analysis_request() {
+        assert!(AiClientManager::should_require_runtime_tool(
+            "sure, use the deep analysis tool on this text"
+        ));
+    }
+
+    #[test]
+    fn strip_internal_tool_context_removes_runtime_catalog_blocks() {
+        let input = "[RuntimeToolContext]\ncatalog\n[/RuntimeToolContext]\nGenerate regex";
+        assert_eq!(
+            AiClientManager::strip_internal_tool_context(input),
+            "Generate regex"
+        );
+    }
+
+    #[test]
+    fn build_runtime_tool_plan_prefers_regex_tool_for_regex_prompt() {
+        let tools = vec![
+            super::RuntimeToolSpec {
+                tool_name: "coreagent_py_deep_analysis".to_string(),
+                implementation_key: "coreagent.py.deep_analysis".to_string(),
+                skill_id: "coreagent.py.deep_analysis".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Run deep numeric analysis.".to_string(),
+                parameters_schema: json!({}),
+            },
+            super::RuntimeToolSpec {
+                tool_name: "coreagent_rs_regex_advisor".to_string(),
+                implementation_key: "coreagent.rs.regex_advisor".to_string(),
+                skill_id: "coreagent.rs.regex_advisor".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Generate and validate regex patterns.".to_string(),
+                parameters_schema: json!({}),
+            },
+        ];
+        let plan = AiClientManager::build_runtime_tool_plan(
+            "Generate a regex for invoice IDs",
+            &tools,
+            3,
+        );
+        assert_eq!(plan.first().cloned(), Some("coreagent_rs_regex_advisor".to_string()));
+    }
+
+    #[test]
+    fn extract_primary_user_request_removes_relevant_prior_context_section() {
+        let primary = AiClientManager::extract_primary_user_request(
+            "Generate a regex for invoice IDs\n\nRelevant prior context:\n[Memory 0.9] ...",
+        );
+        assert_eq!(primary, "Generate a regex for invoice IDs");
     }
 
     #[test]

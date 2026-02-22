@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { invoke } from '@tauri-apps/api/core';
 import { memoryKeys } from '@/lib/query-keys';
 import { getCachedData, getCachedDataUpdatedAt } from '@/lib/tauri-store';
 import { cacheFirstStaticQueryPolicy, shortSearchQueryPolicy } from '@/lib/query-policies';
+import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 export interface SimilarMemory {
   message_id: string;
@@ -85,11 +85,7 @@ export function useRelevantMemories(
   return useQuery({
     queryKey: memoryKeys.search(agentId, query, conversationId),
     queryFn: async (): Promise<SimilarMemory[]> => {
-      return invoke('get_relevant_memories', {
-        agentId,
-        query,
-        conversationId,
-      });
+      return tauriCommandClient.getRelevantMemories<SimilarMemory[]>(agentId, query, conversationId);
     },
     enabled: enabled && !!agentId && query.trim().length > 2,
     ...shortSearchQueryPolicy,
@@ -104,7 +100,10 @@ export function useMemoryQualitySummary(agentId: string, days = 14) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<MemoryRetrievalQualitySummary> => {
-      return invoke('get_agent_retrieval_quality_summary', { agentId, days });
+      return tauriCommandClient.getAgentRetrievalQualitySummary<MemoryRetrievalQualitySummary>(
+        agentId,
+        days
+      );
     },
     enabled: !!agentId,
     initialData,
@@ -121,7 +120,10 @@ export function useMemoryQualityTimeseries(agentId: string, days = 14) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<MemoryRetrievalTimeseriesPoint[]> => {
-      return invoke('get_agent_retrieval_quality_timeseries', { agentId, days });
+      return tauriCommandClient.getAgentRetrievalQualityTimeseries<MemoryRetrievalTimeseriesPoint[]>(
+        agentId,
+        days
+      );
     },
     enabled: !!agentId,
     initialData,
@@ -138,7 +140,7 @@ export function useRetrievalTuningStatus(agentId: string) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<RetrievalTuningStatus> => {
-      return invoke('get_agent_retrieval_tuning_status', { agentId });
+      return tauriCommandClient.getAgentRetrievalTuningStatus<RetrievalTuningStatus>(agentId);
     },
     enabled: !!agentId,
     initialData,
