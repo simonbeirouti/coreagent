@@ -54,17 +54,17 @@ import { MarkdownContent } from '@/components/ui/markdown-content';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { useConversationDimensionFeedback } from '@/hooks/useFeedback';
 import { useAgentRegistrySkills, useAgentToolSettings } from '@/hooks/useAbilities';
-import { useVision } from '@/hooks/usePerception';
 import { useInstalledSkills } from '@/hooks/useRegistrySkills';
 import { getScreenshotSignedUrl, getUserFileSignedUrl } from '@/lib/storage';
 import type { UserFileRecord } from '@/lib/storage';
 import { Message } from '@/types';
 import { resolveVisibleThread, getBranchInfo, selectBranch, BranchSelections, BranchInfo } from '@/lib/message-tree';
-import { invoke } from '@tauri-apps/api/core';
 
 // Maximum message length (matches backend validation)
 const MAX_MESSAGE_LENGTH = 32000;
 const MAX_PENDING_USER_FILES = 10;
+const CHAT_BUBBLE_MIN_WIDTH_CLASS = 'min-w-[16rem]';
+const CHAT_BUBBLE_MAX_WIDTH_CLASS = 'max-w-[80%]';
 const CORE_RUNTIME_TOOLS = new Set([
   'conversation',
   'memory_retrieval',
@@ -96,82 +96,6 @@ function slugifySlashToken(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-function asObjectRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function choosePreferredTextField(
-  parametersSchema?: Record<string, unknown>
-): string | null {
-  const schema = asObjectRecord(parametersSchema);
-  const properties = asObjectRecord(schema?.properties);
-  if (!properties) {
-    return null;
-  }
-
-  const preferredKeys = ['text', 'query', 'prompt', 'input', 'message', 'content', 'instructions'];
-  for (const key of preferredKeys) {
-    const property = asObjectRecord(properties[key]);
-    if (property?.type === 'string') {
-      return key;
-    }
-  }
-
-  const required = Array.isArray(schema?.required) ? schema.required : [];
-  for (const requiredKey of required) {
-    if (typeof requiredKey !== 'string') continue;
-    const property = asObjectRecord(properties[requiredKey]);
-    if (property?.type === 'string') {
-      return requiredKey;
-    }
-  }
-
-  return null;
-}
-
-function toTextEnvelope(rawText: string, parametersSchema?: Record<string, unknown>): Record<string, unknown> {
-  const text = rawText.trim();
-  if (!text) {
-    return {};
-  }
-
-  const envelope: Record<string, unknown> = {
-    text,
-    query: text,
-    input: text,
-  };
-  const preferredField = choosePreferredTextField(parametersSchema);
-  if (preferredField) {
-    envelope[preferredField] = text;
-  }
-  return envelope;
-}
-
-function parseDirectToolInput(
-  argsText: string,
-  options?: { parametersSchema?: Record<string, unknown> }
-): Record<string, unknown> {
-  if (!argsText) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(argsText) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    if (typeof parsed === 'string') {
-      return toTextEnvelope(parsed, options?.parametersSchema);
-    }
-    return { input: parsed };
-  } catch {
-    return toTextEnvelope(argsText, options?.parametersSchema);
-  }
-}
-
 type SlashCommand = {
   id: string;
   commandToken: string;
@@ -183,18 +107,6 @@ type SlashCommand = {
   parametersSchema?: Record<string, unknown>;
   executionMode: 'agent_runtime' | 'registry_direct';
   kind: 'runtime' | 'screenshot';
-};
-
-type DirectRuntimeToolRunResult = {
-  implementationKey: string;
-  skillId: string;
-  version: string;
-  executionMode: 'remote' | 'local_docker';
-  runId: string;
-  status: string;
-  output?: Record<string, unknown> | null;
-  error?: Record<string, unknown> | null;
-  logMessages: string[];
 };
 
 type DirectRuntimeToolProgressEvent = {
@@ -439,6 +351,10 @@ function parseDirectToolRunStatus(value: string | null | undefined): DirectToolR
     return normalized;
   }
   return 'running';
+}
+
+function isTerminalDirectToolRunStatus(status: DirectToolRunStatus): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'timed_out' || status === 'cancelled';
 }
 
 function safeParseObjectJson(value: string | null): Record<string, unknown> | null {
@@ -695,83 +611,86 @@ function DirectToolRunCard({ run }: { run: DirectToolRunViewModel }) {
     run.status === 'running' ? 'Running' : run.status.replace(/_/g, ' ');
 
   return (
-    <Card className="w-full min-w-0 max-w-[80%] overflow-hidden border-border/80 bg-muted p-0">
-      <CardContent className="min-w-0 p-3">
-        <Accordion type="single" collapsible>
-          <AccordionItem value={`run-${run.clientRunId}`} className="border-b-0">
-            <AccordionTrigger className="min-w-0 py-1 hover:no-underline">
-              <div className="flex min-w-0 w-full flex-1 flex-col items-start gap-1 overflow-hidden">
-                <div className="flex min-w-0 w-full items-center gap-2 overflow-hidden">
-                  {run.status === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                  <span className="truncate text-sm font-medium min-w-0">
-                    {formatToolRunLabel(run.implementationKey)}
-                  </span>
-                  <span className={cn('text-xs capitalize', statusToneClass)}>{statusLabel}</span>
-                </div>
-                {latestEntry ? (
-                  <div className="line-clamp-1 w-full max-w-full overflow-hidden break-all text-xs text-muted-foreground">
-                    {latestEntry.message}
-                  </div>
-                ) : null}
+    <Accordion
+      type="single"
+      collapsible
+      className={cn(
+        "w-full rounded-md border border-border/80 bg-muted px-3",
+        CHAT_BUBBLE_MIN_WIDTH_CLASS
+      )}
+    >
+      <AccordionItem value={`run-${run.clientRunId}`} className="border-b-0">
+        <AccordionTrigger className="min-w-0 py-2 hover:no-underline">
+          <div className="flex min-w-0 w-full flex-1 flex-col items-start gap-1 overflow-hidden">
+            <div className="flex min-w-0 w-full items-center gap-2 overflow-hidden">
+              {run.status === 'running' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              <span className="truncate text-sm font-medium min-w-0">
+                {formatToolRunLabel(run.implementationKey)}
+              </span>
+              <span className={cn('text-xs capitalize', statusToneClass)}>{statusLabel}</span>
+            </div>
+            {latestEntry ? (
+              <div className="line-clamp-1 w-full max-w-full overflow-hidden break-all text-xs text-muted-foreground">
+                {latestEntry.message}
               </div>
-            </AccordionTrigger>
-            <AccordionContent className="min-w-0 pt-1">
-              <div className="space-y-2">
-                {run.executionMode ? (
-                  <div className="text-xs text-muted-foreground">
-                    execution mode: <span className="font-medium">{run.executionMode}</span>
-                  </div>
-                ) : null}
-                {run.runId ? (
-                  <div className="text-xs text-muted-foreground">
-                    run id: <span className="font-medium">{run.runId}</span>
-                  </div>
-                ) : null}
-                <div className="min-w-0 space-y-1.5 rounded-md border bg-background p-2">
-                  {run.timeline.length > 0 ? (
-                    run.timeline.map((entry) => (
-                      <div key={entry.id} className="min-w-0 max-w-full text-xs break-all">
-                        <span
-                          className={cn(
-                            'mr-2 font-medium',
-                            entry.level === 'error'
-                              ? 'text-destructive'
-                              : entry.level === 'success'
-                              ? 'text-green-700 dark:text-green-400'
-                              : 'text-muted-foreground'
-                          )}
-                        >
-                          {new Date(entry.timestampMs).toLocaleTimeString()}
-                        </span>
-                        <span className="break-all">{entry.message}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-xs text-muted-foreground">Waiting for runner updates...</div>
-                  )}
-                </div>
-                {run.output ? (
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium">Output</div>
-                    <pre className="max-h-48 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 text-[11px]">
-                      {JSON.stringify(run.output, null, 2)}
-                    </pre>
-                  </div>
-                ) : null}
-                {run.error ? (
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium text-destructive">Error</div>
-                    <pre className="max-h-56 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/40 bg-background p-2 text-[11px]">
-                      {JSON.stringify(run.error, null, 2)}
-                    </pre>
-                  </div>
-                ) : null}
+            ) : null}
+          </div>
+        </AccordionTrigger>
+        <AccordionContent className="min-w-0 pb-2 pt-1">
+          <div className="space-y-2">
+            {run.executionMode ? (
+              <div className="text-xs text-muted-foreground">
+                execution mode: <span className="font-medium">{run.executionMode}</span>
               </div>
-            </AccordionContent>
-          </AccordionItem>
-        </Accordion>
-      </CardContent>
-    </Card>
+            ) : null}
+            {run.runId ? (
+              <div className="text-xs text-muted-foreground">
+                run id: <span className="font-medium">{run.runId}</span>
+              </div>
+            ) : null}
+            <div className="min-w-0 space-y-1.5 rounded-md border bg-background p-2">
+              {run.timeline.length > 0 ? (
+                run.timeline.map((entry) => (
+                  <div key={entry.id} className="min-w-0 max-w-full text-xs break-all">
+                    <span
+                      className={cn(
+                        'mr-2 font-medium',
+                        entry.level === 'error'
+                          ? 'text-destructive'
+                          : entry.level === 'success'
+                          ? 'text-green-700 dark:text-green-400'
+                          : 'text-muted-foreground'
+                      )}
+                    >
+                      {new Date(entry.timestampMs).toLocaleTimeString()}
+                    </span>
+                    <span className="break-all">{entry.message}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-xs text-muted-foreground">Waiting for runner updates...</div>
+              )}
+            </div>
+            {run.output ? (
+              <div className="space-y-1">
+                <div className="text-xs font-medium">Output</div>
+                <pre className="max-h-48 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background p-2 text-[11px]">
+                  {JSON.stringify(run.output, null, 2)}
+                </pre>
+              </div>
+            ) : null}
+            {run.error ? (
+              <div className="space-y-1">
+                <div className="text-xs font-medium text-destructive">Error</div>
+                <pre className="max-h-56 w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/40 bg-background p-2 text-[11px]">
+                  {JSON.stringify(run.error, null, 2)}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
   );
 }
 
@@ -794,7 +713,6 @@ function AgentChatPage() {
   const { data: toolSettings = [] } = useAgentToolSettings(agentId);
   const { data: agentRegistrySkills = [] } = useAgentRegistrySkills(agentId);
   const { data: installedSkills = [] } = useInstalledSkills();
-  const { captureScreen } = useVision(agentId);
   const { data: conversations, isLoading: conversationsLoading } = useConversations(agentId);
   const createConversation = useCreateConversation();
   const sendMessage = useSendMessage();
@@ -829,9 +747,7 @@ function AgentChatPage() {
   } | null>(null);
   const [pendingUserFiles, setPendingUserFiles] = useState<UserFileRecord[]>([]);
   const [isTranscribing, setIsTranscribing] = useState(false);
-  const [isDirectToolRunning, setIsDirectToolRunning] = useState(false);
   const [directToolRuns, setDirectToolRuns] = useState<DirectToolRunViewModel[]>([]);
-  const [showSlashCommands, setShowSlashCommands] = useState(false);
   const isActiveConversationStreaming =
     sendMessageStreaming.isStreaming &&
     Boolean(activeConversationId) &&
@@ -877,6 +793,8 @@ function AgentChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesCountRef = useRef<number>(0);
   const prevToolRunsSignalRef = useRef<string>('');
+  const fallbackRunCandidatesRef = useRef<Set<string>>(new Set());
+  const fallbackReminderShownRef = useRef<Set<string>>(new Set());
 
   // Compute visible thread based on branch selections
   const visibleMessages = useMemo(
@@ -896,36 +814,6 @@ function AgentChatPage() {
       visibleMessages
         .flatMap((message) => parsePersistedDirectToolRuns(message))
         .filter((run): run is DirectToolRunViewModel => run !== null),
-    [visibleMessages]
-  );
-  const persistedAcceptanceItems = useMemo(
-    () =>
-      visibleMessages
-        .map((message) => {
-          if (message.role !== 'assistant') return null;
-          const contextPayload = parseToolExecutionContext(message.content);
-          const content =
-            typeof message.metadata?.tool_acceptance_message === 'string'
-              ? message.metadata.tool_acceptance_message
-              : typeof contextPayload?.acceptanceMessage === 'string'
-              ? contextPayload.acceptanceMessage
-              : null;
-          if (!content) return null;
-          const metadataTimestamp =
-            typeof message.metadata?.tool_acceptance_timestamp_ms === 'number'
-              ? message.metadata.tool_acceptance_timestamp_ms
-              : typeof contextPayload?.acceptanceTimestampMs === 'number'
-              ? contextPayload.acceptanceTimestampMs
-              : null;
-          return {
-            kind: 'acceptance' as const,
-            id: `acceptance-${message.id}`,
-            timestampMs: metadataTimestamp ?? Math.max(0, (Date.parse(message.created_at) || 0) - 1),
-            index: 0,
-            content,
-          };
-        })
-        .filter((item): item is { kind: 'acceptance'; id: string; timestampMs: number; index: number; content: string } => item !== null),
     [visibleMessages]
   );
   const allToolRuns = useMemo(() => {
@@ -960,41 +848,13 @@ function AgentChatPage() {
       index,
       run,
     }));
-    const firstRunTimestampMs =
-      runItems.length > 0 ? Math.min(...runItems.map((item) => item.timestampMs)) : null;
-    const acceptanceTimestampMs =
-      firstRunTimestampMs !== null
-        ? Math.max(
-            0,
-            Math.min(
-              sendMessageStreaming.toolAcceptanceTimestampMs ?? firstRunTimestampMs,
-              firstRunTimestampMs - 1
-            )
-          )
-        : sendMessageStreaming.toolAcceptanceTimestampMs;
-    const acceptanceItems =
-      isActiveConversationStreaming &&
-      sendMessageStreaming.toolAcceptanceMessage &&
-      acceptanceTimestampMs
-        ? [
-            {
-              kind: 'acceptance' as const,
-              id: 'streaming-tool-acceptance',
-              timestampMs: acceptanceTimestampMs,
-              index: Number.MAX_SAFE_INTEGER - 1,
-              content: sendMessageStreaming.toolAcceptanceMessage,
-            },
-          ]
-        : [];
-    return [...messageItems, ...persistedAcceptanceItems, ...acceptanceItems, ...runItems].sort((a, b) => {
+    return [...messageItems, ...runItems].sort((a, b) => {
       if (a.timestampMs !== b.timestampMs) {
         return a.timestampMs - b.timestampMs;
       }
       if (a.kind !== b.kind) {
         if (a.kind === 'message') return -1;
         if (b.kind === 'message') return 1;
-        if (a.kind === 'acceptance') return -1;
-        if (b.kind === 'acceptance') return 1;
         return 0;
       }
       return a.index - b.index;
@@ -1002,11 +862,6 @@ function AgentChatPage() {
   }, [
     displayMessages,
     allToolRuns,
-    sendMessageStreaming.isStreaming,
-    isActiveConversationStreaming,
-    sendMessageStreaming.toolAcceptanceMessage,
-    sendMessageStreaming.toolAcceptanceTimestampMs,
-    persistedAcceptanceItems,
   ]);
   const runtimeSlashCommands = useMemo<SlashCommand[]>(() => {
     return toolSettings
@@ -1108,19 +963,6 @@ function AgentChatPage() {
       ...uniqueRuntimeCommands,
     ];
   }, [runtimeSlashCommands, registrySlashCommands, installedSlashCommands]);
-  const slashQuery = messageInput.startsWith('/') ? messageInput.slice(1).toLowerCase() : '';
-  const filteredSlashCommands = useMemo(() => {
-    if (!slashQuery) return slashCommands;
-    return slashCommands.filter((cmd) =>
-      cmd.label.slice(1).toLowerCase().includes(slashQuery) ||
-      cmd.description.toLowerCase().includes(slashQuery)
-    );
-  }, [slashCommands, slashQuery]);
-
-  useEffect(() => {
-    setShowSlashCommands(messageInput.startsWith('/') && !messageInput.slice(1).includes(' '));
-  }, [messageInput]);
-
   useEffect(() => {
     let dispose: UnlistenFn | null = null;
     let cancelled = false;
@@ -1150,6 +992,25 @@ function AgentChatPage() {
       if (!activeConversationId || event.conversationId !== activeConversationId) {
         continue;
       }
+      const eventStatus = parseDirectToolRunStatus(event.status);
+      const normalizedMessage = event.message.toLowerCase();
+      const fallbackCandidate =
+        normalizedMessage.includes('local_docker unavailable') ||
+        normalizedMessage.includes('retrying create run with remote mode') ||
+        normalizedMessage.includes('remote fallback create run succeeded');
+      if (fallbackCandidate) {
+        fallbackRunCandidatesRef.current.add(event.clientRunId);
+      }
+      if (
+        fallbackRunCandidatesRef.current.has(event.clientRunId) &&
+        isTerminalDirectToolRunStatus(eventStatus) &&
+        !fallbackReminderShownRef.current.has(event.clientRunId)
+      ) {
+        fallbackReminderShownRef.current.add(event.clientRunId);
+        toast.warning(
+          'A runtime tool run fell back to remote because local Docker was unavailable. Re-check Docker before the next local run.'
+        );
+      }
       setDirectToolRuns((prev) => {
         if (findRunIndexByCorrelation(prev, event as DirectRuntimeToolProgressEvent) !== -1) {
           return prev;
@@ -1161,7 +1022,7 @@ function AgentChatPage() {
             startedAtMs: event.timestampMs || Date.now(),
             implementationKey: event.implementationKey,
             runId: event.runId ?? undefined,
-            status: (event.status as DirectToolRunStatus) || 'running',
+            status: eventStatus,
             timeline: [],
           },
         ];
@@ -1176,6 +1037,8 @@ function AgentChatPage() {
     setEditingMessageId(null);
     setEditContent('');
     setDirectToolRuns([]);
+    fallbackRunCandidatesRef.current.clear();
+    fallbackReminderShownRef.current.clear();
   }, [activeConversationId]);
 
   // Reset local state when switching agents
@@ -1248,9 +1111,14 @@ function AgentChatPage() {
     setPendingScreenshot(null);
   };
 
-  const sendPreparedMessage = async (content: string, imageBase64?: string) => {
+  const sendPreparedMessage = async (
+    content: string,
+    imageBase64?: string,
+    conversationIdOverride?: string | null
+  ) => {
     if (!content.trim()) return;
-    if (!activeConversationId) {
+    const targetConversationId = conversationIdOverride ?? activeConversationId;
+    if (!targetConversationId) {
       const newConversation = await createConversation.mutateAsync({
         agent_id: agentId,
         user_id: userId,
@@ -1271,7 +1139,7 @@ function AgentChatPage() {
     }
 
     await sendMessageStreaming.sendMessage({
-      conversation_id: activeConversationId,
+      conversation_id: targetConversationId,
       content,
       image_base64: imageBase64,
     });
@@ -1286,184 +1154,6 @@ function AgentChatPage() {
     [runtimeDirectCommands]
   );
 
-  const executeDirectRuntimeTool = useCallback(
-    async (
-      tool: SlashCommand,
-      parsedInput: Record<string, unknown>,
-      rawInputText: string
-    ): Promise<boolean> => {
-      const clientRunId =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `tool-run-${Date.now()}`;
-      const startedAt = Date.now();
-
-      setDirectToolRuns((prev) => [
-        ...prev,
-        {
-          clientRunId,
-          startedAtMs: startedAt,
-          implementationKey: tool.implementationKey,
-          status: 'running',
-          timeline: [
-            {
-              id: `${clientRunId}-queued`,
-              message: `Queued ${tool.label} with input ${JSON.stringify(parsedInput)}`,
-              level: 'info',
-              timestampMs: startedAt,
-              sequence: -1,
-            },
-          ],
-        },
-      ]);
-      setIsDirectToolRunning(true);
-      try {
-        if (tool.executionMode === 'registry_direct' && !tool.skillId) {
-          throw new Error(`Missing skillId for ${tool.implementationKey}`);
-        }
-        const result =
-          tool.executionMode === 'registry_direct'
-            ? await invoke<DirectRuntimeToolRunResult>('run_registry_skill_direct', {
-                agentId,
-                skillId: tool.skillId!,
-                input: parsedInput,
-                clientRunId,
-              })
-            : await invoke<DirectRuntimeToolRunResult>('run_agent_runtime_tool', {
-                agentId,
-                implementationKey: tool.implementationKey,
-                input: parsedInput,
-                clientRunId,
-              });
-
-        setDirectToolRuns((prev) =>
-          prev.map((run) => {
-            if (run.clientRunId !== clientRunId) return run;
-
-            const appendedTimeline: DirectToolTimelineEntry[] = [];
-            const hasProgressLogs = run.timeline.some(
-              (entry) => entry.id.startsWith(`${clientRunId}-progress-`) && (entry.sequence ?? -1) > 0
-            );
-            if (!hasProgressLogs) {
-              for (const message of result.logMessages) {
-                appendedTimeline.push({
-                  id: `${clientRunId}-log-fallback-${startedAt}-${appendedTimeline.length}`,
-                  message,
-                  level: inferTimelineLevel(message, result.status),
-                  timestampMs: Date.now(),
-                  sequence: appendedTimeline.length + 1,
-                });
-              }
-            }
-
-            return {
-              ...run,
-              implementationKey: result.implementationKey,
-              skillId: result.skillId,
-              version: result.version,
-              executionMode: result.executionMode,
-              runId: result.runId,
-              status: (result.status as DirectToolRunStatus) || 'running',
-              output: result.output ?? null,
-              error: result.error ?? null,
-              timeline: appendUniqueTimelineEntries(run.timeline, [
-                ...appendedTimeline,
-                {
-                  id: `${clientRunId}-completed`,
-                  message: `Run completed with status ${result.status}.`,
-                  level: inferTimelineLevel(`Run completed with status ${result.status}.`, result.status),
-                  timestampMs: Date.now(),
-                  sequence: Number.MAX_SAFE_INTEGER,
-                },
-              ]),
-            };
-          })
-        );
-
-        const followupPrompt = [
-          DIRECT_TOOL_RESULT_CONTEXT_START,
-          `A direct runtime tool run has completed.`,
-          `Tool: ${result.implementationKey}`,
-          `Run ID: ${result.runId}`,
-          `Status: ${result.status}`,
-          `Execution mode: ${result.executionMode}`,
-          `User-provided tool text: ${rawInputText || '(none)'}`,
-          `Tool input: ${JSON.stringify(parsedInput)}`,
-          `Tool output JSON: ${JSON.stringify(result.output ?? {}, null, 2)}`,
-          `Tool error JSON: ${JSON.stringify(result.error ?? null, null, 2)}`,
-          `Please provide a concise user-facing response based on this tool result.`,
-          DIRECT_TOOL_RESULT_CONTEXT_END,
-        ].join('\n');
-
-        await sendPreparedMessage(followupPrompt);
-        setMessageInput('');
-        toast.success(`Executed ${tool.label}`);
-        return true;
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        setDirectToolRuns((prev) =>
-          prev.map((run) =>
-            run.clientRunId === clientRunId
-              ? {
-                  ...run,
-                  status: 'failed',
-                  timeline: appendUniqueTimelineEntries(run.timeline, [
-                    {
-                      id: `${clientRunId}-failed`,
-                      message: errorMessage,
-                      level: 'error',
-                      timestampMs: Date.now(),
-                      sequence: Number.MAX_SAFE_INTEGER,
-                    },
-                  ]),
-                  error: { message: errorMessage },
-                }
-              : run
-          )
-        );
-        toast.error(errorMessage || `Failed to execute ${tool.label}`);
-        return false;
-      } finally {
-        setIsDirectToolRunning(false);
-      }
-    },
-    [agentId, sendPreparedMessage]
-  );
-
-  const executeSlashCommand = async (rawInput: string): Promise<boolean> => {
-    if (!rawInput.startsWith('/')) return false;
-    const [rawCommand, ...rest] = rawInput.trim().split(/\s+/);
-    const command = rawCommand.slice(1).trim().toLowerCase();
-    if (!command) return false;
-
-    if (command === 'screenshot') {
-      const result = await captureScreen.mutateAsync({
-        autoUpload: true,
-        conversationId: activeConversationId || undefined,
-      });
-      handleScreenshot(result.image_base64, result.storage_path, result.signed_url);
-      if (rest.length > 0) {
-        setMessageInput(rest.join(' '));
-      } else {
-        setMessageInput('');
-      }
-      return true;
-    }
-
-    const tool = slashCommands.find(
-      (entry) => entry.kind === 'runtime' && entry.commandToken === command
-    );
-    if (!tool) {
-      return false;
-    }
-
-    const rawArgsText = rest.join(' ').trim();
-    const parsedInput = parseDirectToolInput(rawArgsText, {
-      parametersSchema: tool.parametersSchema,
-    });
-    return executeDirectRuntimeTool(tool, parsedInput, rawArgsText);
-  };
-
   const handleSendMessage = async () => {
     if (!messageInput.trim() && !pendingScreenshot && pendingUserFiles.length === 0) return;
     const trimmedMessageInput = messageInput.trim();
@@ -1474,11 +1164,6 @@ function AgentChatPage() {
     let finalContent = trimmedMessageInput;
 
     try {
-      if (trimmedMessageInput.startsWith('/')) {
-        const executed = await executeSlashCommand(trimmedMessageInput);
-        if (executed) return;
-      }
-
       if (includeRuntimeToolContext && runtimeToolContext) {
         finalContent = `${runtimeToolContext}\n${finalContent}`;
       }
@@ -1554,11 +1239,6 @@ function AgentChatPage() {
       setIsComposingNewConversation(false);
       sendMessageStreaming.clearError();
     }
-  };
-
-  const handleSelectSlashCommand = (command: SlashCommand) => {
-    setMessageInput(command.insertText);
-    setShowSlashCommands(false);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1728,22 +1408,8 @@ function AgentChatPage() {
       chatTimelineItems.map((item) => {
         if (item.kind === 'run') {
           return (
-            <div key={item.id} className="flex min-w-0 max-w-full justify-start overflow-hidden">
+            <div key={item.id} className={cn("flex min-w-0 justify-start overflow-hidden", CHAT_BUBBLE_MAX_WIDTH_CLASS)}>
               <DirectToolRunCard run={item.run} />
-            </div>
-          );
-        }
-        if (item.kind === 'acceptance') {
-          return (
-            <div key={item.id} className="flex justify-start">
-              <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
-                <CardContent className="min-w-0 p-3">
-                  <MarkdownContent
-                    content={item.content}
-                    className="min-w-0 max-w-full overflow-x-auto"
-                  />
-                </CardContent>
-              </Card>
             </div>
           );
         }
@@ -1762,7 +1428,13 @@ function AgentChatPage() {
                 isUserMessage ? 'justify-end' : 'justify-start'
               )}
             >
-              <div className="relative min-w-0 max-w-[80%]">
+              <div
+                className={cn(
+                  "relative min-w-0 w-fit",
+                  CHAT_BUBBLE_MIN_WIDTH_CLASS,
+                  CHAT_BUBBLE_MAX_WIDTH_CLASS
+                )}
+              >
                 {/* Hover dropdown menu */}
                 <div className={cn(
                   "absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100"
@@ -1810,7 +1482,7 @@ function AgentChatPage() {
 
                 <Card
                   className={cn(
-                    "min-w-0 overflow-hidden p-0",
+                    "min-w-0 w-full overflow-hidden p-0",
                     isUserMessage
                       ? 'bg-primary text-primary-foreground'
                       : 'bg-muted'
@@ -2089,7 +1761,13 @@ function AgentChatPage() {
                 {/* Streaming message display for edit */}
                 {editMessageStreaming.isStreaming && editMessageStreaming.streamingContent && (
                   <div className="flex justify-start">
-                    <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                    <Card
+                      className={cn(
+                        "min-w-0 overflow-hidden p-0 bg-muted",
+                        CHAT_BUBBLE_MIN_WIDTH_CLASS,
+                        CHAT_BUBBLE_MAX_WIDTH_CLASS
+                      )}
+                    >
                       <CardContent className="min-w-0 p-3">
                         <MarkdownContent
                           content={editMessageStreaming.streamingContent}
@@ -2108,7 +1786,13 @@ function AgentChatPage() {
                   <>
                     {sendMessageStreaming.streamingContent ? (
                       <div className="flex justify-start">
-                        <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                        <Card
+                          className={cn(
+                            "min-w-0 overflow-hidden p-0 bg-muted",
+                            CHAT_BUBBLE_MIN_WIDTH_CLASS,
+                            CHAT_BUBBLE_MAX_WIDTH_CLASS
+                          )}
+                        >
                           <CardContent className="min-w-0 p-3">
                             <MarkdownContent
                               content={sendMessageStreaming.streamingContent}
@@ -2123,7 +1807,13 @@ function AgentChatPage() {
                       </div>
                     ) : (
                       <div className="flex justify-start">
-                        <Card className="max-w-[80%] min-w-0 overflow-hidden p-0 bg-muted">
+                        <Card
+                          className={cn(
+                            "min-w-0 overflow-hidden p-0 bg-muted",
+                            CHAT_BUBBLE_MIN_WIDTH_CLASS,
+                            CHAT_BUBBLE_MAX_WIDTH_CLASS
+                          )}
+                        >
                           <CardContent className="min-w-0 p-3">
                             <div className="flex items-center gap-2">
                               <Loader2 className="h-3 w-3 animate-spin" />
@@ -2150,21 +1840,6 @@ function AgentChatPage() {
         {/* Message Input - Show when we have an active conversation or are composing a new one */}
         {(activeConversationId || isComposingNewConversation) && (
           <div className="shrink-0 border-t bg-background p-4">
-            {showSlashCommands && filteredSlashCommands.length > 0 && (
-              <div className="mb-3 max-h-40 w-full overflow-auto">
-                {filteredSlashCommands.map((command) => (
-                  <button
-                    key={command.id}
-                    type="button"
-                    className="mb-1 w-full rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent/60"
-                    onClick={() => handleSelectSlashCommand(command)}
-                  >
-                    <div className="text-sm font-medium">{command.label}</div>
-                    <div className="text-xs text-muted-foreground">{command.description}</div>
-                  </button>
-                ))}
-              </div>
-            )}
             {/* Pending Screenshot Preview */}
             {pendingScreenshot && (
               <div className="mb-3 flex w-full items-center gap-2 rounded-md bg-muted p-2">
@@ -2217,18 +1892,18 @@ function AgentChatPage() {
                 agentId={agentId}
                 userId={userId}
                 onTranscription={handleTranscription}
-                disabled={sendMessage.isPending || isDirectToolRunning}
+                disabled={sendMessage.isPending}
                 conversationId={activeConversationId || undefined}
               />
               <ScreenshotButton
                 agentId={agentId}
                 conversationId={activeConversationId || undefined}
                 onScreenshot={handleScreenshot}
-                disabled={sendMessage.isPending || isDirectToolRunning}
+                disabled={sendMessage.isPending}
               />
               <AttachButton
                 onAttach={handleAttachUserFile}
-                disabled={sendMessage.isPending || isDirectToolRunning}
+                disabled={sendMessage.isPending}
               />
               <div className="relative flex-1">
                 {isTranscribing && (
@@ -2247,7 +1922,7 @@ function AgentChatPage() {
                     }}
                     onKeyPress={handleKeyPress}
                     placeholder={isTranscribing ? 'Transcribing...' : `Message ${agent.name}...`}
-                    disabled={sendMessage.isPending || isDirectToolRunning}
+                    disabled={sendMessage.isPending}
                     className={cn("w-full pr-16", isTranscribing && "pl-9")}
                     maxLength={MAX_MESSAGE_LENGTH}
                   />
@@ -2262,10 +1937,10 @@ function AgentChatPage() {
               </div>
               <Button
                 onClick={handleSendMessage}
-                disabled={(!messageInput.trim() && !pendingScreenshot && pendingUserFiles.length === 0) || sendMessage.isPending || sendMessageStreaming.isStreaming || isDirectToolRunning}
+                disabled={(!messageInput.trim() && !pendingScreenshot && pendingUserFiles.length === 0) || sendMessage.isPending || sendMessageStreaming.isStreaming}
                 size="icon"
               >
-                {isDirectToolRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                {sendMessageStreaming.isStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
             </div>
           </div>

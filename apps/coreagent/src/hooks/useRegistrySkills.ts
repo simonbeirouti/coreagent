@@ -108,6 +108,20 @@ export interface AdvisoryFeedResponse {
   };
 }
 
+export interface RuntimeSyncDiagnostics {
+  freshness: 'fresh' | 'soft_stale' | 'hard_stale' | string;
+  appIsForeground: boolean;
+  cursor?: string | null;
+  lastSuccessAtMs?: number | null;
+  lastAttemptAtMs?: number | null;
+  lastControlSyncAtMs?: number | null;
+  lastAppSyncAtMs?: number | null;
+  nextRetryAtMs?: number | null;
+  consecutiveFailures: number;
+  nextBackoffSeconds: number;
+  lastError?: string | null;
+}
+
 export function useRegistrySkills(query?: string) {
   return useQuery({
     queryKey: registryKeys.skills(query ?? ''),
@@ -150,7 +164,14 @@ export function useInstallRegistrySkill() {
         installConfig: params.installConfig ?? {},
       }),
     onSuccess: () => {
+      invoke('trigger_runtime_sync_command', { reason: 'install_registry_skill_ui' }).catch((error) => {
+        console.error('Failed triggering runtime sync after install:', error);
+      });
       queryClient.invalidateQueries({ queryKey: registryKeys.installed(), refetchType: 'all' });
+      queryClient.invalidateQueries({
+        queryKey: registryKeys.runtimeSyncDiagnostics(),
+        refetchType: 'all',
+      });
     },
   });
 }
@@ -170,6 +191,9 @@ export function useAssignRegistrySkill(agentId: string) {
         config: params.config ?? {},
       }),
     onSuccess: () => {
+      invoke('trigger_runtime_sync_command', { reason: 'assign_registry_skill_ui' }).catch((error) => {
+        console.error('Failed triggering runtime sync after assign:', error);
+      });
       queryClient.invalidateQueries({
         queryKey: abilityKeys.agentRegistrySkills(agentId),
         refetchType: 'all',
@@ -177,6 +201,10 @@ export function useAssignRegistrySkill(agentId: string) {
       queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });
       queryClient.invalidateQueries({ queryKey: abilityKeys.agent(agentId), refetchType: 'all' });
       queryClient.invalidateQueries({ queryKey: registryKeys.installed(), refetchType: 'all' });
+      queryClient.invalidateQueries({
+        queryKey: registryKeys.runtimeSyncDiagnostics(),
+        refetchType: 'all',
+      });
     },
   });
 }
@@ -197,5 +225,28 @@ export function useSkillAdvisoryFeed(cursor?: string, limit = 50) {
         limit,
       }),
     ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useRuntimeSyncDiagnostics() {
+  return useQuery({
+    queryKey: registryKeys.runtimeSyncDiagnostics(),
+    queryFn: async (): Promise<RuntimeSyncDiagnostics> => invoke('get_runtime_sync_diagnostics_command'),
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useTriggerRuntimeSync() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (reason?: string): Promise<RuntimeSyncDiagnostics> =>
+      invoke('trigger_runtime_sync_command', { reason: reason ?? null }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: registryKeys.runtimeSyncDiagnostics(),
+        refetchType: 'all',
+      });
+      queryClient.invalidateQueries({ queryKey: registryKeys.advisories('', 50), refetchType: 'all' });
+    },
   });
 }

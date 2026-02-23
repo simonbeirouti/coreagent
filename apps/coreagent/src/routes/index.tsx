@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useQueryClient } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
@@ -24,7 +24,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { toast } from 'sonner';
-import { PlayCircle } from 'lucide-react';
+import { ChevronDown, ChevronUp, PauseCircle, PlayCircle, TerminalSquare, Trash2 } from 'lucide-react';
 import { Header } from '@/components/header';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -49,7 +49,14 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,6 +78,8 @@ import {
   useCreateAgentDelegation,
   useCreateOrchestrationRun,
 } from '@/hooks/useOrchestration';
+import { type RuntimeRunConsoleEvent, useRuntimeRunConsole } from '@/hooks/useRuntimeRunConsole';
+import { useRuntimeSyncDiagnostics } from '@/hooks/useRegistrySkills';
 import { orchestrationKeys } from '@/lib/query-keys';
 
 export const Route = createFileRoute('/')({
@@ -193,6 +202,40 @@ function inferLaneFromAgent(_agent: Agent): BoardLaneId {
 
 function isBoardLaneId(value: unknown): value is BoardLaneId {
   return value === 'idle' || value === 'working' || value === 'review';
+}
+
+function toRuntimeRunStatus(value?: string | null): 'running' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled' {
+  if (!value) return 'running';
+  if (value === 'succeeded') return 'succeeded';
+  if (value === 'failed') return 'failed';
+  if (value === 'timed_out') return 'timed_out';
+  if (value === 'cancelled') return 'cancelled';
+  return 'running';
+}
+
+function toRuntimeRunLabel(raw: string): string {
+  const value = raw.trim();
+  if (!value) return 'runtime-tool';
+  const segment = value.split('.').pop() || value;
+  return segment.replace(/[_-]+/g, ' ');
+}
+
+const AGENT_TERMINAL_COLOR_CLASSES = [
+  'text-emerald-300',
+  'text-cyan-300',
+  'text-amber-300',
+  'text-violet-300',
+  'text-pink-300',
+  'text-lime-300',
+  'text-sky-300',
+];
+
+function agentColorClass(agentId: string): string {
+  let hash = 0;
+  for (let i = 0; i < agentId.length; i += 1) {
+    hash = (hash * 31 + agentId.charCodeAt(i)) >>> 0;
+  }
+  return AGENT_TERMINAL_COLOR_CLASSES[hash % AGENT_TERMINAL_COLOR_CLASSES.length];
 }
 
 function readPersistedLaneMap(): PersistedLaneMap {
@@ -394,6 +437,12 @@ function Dashboard() {
   } | null>(null);
   const [idleToWorkingTasks, setIdleToWorkingTasks] = useState<TaskCandidate[]>([]);
   const [isLoadingIdleToWorkingTasks, setIsLoadingIdleToWorkingTasks] = useState(false);
+  const [runtimeSelectedAgentIds, setRuntimeSelectedAgentIds] = useState<string[]>([]);
+  const [runtimeAutoScroll, setRuntimeAutoScroll] = useState(true);
+  const [runtimeConsoleExpanded, setRuntimeConsoleExpanded] = useState(false);
+  const runtimeConsoleBottomRef = useRef<HTMLDivElement | null>(null);
+  const { events: runtimeConsoleEvents, clearEvents: clearRuntimeConsoleEvents } = useRuntimeRunConsole();
+  const { data: runtimeSyncDiagnostics } = useRuntimeSyncDiagnostics();
 
   const createRun = useCreateOrchestrationRun(wizardState.parentAgentId);
   const createDelegation = useCreateAgentDelegation(wizardState.parentAgentId);
@@ -739,6 +788,105 @@ function Dashboard() {
 
   const stepProgress = ((activeStep + 1) / FLOW_STEPS.length) * 100;
   const activeDragAgent = activeDragAgentId ? agentById.get(activeDragAgentId) : undefined;
+  const runtimeRunSummaries = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        clientRunId: string;
+        implementationKey: string;
+        runId?: string | null;
+        status: 'running' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled';
+        startedAtMs: number;
+        updatedAtMs: number;
+        latestMessage: string;
+        eventCount: number;
+        agentId?: string;
+      }
+    >();
+
+    for (const event of runtimeConsoleEvents) {
+      const existing = grouped.get(event.clientRunId);
+      const status = toRuntimeRunStatus(event.status);
+      if (!existing) {
+        grouped.set(event.clientRunId, {
+          clientRunId: event.clientRunId,
+          implementationKey: event.implementationKey,
+          runId: event.runId ?? null,
+          status,
+          startedAtMs: event.timestampMs,
+          updatedAtMs: event.timestampMs,
+          latestMessage: event.message,
+          eventCount: 1,
+          agentId: event.agentId,
+        });
+        continue;
+      }
+
+      existing.updatedAtMs = Math.max(existing.updatedAtMs, event.timestampMs);
+      existing.status = status;
+      existing.latestMessage = event.message;
+      existing.eventCount += 1;
+      if (event.runId) existing.runId = event.runId;
+      if (event.agentId) existing.agentId = event.agentId;
+    }
+
+    return Array.from(grouped.values()).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  }, [runtimeConsoleEvents]);
+  const runtimeAgentOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const agent of agents) {
+      byId.set(agent.id, agent.name);
+    }
+    for (const event of runtimeConsoleEvents) {
+      if (!event.agentId) continue;
+      const name = agentById.get(event.agentId)?.name ?? event.agentId;
+      byId.set(event.agentId, name);
+    }
+    return Array.from(byId.entries())
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [runtimeConsoleEvents, agentById, agents]);
+  const selectedAgentSet = useMemo(() => new Set(runtimeSelectedAgentIds), [runtimeSelectedAgentIds]);
+  const runtimeFilteredEvents = useMemo(() => {
+    if (selectedAgentSet.size === 0) return runtimeConsoleEvents;
+    return runtimeConsoleEvents.filter((event) => {
+      if (!event.agentId) return false;
+      return selectedAgentSet.has(event.agentId);
+    });
+  }, [runtimeConsoleEvents, selectedAgentSet]);
+  const runtimeFilteredRunSummaries = useMemo(() => {
+    if (selectedAgentSet.size === 0) return runtimeRunSummaries;
+    return runtimeRunSummaries.filter((run) => run.agentId && selectedAgentSet.has(run.agentId));
+  }, [runtimeRunSummaries, selectedAgentSet]);
+  const runtimeStats = useMemo(() => {
+    return runtimeFilteredRunSummaries.reduce(
+      (acc, run) => {
+        if (run.status === 'running') acc.running += 1;
+        if (run.status === 'succeeded') acc.succeeded += 1;
+        if (run.status === 'failed' || run.status === 'timed_out' || run.status === 'cancelled') acc.failed += 1;
+        return acc;
+      },
+      { running: 0, succeeded: 0, failed: 0 }
+    );
+  }, [runtimeFilteredRunSummaries]);
+
+  const runtimeSyncFreshnessLabel = useMemo(() => {
+    if (!runtimeSyncDiagnostics) return 'sync unknown';
+    if (runtimeSyncDiagnostics.freshness === 'fresh') return 'sync fresh';
+    if (runtimeSyncDiagnostics.freshness === 'soft_stale') return 'sync degraded';
+    if (runtimeSyncDiagnostics.freshness === 'hard_stale') return 'sync hard-stale';
+    return `sync ${runtimeSyncDiagnostics.freshness}`;
+  }, [runtimeSyncDiagnostics]);
+
+  const runtimeSyncLastSuccessLabel = useMemo(() => {
+    if (!runtimeSyncDiagnostics?.lastSuccessAtMs) return 'last sync n/a';
+    return `last sync ${new Date(runtimeSyncDiagnostics.lastSuccessAtMs).toLocaleTimeString()}`;
+  }, [runtimeSyncDiagnostics]);
+
+  useEffect(() => {
+    if (!runtimeAutoScroll || !runtimeConsoleExpanded) return;
+    runtimeConsoleBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [runtimeAutoScroll, runtimeFilteredEvents, runtimeConsoleExpanded]);
 
   return (
     <div className="space-y-6 px-4">
@@ -760,33 +908,180 @@ function Dashboard() {
         </Button>
       </Header>
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        modifiers={[restrictToWindowEdges]}
-        onDragStart={(event) => setActiveDragAgentId(String(event.active.id))}
-        onDragEnd={handleDragEnd}
-        onDragCancel={() => setActiveDragAgentId(null)}
-      >
-        <div className="grid gap-4 lg:grid-cols-3 h-[calc(100vh-9.4rem)] overflow-y-auto">
-          {BOARD_LANES.map((lane) => {
-            const agentsInLane = board[lane.id]
-              .map((id) => agentById.get(id))
-              .filter((agent): agent is Agent => Boolean(agent));
+      <div className="flex h-[calc(100vh-9.4rem)] min-h-0 flex-col gap-4">
+        <div className="min-h-0 flex-1">
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToWindowEdges]}
+            onDragStart={(event) => setActiveDragAgentId(String(event.active.id))}
+            onDragEnd={handleDragEnd}
+            onDragCancel={() => setActiveDragAgentId(null)}
+          >
+            <div className="grid h-full min-h-0 gap-4 lg:grid-cols-3 overflow-y-auto">
+              {BOARD_LANES.map((lane) => {
+                const agentsInLane = board[lane.id]
+                  .map((id) => agentById.get(id))
+                  .filter((agent): agent is Agent => Boolean(agent));
 
-            return <LaneColumn key={lane.id} lane={lane} agentsInLane={agentsInLane} />;
-          })}
+                return <LaneColumn key={lane.id} lane={lane} agentsInLane={agentsInLane} />;
+              })}
+            </div>
+
+            <DragOverlay>
+              {activeDragAgent ? (
+                <div className="w-64 rounded-md border bg-background p-3 shadow-lg">
+                  <p className="text-sm font-medium">{activeDragAgent.name}</p>
+                  <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activeDragAgent.persona}</p>
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
         </div>
 
-        <DragOverlay>
-          {activeDragAgent ? (
-            <div className="w-64 rounded-md border bg-background p-3 shadow-lg">
-              <p className="text-sm font-medium">{activeDragAgent.name}</p>
-              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activeDragAgent.persona}</p>
+        <section
+          className={`w-full overflow-hidden rounded-md border bg-background transition-[height] duration-200 ${
+            runtimeConsoleExpanded ? 'h-[42%] min-h-[240px]' : 'h-12'
+          }`}
+        >
+          <div
+            className="flex h-12 cursor-pointer items-center justify-between border-b px-4"
+            role="button"
+            tabIndex={0}
+            onClick={() => setRuntimeConsoleExpanded((value) => !value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setRuntimeConsoleExpanded((value) => !value);
+              }
+            }}
+          >
+            <div className="flex items-center gap-2">
+              {runtimeConsoleExpanded ? (
+                <ChevronDown className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <ChevronUp className="h-4 w-4 text-muted-foreground" />
+              )}
+              <TerminalSquare className="h-4 w-4 text-muted-foreground" />
+              <p className="text-sm font-semibold">Runtime Console</p>
+              <Badge variant="outline">{runtimeFilteredRunSummaries.length} runs</Badge>
+              <Badge variant="default">{runtimeStats.running} running</Badge>
+              <Badge variant="secondary">{runtimeStats.succeeded} succeeded</Badge>
+              <Badge variant="destructive">{runtimeStats.failed} failed</Badge>
+              <Badge
+                variant={
+                  runtimeSyncDiagnostics?.freshness === 'hard_stale'
+                    ? 'destructive'
+                    : runtimeSyncDiagnostics?.freshness === 'soft_stale'
+                      ? 'secondary'
+                      : 'outline'
+                }
+              >
+                {runtimeSyncFreshnessLabel}
+              </Badge>
+              <Badge variant="outline">{runtimeSyncLastSuccessLabel}</Badge>
+            </div>
+
+            {runtimeConsoleExpanded ? (
+              <div
+                className="flex items-center gap-2"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="w-60 justify-start truncate"
+                      title="Filter runtime logs by agents"
+                    >
+                      {runtimeSelectedAgentIds.length > 0
+                        ? `${runtimeSelectedAgentIds.length} agent${runtimeSelectedAgentIds.length > 1 ? 's' : ''}`
+                        : 'All agents'}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-60">
+                    {runtimeAgentOptions.length === 0 ? (
+                      <div className="px-2 py-1.5 text-xs text-muted-foreground">No agents available</div>
+                    ) : (
+                      runtimeAgentOptions.map((agent) => (
+                        <DropdownMenuCheckboxItem
+                          key={agent.id}
+                          checked={runtimeSelectedAgentIds.includes(agent.id)}
+                          onCheckedChange={(checked) => {
+                            setRuntimeSelectedAgentIds((prev) => {
+                              if (checked) {
+                                return prev.includes(agent.id) ? prev : [...prev, agent.id];
+                              }
+                              return prev.filter((id) => id !== agent.id);
+                            });
+                          }}
+                        >
+                          {agent.name}
+                        </DropdownMenuCheckboxItem>
+                      ))
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRuntimeAutoScroll((value) => !value)}
+                  title={runtimeAutoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}
+                  aria-label={runtimeAutoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}
+                >
+                  {runtimeAutoScroll ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    clearRuntimeConsoleEvents();
+                    setRuntimeSelectedAgentIds([]);
+                  }}
+                  title="Clear runtime console"
+                  aria-label="Clear runtime console"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+          {runtimeConsoleExpanded ? (
+            <div className="flex h-[calc(100%-3rem)] min-h-0 flex-col">
+              <div className="min-h-0 flex-1">
+                <ScrollArea className="h-full">
+                  <div className="space-y-1 bg-neutral-950 p-3 font-mono text-xs text-neutral-100">
+                    {runtimeFilteredEvents.length === 0 ? (
+                      <p className="text-neutral-100">No runtime logs yet in this session.</p>
+                    ) : (
+                      runtimeFilteredEvents.map((event: RuntimeRunConsoleEvent) => (
+                        <div key={event.id} className="break-words">
+                          <span>[{new Date(event.timestampMs).toLocaleTimeString()}]</span>{' '}
+                          {event.agentId ? (
+                            <span className={agentColorClass(event.agentId)}>
+                              [{agentById.get(event.agentId)?.name ?? event.agentId}]
+                            </span>
+                          ) : null}{' '}
+                          <span>[{event.status ?? 'running'}]</span>{' '}
+                          <span>[{toRuntimeRunLabel(event.implementationKey)}]</span>{' '}
+                          <span>{event.message}</span>
+                        </div>
+                      ))
+                    )}
+                    <div ref={runtimeConsoleBottomRef} />
+                  </div>
+                </ScrollArea>
+              </div>
             </div>
           ) : null}
-        </DragOverlay>
-      </DndContext>
+        </section>
+      </div>
 
       <AlertDialog
         open={idleToWorkingDialogOpen}

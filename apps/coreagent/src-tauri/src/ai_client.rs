@@ -148,6 +148,43 @@ impl AiClientManager {
             || normalized.contains("unknown skill")
     }
 
+    fn normalize_anthropic_model_id(model_id: &str) -> String {
+        match model_id.trim() {
+            "claude-3-7-sonnet-20250219" => "claude-sonnet-4-20250514".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn anthropic_default_fallback_model() -> &'static str {
+        "claude-sonnet-4-20250514"
+    }
+
+    fn should_retry_with_anthropic_fallback(
+        requested_model: &str,
+        status: Option<reqwest::StatusCode>,
+        error_text: &str,
+    ) -> bool {
+        let normalized = error_text.to_ascii_lowercase();
+        let model_not_found = status == Some(reqwest::StatusCode::NOT_FOUND)
+            || (normalized.contains("not_found_error") && normalized.contains("model"));
+        model_not_found
+            && requested_model != Self::anthropic_default_fallback_model()
+            && !requested_model.trim().is_empty()
+    }
+
+    fn is_local_runtime_unavailable_error(error: &str) -> bool {
+        let normalized = error.to_ascii_lowercase();
+        normalized.contains("local_docker")
+            || normalized.contains("local docker")
+            || normalized.contains("docker")
+            || normalized.contains("daemon")
+            || normalized.contains("connection refused")
+            || normalized.contains("connection reset")
+            || normalized.contains("is unavailable")
+            || normalized.contains("runner unavailable")
+            || normalized.contains("(503)")
+    }
+
     fn resolve_installed_skill_by_implementation_key<'a>(
         implementation_key: &str,
         installed_skills: &'a [InstalledSkill],
@@ -1239,7 +1276,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         // Create the agent with identity prompt - this is the key!
         // The preamble IS the system prompt and will be sent as a system message
-        let completion_model = client.completion_model(model_id);
+        let normalized_model_id = Self::normalize_anthropic_model_id(model_id);
+        let completion_model = client.completion_model(&normalized_model_id);
         let agent = AgentBuilder::new(completion_model)
             .preamble(identity_prompt) // THIS sets the agent's identity as system message
             .build();
@@ -1295,13 +1333,6 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "Anthropic client not initialized. Check ANTHROPIC_API_KEY".to_string()
         })?;
 
-        // Create the agent with identity prompt - this is the key!
-        // The preamble IS the system prompt and will be sent as a system message
-        let completion_model = client.completion_model(model_id);
-        let agent = AgentBuilder::new(completion_model)
-            .preamble(identity_prompt) // THIS sets the agent's identity as system message
-            .build();
-
         println!(
             "[AI_CLIENT] Anthropic agent with identity prompt: {}",
             Self::truncate_for_log(identity_prompt, 50)
@@ -1333,11 +1364,42 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "[AI_CLIENT] Sending to Anthropic API with identity prompt and conversation context"
         );
 
-        // Use .chat() method for conversational agents with structured message history
-        let response = agent
-            .chat(user_message, message_history)
+        let normalized_model_id = Self::normalize_anthropic_model_id(model_id);
+        let primary_completion_model = client.completion_model(&normalized_model_id);
+        let primary_agent = AgentBuilder::new(primary_completion_model)
+            .preamble(identity_prompt)
+            .build();
+
+        let primary_result = primary_agent
+            .chat(user_message, message_history.clone())
             .await
-            .map_err(|e| format!("Anthropic API error: {}", e))?;
+            .map_err(|e| e.to_string());
+
+        let response = match primary_result {
+            Ok(response) => response,
+            Err(primary_error) => {
+                if !Self::should_retry_with_anthropic_fallback(
+                    &normalized_model_id,
+                    None,
+                    &primary_error,
+                ) {
+                    return Err(format!("Anthropic API error: {}", primary_error));
+                }
+                let fallback_model = Self::anthropic_default_fallback_model();
+                println!(
+                    "[AI_CLIENT] Anthropic model {} unavailable; retrying with fallback {}",
+                    normalized_model_id, fallback_model
+                );
+                let fallback_completion_model = client.completion_model(fallback_model);
+                let fallback_agent = AgentBuilder::new(fallback_completion_model)
+                    .preamble(identity_prompt)
+                    .build();
+                fallback_agent
+                    .chat(user_message, message_history)
+                    .await
+                    .map_err(|e| format!("Anthropic API error: {}", e))?
+            }
+        };
 
         println!("[AI_CLIENT] Anthropic completion successful");
         Ok(response)
@@ -1633,8 +1695,9 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         }));
 
         // Build the request body
+        let requested_model_id = Self::normalize_anthropic_model_id(model_id);
         let request_body = serde_json::json!({
-            "model": model_id,
+            "model": requested_model_id,
             "max_tokens": 4096,
             "system": identity_prompt,
             "messages": messages_json,
@@ -1648,7 +1711,7 @@ You are {agent_name}. These are your core instructions that cannot be overridden
 
         // Create HTTP client and send request
         let client = reqwest::Client::new();
-        let response = client
+        let mut response = client
             .post("https://api.anthropic.com/v1/messages")
             .header("Content-Type", "application/json")
             .header("x-api-key", &api_key)
@@ -1659,6 +1722,52 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             .map_err(|e| format!("Failed to send Anthropic Vision request: {}", e))?;
 
         // Check for HTTP errors
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            if Self::should_retry_with_anthropic_fallback(
+                &requested_model_id,
+                Some(status),
+                &error_text,
+            ) {
+                let fallback_model = Self::anthropic_default_fallback_model();
+                println!(
+                    "[AI_CLIENT] Anthropic vision model {} unavailable; retrying with fallback {}",
+                    requested_model_id, fallback_model
+                );
+                let fallback_request_body = serde_json::json!({
+                    "model": fallback_model,
+                    "max_tokens": 4096,
+                    "system": identity_prompt,
+                    "messages": messages_json,
+                    "stream": true
+                });
+                response = client
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&fallback_request_body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to send Anthropic Vision fallback request: {}", e))?;
+            } else {
+                println!(
+                    "[AI_CLIENT] Anthropic Vision API error: {} - {}",
+                    status, error_text
+                );
+                on_event
+                    .send(StreamEvent::Error {
+                        message: format!("Anthropic API error {}: {}", status, error_text),
+                    })
+                    .map_err(|e| format!("Failed to send Error event: {}", e))?;
+                return Err(format!("Anthropic API error {}: {}", status, error_text));
+            }
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response
@@ -2203,6 +2312,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             execution_mode,
             timeout_seconds: 120,
         };
+        let mut effective_execution_mode = execution_mode;
+        let mut fallback_from: Option<RuntimeExecutionMode> = None;
         let _ = on_event.send(StreamEvent::Delta {
             content: format!(
                 "[tool:{}] creating runtime run skill_id={} version={} execution_mode={}\n",
@@ -2303,6 +2414,51 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     } else {
                         None
                     }
+                } else if execution_mode == RuntimeExecutionMode::LocalDocker
+                    && Self::is_local_runtime_unavailable_error(&error)
+                {
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool:{}] local_docker unavailable; retrying create run with remote mode. reason={}\n",
+                            spec.implementation_key, error
+                        ),
+                    });
+                    fallback_from = Some(RuntimeExecutionMode::LocalDocker);
+                    effective_execution_mode = RuntimeExecutionMode::Remote;
+                    let remote_input = CreateRuntimeRunInput {
+                        execution_mode: RuntimeExecutionMode::Remote,
+                        ..run_input.clone()
+                    };
+                    match client.create_runtime_run(access_token, remote_input).await {
+                        Ok(remote_run) => {
+                            let _ = on_event.send(StreamEvent::Delta {
+                                content: format!(
+                                    "[tool:{}] remote fallback create run succeeded run_id={}\n",
+                                    spec.implementation_key, remote_run.run_id
+                                ),
+                            });
+                            Some(remote_run)
+                        }
+                        Err(remote_error) => {
+                            let _ = on_event.send(StreamEvent::Delta {
+                                content: format!(
+                                    "[tool:{}] remote fallback create run failed: {}\n",
+                                    spec.implementation_key, remote_error
+                                ),
+                            });
+                            return serde_json::json!({
+                                "toolCallId": tool_call_id,
+                                "status": "failed",
+                                "error": {
+                                    "code": "runtime_run_create_failed",
+                                    "message": format!(
+                                        "local_docker unavailable ({error}); remote fallback failed: {remote_error}"
+                                    )
+                                }
+                            })
+                            .to_string();
+                        }
+                    }
                 } else {
                     None
                 };
@@ -2395,7 +2551,8 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             "output": final_run.output,
             "error": final_run.error,
             "inputWarning": input_warning,
-            "executionMode": execution_mode,
+            "executionMode": effective_execution_mode,
+            "fallbackFrom": fallback_from,
             "executorMode": executor_mode.as_str()
         })
         .to_string()
@@ -2476,6 +2633,150 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         }
 
         Some(payload)
+    }
+
+    async fn stream_anthropic_text_response(
+        &self,
+        model_id: &str,
+        identity_prompt: &str,
+        messages_json: &[serde_json::Value],
+        api_key: &str,
+        on_event: &Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        let request_body = serde_json::json!({
+            "model": model_id,
+            "max_tokens": 4096,
+            "system": identity_prompt,
+            "messages": messages_json,
+            "stream": true,
+            "temperature": 0.7,
+        });
+        let http_client = reqwest::Client::new();
+        let response = http_client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("Content-Type", "application/json")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send Anthropic streaming request: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(format!("Anthropic API error {}: {}", status, error_text));
+        }
+
+        let mut full_content = String::new();
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    buffer.push_str(&chunk_str);
+                    while let Some(event_end) = buffer.find("\n\n") {
+                        let event_data = buffer[..event_end].to_string();
+                        buffer = buffer[event_end + 2..].to_string();
+                        for line in event_data.lines() {
+                            let Some(data) = line.strip_prefix("data: ") else {
+                                continue;
+                            };
+                            if data.trim() == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if event.get("type").and_then(|t| t.as_str())
+                                    == Some("content_block_delta")
+                                {
+                                    if let Some(delta) = event.get("delta") {
+                                        if delta.get("type").and_then(|t| t.as_str())
+                                            == Some("text_delta")
+                                        {
+                                            if let Some(text) =
+                                                delta.get("text").and_then(|t| t.as_str())
+                                            {
+                                                full_content.push_str(text);
+                                                on_event
+                                                    .send(StreamEvent::Delta {
+                                                        content: text.to_string(),
+                                                    })
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to send Delta event: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            }
+                                        }
+                                    }
+                                } else if event.get("type").and_then(|t| t.as_str()) == Some("error")
+                                {
+                                    let error_msg = event
+                                        .get("error")
+                                        .and_then(|e| e.get("message"))
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("Unknown error");
+                                    return Err(format!("Anthropic streaming error: {}", error_msg));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Anthropic streaming read error: {}", e));
+                }
+            }
+        }
+        Ok(full_content)
+    }
+
+    async fn stream_openai_text_response(
+        &self,
+        model_id: &str,
+        chat_messages: &[ChatCompletionRequestMessage],
+        on_event: &Channel<StreamEvent>,
+    ) -> Result<String, String> {
+        let openai_client = OpenAIClient::new();
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model_id)
+            .messages(chat_messages.to_vec())
+            .max_tokens(1000u32)
+            .temperature(0.7f32)
+            .stream(true)
+            .build()
+            .map_err(|e| format!("Failed to build OpenAI streaming request: {}", e))?;
+        let mut stream = openai_client
+            .chat()
+            .create_stream(request)
+            .await
+            .map_err(|e| format!("OpenAI streaming API error: {}", e))?;
+
+        let mut full_content = String::new();
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(response) => {
+                    if let Some(choice) = response.choices.first() {
+                        if let Some(delta) = &choice.delta.content {
+                            full_content.push_str(delta);
+                            on_event
+                                .send(StreamEvent::Delta {
+                                    content: delta.to_string(),
+                                })
+                                .map_err(|e| format!("Failed to send Delta event: {}", e))?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("OpenAI streaming error: {}", e));
+                }
+            }
+        }
+        Ok(full_content)
     }
 
     async fn get_anthropic_completion_streaming_with_runtime_tools(
@@ -2613,10 +2914,11 @@ You are {agent_name}. These are your core instructions that cannot be overridden
         let mut persisted_tool_runs: Vec<PersistedToolRun> = Vec::new();
         let mut run_index_by_call_id: HashMap<String, usize> = HashMap::new();
         let mut messages_json = Self::anthropic_messages_from_history(history, user_message);
+        let mut requested_model_id = Self::normalize_anthropic_model_id(model_id);
 
         for _ in 0..6 {
             let request_body = serde_json::json!({
-                "model": model_id,
+                "model": requested_model_id,
                 "max_tokens": 4096,
                 "system": identity_prompt.clone(),
                 "messages": messages_json.clone(),
@@ -2640,6 +2942,21 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
+                if Self::should_retry_with_anthropic_fallback(
+                    &requested_model_id,
+                    Some(status),
+                    &error_text,
+                ) {
+                    let fallback_model = Self::anthropic_default_fallback_model().to_string();
+                    let _ = on_event.send(StreamEvent::Delta {
+                        content: format!(
+                            "[tool-selection] anthropic model {} unavailable; retrying with fallback {}.\n",
+                            requested_model_id, fallback_model
+                        ),
+                    });
+                    requested_model_id = fallback_model;
+                    continue;
+                }
                 return Err(format!(
                     "Anthropic tool-call API error {}: {}",
                     status, error_text
@@ -2719,6 +3036,27 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         content: "[tool-chain] phase=final_summarize\n".to_string(),
                     });
                 }
+                let final_assistant_text = if has_called_tool {
+                    let mut summary_messages = if messages_json.is_empty() {
+                        Vec::new()
+                    } else {
+                        messages_json[..messages_json.len() - 1].to_vec()
+                    };
+                    summary_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": "Now provide the final user-facing answer using the tool outputs above. Do not call any tools."
+                    }));
+                    self.stream_anthropic_text_response(
+                        &requested_model_id,
+                        &identity_prompt,
+                        &summary_messages,
+                        &api_key,
+                        &on_event,
+                    )
+                    .await?
+                } else {
+                    assistant_text.clone()
+                };
                 let persisted_content = if has_called_tool || acceptance_message.is_some() {
                     let payload = serde_json::json!({
                         "acceptanceMessage": acceptance_message,
@@ -2727,15 +3065,15 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     });
                     format!(
                         "{}\n\n[ToolExecutionContext]\n{}\n[/ToolExecutionContext]",
-                        assistant_text, payload
+                        final_assistant_text, payload
                     )
                 } else {
-                    assistant_text.clone()
+                    final_assistant_text.clone()
                 };
-                if !assistant_text.is_empty() {
+                if !has_called_tool && !final_assistant_text.is_empty() {
                     on_event
                         .send(StreamEvent::Delta {
-                            content: assistant_text.clone(),
+                            content: final_assistant_text.clone(),
                         })
                         .map_err(|e| format!("Failed to send Delta event: {}", e))?;
                 }
@@ -3253,6 +3591,25 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                         content: "[tool-chain] phase=final_summarize\n".to_string(),
                     });
                 }
+                let final_content = if has_called_tool {
+                    let mut summary_messages = chat_messages.clone();
+                    summary_messages.push(ChatCompletionRequestMessage::System(
+                        async_openai::types::chat::ChatCompletionRequestSystemMessage {
+                            content: async_openai::types::chat::ChatCompletionRequestSystemMessageContent::Text(
+                                "Now provide the final user-facing answer using the tool outputs above. Do not call any tools.".to_string(),
+                            ),
+                            name: None,
+                        },
+                    ));
+                    self.stream_openai_text_response(
+                        model_id,
+                        &summary_messages,
+                        &on_event,
+                    )
+                    .await?
+                } else {
+                    content.clone()
+                };
                 let persisted_content = if has_called_tool || acceptance_message.is_some() {
                     let payload = serde_json::json!({
                         "acceptanceMessage": acceptance_message,
@@ -3261,16 +3618,16 @@ You are {agent_name}. These are your core instructions that cannot be overridden
                     });
                     format!(
                         "{}\n\n[ToolExecutionContext]\n{}\n[/ToolExecutionContext]",
-                        content,
+                        final_content,
                         payload
                     )
                 } else {
-                    content.clone()
+                    final_content.clone()
                 };
-                if !content.is_empty() {
+                if !has_called_tool && !final_content.is_empty() {
                     on_event
                         .send(StreamEvent::Delta {
-                            content: content.clone(),
+                            content: final_content.clone(),
                         })
                         .map_err(|e| format!("Failed to send Delta event: {}", e))?;
                 }
@@ -3848,126 +4205,58 @@ You are {agent_name}. These are your core instructions that cannot be overridden
             });
         }
 
-        // Text-only Anthropic streaming via direct SSE transport.
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| "ANTHROPIC_API_KEY not set in environment".to_string())?;
         let messages_json = Self::anthropic_messages_from_history(history, user_message);
-        let request_body = serde_json::json!({
-            "model": model_id,
-            "max_tokens": 4096,
-            "system": identity_prompt,
-            "messages": messages_json,
-            "stream": true,
-            "temperature": 0.7,
-        });
-        let http_client = reqwest::Client::new();
-        let response = http_client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("Content-Type", "application/json")
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send Anthropic streaming request: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            let error_message = format!("Anthropic API error {}: {}", status, error_text);
-            let _ = on_event.send(StreamEvent::Error {
-                message: error_message.clone(),
-            });
-            return Err(error_message);
-        }
-
-        let mut full_content = String::new();
+        let mut requested_model_id = Self::normalize_anthropic_model_id(model_id);
         on_event
             .send(StreamEvent::Started)
             .map_err(|e| format!("Failed to send Started event: {}", e))?;
 
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    let chunk_str = String::from_utf8_lossy(&chunk);
-                    buffer.push_str(&chunk_str);
-                    while let Some(event_end) = buffer.find("\n\n") {
-                        let event_data = buffer[..event_end].to_string();
-                        buffer = buffer[event_end + 2..].to_string();
-                        for line in event_data.lines() {
-                            let Some(data) = line.strip_prefix("data: ") else {
-                                continue;
-                            };
-                            if data.trim() == "[DONE]" {
-                                continue;
-                            }
-                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                if event.get("type").and_then(|t| t.as_str())
-                                    == Some("content_block_delta")
-                                {
-                                    if let Some(delta) = event.get("delta") {
-                                        if delta.get("type").and_then(|t| t.as_str())
-                                            == Some("text_delta")
-                                        {
-                                            if let Some(text) =
-                                                delta.get("text").and_then(|t| t.as_str())
-                                            {
-                                                full_content.push_str(text);
-                                                on_event
-                                                    .send(StreamEvent::Delta {
-                                                        content: text.to_string(),
-                                                    })
-                                                    .map_err(|e| {
-                                                        format!(
-                                                            "Failed to send Delta event: {}",
-                                                            e
-                                                        )
-                                                    })?;
-                                            }
-                                        }
-                                    }
-                                } else if event.get("type").and_then(|t| t.as_str()) == Some("error")
-                                {
-                                    let error_msg = event
-                                        .get("error")
-                                        .and_then(|e| e.get("message"))
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Unknown error");
-                                    let normalized = format!(
-                                        "Anthropic streaming error: {}",
-                                        error_msg
-                                    );
-                                    on_event
-                                        .send(StreamEvent::Error {
-                                            message: normalized.clone(),
-                                        })
-                                        .map_err(|e| {
-                                            format!("Failed to send Error event: {}", e)
-                                        })?;
-                                    return Err(normalized);
-                                }
-                            }
-                        }
-                    }
+        let full_content = match self
+            .stream_anthropic_text_response(
+                &requested_model_id,
+                &identity_prompt,
+                &messages_json,
+                &api_key,
+                &on_event,
+            )
+            .await
+        {
+            Ok(content) => content,
+            Err(primary_error) => {
+                if !Self::should_retry_with_anthropic_fallback(
+                    &requested_model_id,
+                    None,
+                    &primary_error,
+                ) {
+                    let _ = on_event.send(StreamEvent::Error {
+                        message: primary_error.clone(),
+                    });
+                    return Err(primary_error);
                 }
-                Err(e) => {
-                    let normalized = format!("Anthropic streaming read error: {}", e);
-                    on_event
-                        .send(StreamEvent::Error {
-                            message: normalized.clone(),
-                        })
-                        .map_err(|send_error| {
-                            format!("Failed to send Error event: {}", send_error)
-                        })?;
-                    return Err(normalized);
-                }
+                requested_model_id = Self::anthropic_default_fallback_model().to_string();
+                let _ = on_event.send(StreamEvent::Delta {
+                    content: format!(
+                        "[tool-selection] anthropic model unavailable; retrying with fallback {}.\n",
+                        requested_model_id
+                    ),
+                });
+                self.stream_anthropic_text_response(
+                    &requested_model_id,
+                    &identity_prompt,
+                    &messages_json,
+                    &api_key,
+                    &on_event,
+                )
+                .await
+                .inspect_err(|error| {
+                    let _ = on_event.send(StreamEvent::Error {
+                        message: error.clone(),
+                    });
+                })?
             }
-        }
+        };
 
         on_event
             .send(StreamEvent::Done {
@@ -4028,6 +4317,58 @@ mod tests {
         }));
         let mode = AiClientManager::runtime_execution_mode_from_profile(Some(&profile));
         assert_eq!(mode, RuntimeExecutionMode::LocalDocker);
+    }
+
+    #[test]
+    fn normalize_anthropic_model_id_maps_deprecated_sonnet() {
+        assert_eq!(
+            AiClientManager::normalize_anthropic_model_id("claude-3-7-sonnet-20250219"),
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(
+            AiClientManager::normalize_anthropic_model_id("claude-3-5-haiku-20241022"),
+            "claude-3-5-haiku-20241022"
+        );
+    }
+
+    #[test]
+    fn anthropic_fallback_retry_detects_model_not_found_patterns() {
+        assert!(AiClientManager::should_retry_with_anthropic_fallback(
+            "claude-3-7-sonnet-20250219",
+            Some(reqwest::StatusCode::NOT_FOUND),
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-3-7-sonnet-20250219"}}"#
+        ));
+        assert!(!AiClientManager::should_retry_with_anthropic_fallback(
+            "claude-sonnet-4-20250514",
+            Some(reqwest::StatusCode::NOT_FOUND),
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-sonnet-4-20250514"}}"#
+        ));
+    }
+
+    #[test]
+    fn normalize_anthropic_model_id_maps_deprecated_sonnet() {
+        assert_eq!(
+            AiClientManager::normalize_anthropic_model_id("claude-3-7-sonnet-20250219"),
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(
+            AiClientManager::normalize_anthropic_model_id("claude-3-5-haiku-20241022"),
+            "claude-3-5-haiku-20241022"
+        );
+    }
+
+    #[test]
+    fn anthropic_fallback_retry_detects_model_not_found_patterns() {
+        assert!(AiClientManager::should_retry_with_anthropic_fallback(
+            "claude-3-7-sonnet-20250219",
+            Some(reqwest::StatusCode::NOT_FOUND),
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-3-7-sonnet-20250219"}}"#
+        ));
+        assert!(!AiClientManager::should_retry_with_anthropic_fallback(
+            "claude-sonnet-4-20250514",
+            Some(reqwest::StatusCode::NOT_FOUND),
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-sonnet-4-20250514"}}"#
+        ));
     }
 
     #[test]

@@ -477,6 +477,35 @@ $$;
 -- Grant execute permission to authenticated users
 GRANT EXECUTE ON FUNCTION public.delete_user() TO authenticated;
 
+-- ============================================================================
+-- Runtime Advisory Sync State
+-- ============================================================================
+
+CREATE TABLE advisory_sync_state (
+    state_key TEXT PRIMARY KEY DEFAULT 'default',
+    cursor TEXT,
+    last_success_at TIMESTAMPTZ,
+    last_attempt_at TIMESTAMPTZ,
+    last_control_sync_at TIMESTAMPTZ,
+    last_app_sync_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    next_backoff_seconds INTEGER NOT NULL DEFAULT 0 CHECK (next_backoff_seconds >= 0),
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (state_key = 'default')
+);
+
+CREATE TRIGGER update_advisory_sync_state_updated_at BEFORE UPDATE ON advisory_sync_state
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE advisory_sync_state IS 'Singleton checkpoint and health state for runtime advisory sync loops.';
+COMMENT ON COLUMN advisory_sync_state.cursor IS 'Registry advisory feed cursor checkpoint for incremental sync.';
+COMMENT ON COLUMN advisory_sync_state.last_success_at IS 'Timestamp of the most recent successful advisory sync.';
+COMMENT ON COLUMN advisory_sync_state.last_control_sync_at IS 'Timestamp of last 30s control-plane style advisory poll.';
+COMMENT ON COLUMN advisory_sync_state.last_app_sync_at IS 'Timestamp of last app cadence sync (foreground/background policy).';
+
 
 -- ============================================================================
 -- Message Branching Support

@@ -18,7 +18,6 @@
 
 ## Backlog Checklist
 - [ ] 1. Re-add email to `user_profile` so product updates/notifications can be sent.
-- [ ] 2. Auto-fallback runtime assignment from `local_docker` to `remote` when device/runtime is unavailable.
 - [ ] 3. Mobile application support to track jobs and message agents.
 - [ ] 4. Add direct bucket-to-app file sync/reconciliation so Files/chat attachment state reflects bucket truth when objects are changed outside app upload/delete flows.
 
@@ -31,13 +30,13 @@
   - Legacy attachment-read local fallback path removed; `attachment_read` must resolve through runtime skill mapping.
   - Legacy runtime env toggles removed from app env examples and runtime behavior docs.
   - Added runtime module tests to lock provider-native/API-only behavior.
+  - Chat manual slash/direct runtime invocation path removed; tool usage is model-driven.
+  - Anthropic deprecated model compatibility hardened via normalization/fallback for unavailable model IDs.
+  - Runtime-tool response streaming restored so final assistant output arrives incrementally instead of one buffered chunk.
+  - Chat tool timeline simplified: run entries render as accordions and acceptance-message cards are removed.
 
 ## Immediate Runtime Todo List
 - [ ] Complete remote runner integration end-to-end (parity with local Docker execution path and diagnostics surface).
-- [ ] Improve tool invocation UX/functionality:
-  - derive the correct tool from user message intent more reliably
-  - ensure user text submitted with a tool call is included in the final tool output/context
-- [ ] Add automatic fallback to `remote` execution whenever local runtime is unavailable/not found.
 
 ## Status Update (2026-02-22)
 
@@ -323,8 +322,8 @@ This checklist is the detailed tracker and is ordered by importance and implemen
 - [x] Add local Docker preflight command in CoreAgent (Docker installed + daemon reachable).
 - [x] Add local Docker pre-pull command in CoreAgent for configured runtime image.
 - [x] Block local mode selection and show remediation guidance when preflight/pre-pull fails.
-- [ ] Route selected runtime mode into runtime run creation path from CoreAgent.
-- [ ] Add CoreAgent runtime run panel to show run status + streamed `skill_run_events` logs.
+- [x] Route selected runtime mode into runtime run creation path from CoreAgent.
+- [x] Add CoreAgent runtime run panel to show run status + streamed `skill_run_events` logs.
 - [x] Execute and record local execution validation:
   - choose `local_docker` mode in CoreAgent
   - run a registry skill with local mode
@@ -337,23 +336,23 @@ This checklist is the detailed tracker and is ordered by importance and implemen
   - verify streamed `log` events appear in run events feed
 
 ### Immediate Next Steps (Validation Pass)
-1. Complete wiring so selected runtime mode is used in all CoreAgent run creation paths.
-2. Add CoreAgent runtime run panel for status + streamed `skill_run_events` logs.
-3. Refine tool routing reliability (intent-to-tool selection quality and deterministic tool planning).
-4. Improve `attachment_read` extraction quality for complex docs and add richer parse diagnostics.
-5. Add automatic `local_docker` -> `remote` fallback when local runtime is unavailable.
+- [x] Complete wiring so selected runtime mode is used in all CoreAgent run creation paths.
+- [x] Add CoreAgent runtime run panel for status + streamed `skill_run_events` logs.
+- [x] Refine tool routing reliability (intent-to-tool selection quality and deterministic tool planning).
+- [ ] Improve `attachment_read` extraction quality for complex docs and add richer parse diagnostics.
+- [x] Add automatic `local_docker` -> `remote` fallback when local runtime is unavailable.
 
 ### 2. Runtime And Sync Hardening
-- [ ] Add startup skills bootstrap flow (installed skills sync + diagnostics status).
-- [ ] Add advisory sync loop with cursor checkpoint persistence and retry/backoff using production defaults:
+- [ ] Add startup skills bootstrap flow (installed skills sync + diagnostics status; diagnostics status is implemented, installed-skills bootstrap sync still pending).
+- [x] Add advisory sync loop with cursor checkpoint persistence and retry/backoff using production defaults:
   - runner/control plane every `30s` with jitter
   - app foreground every `60s`, app background every `5m`
   - immediate sync on resume/install/assign/run trigger
 - [ ] Add degraded-mode handling with explicit stale policy:
-  - soft-stale at `2m` (warn/degraded)
-  - hard-stale at `10m` (fail-closed for registry-managed execution)
-  - core tools continue; installs/updates blocked while degraded
-- [ ] Add stronger runtime handshake cache strategy and invalidation.
+  - [x] soft-stale at `2m` (warn/degraded)
+  - [x] hard-stale at `10m` (fail-closed for registry-managed execution)
+  - [ ] core tools continue; installs/updates blocked while degraded
+- [x] Add stronger runtime handshake cache strategy and invalidation.
 
 ### 3. Skill/Tool Creation Flow Quality
 - [ ] Provide canonical "skill authoring kit":

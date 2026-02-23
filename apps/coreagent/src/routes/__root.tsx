@@ -1,9 +1,12 @@
 import { Outlet, createRootRoute, useMatches, Link } from '@tanstack/react-router'
 import { useMemo, useState, useEffect } from 'react'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { AppSidebar } from '@/components/dashboard/app-sidebar'
 import { QueryProvider } from '@/providers/query-provider'
 import { ensureCacheLoaded } from '@/lib/tauri-store'
 import { Toaster } from '@/components/ui/sonner'
+import { appendRuntimeRunConsoleEvents } from '@/hooks/useRuntimeRunConsole'
 
 // Module-level: start loading cache immediately
 const cachePromise = ensureCacheLoaded()
@@ -40,6 +43,83 @@ function RootLayout() {
     }).catch(() => {
       setCacheReady(true) // Continue even if cache fails
     })
+  }, [])
+
+  useEffect(() => {
+    const syncVisibility = (isForeground: boolean) => {
+      invoke('set_runtime_sync_app_visibility', { isForeground }).catch((error) => {
+        console.error('Failed updating runtime sync app visibility:', error)
+      })
+    }
+
+    const triggerResumeSync = () => {
+      invoke('trigger_runtime_sync_command', { reason: 'app_resume' }).catch((error) => {
+        console.error('Failed triggering runtime sync on resume:', error)
+      })
+    }
+
+    const handleVisibilityChange = () => {
+      const isForeground = !document.hidden
+      syncVisibility(isForeground)
+      if (isForeground) {
+        triggerResumeSync()
+      }
+    }
+
+    syncVisibility(!document.hidden)
+    if (!document.hidden) {
+      triggerResumeSync()
+    }
+
+    window.addEventListener('focus', triggerResumeSync)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', triggerResumeSync)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    let dispose: UnlistenFn | null = null
+    let cancelled = false
+    listen<{
+      clientRunId: string
+      implementationKey: string
+      runId?: string | null
+      status?: string | null
+      message: string
+      sequence: number
+      timestampMs: number
+    }>('direct-runtime-tool-progress', (event) => {
+      if (cancelled) return
+      const payload = event.payload
+      appendRuntimeRunConsoleEvents([
+        {
+          id: `${payload.clientRunId}-${payload.sequence}-${payload.timestampMs}`,
+          source: 'direct',
+          clientRunId: payload.clientRunId,
+          implementationKey: payload.implementationKey,
+          runId: payload.runId ?? null,
+          status: payload.status ?? 'running',
+          message: payload.message,
+          sequence: payload.sequence,
+          timestampMs: payload.timestampMs,
+        },
+      ])
+    })
+      .then((unlisten) => {
+        dispose = unlisten
+      })
+      .catch((error) => {
+        console.error('Failed to subscribe to runtime console progress:', error)
+      })
+
+    return () => {
+      cancelled = true
+      if (dispose) {
+        dispose()
+      }
+    }
   }, [])
 
   // Format user data for sidebar - memoized to prevent re-renders

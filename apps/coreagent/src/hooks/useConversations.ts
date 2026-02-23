@@ -6,6 +6,7 @@ import { getCachedData, getCachedDataUpdatedAt } from '../lib/tauri-store';
 import { abilityKeys, conversationKeys, memoryKeys } from '@/lib/query-keys';
 import { cacheFirstStaticQueryPolicy } from '@/lib/query-policies';
 import { tauriCommandClient } from '@/lib/tauri-command-client';
+import { appendRuntimeRunConsoleEvents, registerRuntimeRunContext } from '@/hooks/useRuntimeRunConsole';
 
 function getOptimisticParentId(messages: Message[] | undefined): string | null {
   if (!messages || messages.length === 0) return null;
@@ -1004,6 +1005,29 @@ export function useSendMessageStreaming() {
                 }
               }
               if (progressBatch.length > 0) {
+                const agentIdForConversation =
+                  getAgentIdForConversation(queryClient, request.conversation_id) ?? undefined;
+                for (const progressEvent of progressBatch) {
+                  registerRuntimeRunContext(progressEvent.clientRunId, {
+                    agentId: agentIdForConversation,
+                    conversationId: request.conversation_id,
+                  });
+                }
+                appendRuntimeRunConsoleEvents(
+                  progressBatch.map((progressEvent) => ({
+                    id: `${progressEvent.clientRunId}-${progressEvent.sequence}-${progressEvent.timestampMs}`,
+                    source: 'inferred' as const,
+                    clientRunId: progressEvent.clientRunId,
+                    implementationKey: progressEvent.implementationKey,
+                    runId: progressEvent.runId ?? null,
+                    status: progressEvent.status ?? 'running',
+                    message: progressEvent.message,
+                    sequence: progressEvent.sequence,
+                    timestampMs: progressEvent.timestampMs,
+                    agentId: agentIdForConversation,
+                    conversationId: request.conversation_id,
+                  }))
+                );
                 const nextProgress = [...inferredToolProgressRef.current, ...progressBatch];
                 inferredToolProgressRef.current = nextProgress;
                 setInferredToolProgress(nextProgress);

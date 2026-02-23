@@ -11,8 +11,8 @@ describe("getRuntimeStatus", () => {
         setupMessage: null
       })
     ).toEqual({
-      tone: "neutral",
-      text: "Remote active"
+      tone: "success",
+      text: "Active"
     });
   });
 
@@ -25,7 +25,7 @@ describe("getRuntimeStatus", () => {
       })
     ).toEqual({
       tone: "success",
-      text: "Docker is running"
+      text: "Active"
     });
   });
 

@@ -80,6 +80,7 @@ export const registryKeys = {
   installed: () => [...registryKeys.all, 'installed'] as const,
   advisories: (cursor = '', limit = 50) =>
     [...registryKeys.all, 'advisories', cursor, limit] as const,
+  runtimeSyncDiagnostics: () => [...registryKeys.all, 'runtime-sync-diagnostics'] as const,
 };
 
 export const userFileKeys = {

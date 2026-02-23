@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import { QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
+import { createTestQueryClient } from '@/test/utils';
 
 vi.mock('@tanstack/react-router', () => ({
   createFileRoute: () => (config: { component: React.ComponentType }) => ({
@@ -8,16 +10,6 @@ vi.mock('@tanstack/react-router', () => ({
   }),
   Link: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
-
-vi.mock('@tanstack/react-query', async () => {
-  const actual = await vi.importActual<typeof import('@tanstack/react-query')>('@tanstack/react-query');
-  return {
-    ...actual,
-    useQueryClient: () => ({
-      invalidateQueries: vi.fn(),
-    }),
-  };
-});
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -107,12 +99,23 @@ vi.mock('@/hooks/useOrchestration', () => ({
   }),
 }));
 
+vi.mock('@/hooks/useRegistrySkills', () => ({
+  useRuntimeSyncDiagnostics: () => ({
+    data: null,
+  }),
+}));
+
 import { Route } from './index';
 
 describe('index route orchestration wizard', () => {
   it('opens guided assignment dialog from root route', () => {
     const DashboardComponent = (Route as unknown as { component: React.ComponentType }).component;
-    render(<DashboardComponent />);
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DashboardComponent />
+      </QueryClientProvider>
+    );
 
     expect(screen.getByText('Orchestration Board')).toBeInTheDocument();
     expect(screen.getByText('Idle Queue')).toBeInTheDocument();

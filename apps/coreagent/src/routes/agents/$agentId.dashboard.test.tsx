@@ -36,7 +36,6 @@ vi.mock("@/components/ui/chart-guardrail-outcomes", () => ({ ChartGuardrailOutco
 vi.mock("@/components/ui/chart-skill-trend-area", () => ({ ChartSkillTrendArea: () => <div>ChartSkillTrendArea</div> }));
 vi.mock("@/components/ui/chart-trait-state-radar", () => ({ ChartTraitStateRadar: () => <div>ChartTraitStateRadar</div> }));
 vi.mock("@/components/agent/personality-evolution", () => ({ PersonalityEvolution: () => <div>PersonalityEvolution</div> }));
-vi.mock("@/components/agent/orchestration-panel", () => ({ OrchestrationPanel: () => <div>OrchestrationPanel</div> }));
 
 import { Route } from "./$agentId.dashboard";
 
@@ -49,6 +48,5 @@ describe("dashboard route runtime", () => {
     expect(screen.getByText("ChartConfidenceCoverage")).toBeInTheDocument();
     expect(screen.getByText("ChartGuardrailOutcomes")).toBeInTheDocument();
     expect(screen.getByText("PersonalityEvolution")).toBeInTheDocument();
-    expect(screen.getByText("OrchestrationPanel")).toBeInTheDocument();
   });
 });

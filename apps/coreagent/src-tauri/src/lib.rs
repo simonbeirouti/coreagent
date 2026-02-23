@@ -20,6 +20,7 @@ pub mod memory_service;
 pub mod orchestration_service;
 pub mod perception_tracker;
 pub mod rig_runtime;
+pub mod runtime_sync_service;
 pub mod skills_registry_client;
 pub mod user_profile_service;
 pub mod vision_service;
@@ -49,6 +50,9 @@ use user_profile_service::UserProfileService;
 use serde::Serialize;
 use sea_orm::DatabaseConnection;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use skills_registry_client::{
     AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
     RegistryAssignResponse, RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails, RuntimeRunSummary,
@@ -63,12 +67,51 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 use tokio::time::sleep;
+use runtime_sync_service::{
+    RuntimeSyncAppState, RuntimeSyncDiagnostics, RuntimeSyncFreshness,
+    ensure_runtime_sync_state_schema, get_runtime_sync_diagnostics,
+    next_app_sleep_ms, next_control_sleep_ms, run_app_sync_tick, run_control_sync_tick,
+    trigger_runtime_sync, write_failure_state,
+};
+
+const HANDSHAKE_CACHE_TTL_MS: i64 = 2 * 60 * 1000;
+
+#[derive(Clone, Debug)]
+struct CachedRuntimeHandshake {
+    handshake: RuntimeHandshake,
+    cached_at_ms: i64,
+}
+
+#[derive(Default)]
+struct RuntimeHandshakeCacheState {
+    by_skill_version: Arc<RwLock<HashMap<String, CachedRuntimeHandshake>>>,
+}
+
+impl RuntimeHandshakeCacheState {
+    async fn get(&self, key: &str) -> Option<CachedRuntimeHandshake> {
+        self.by_skill_version.read().await.get(key).cloned()
+    }
+
+    async fn put(&self, key: String, entry: CachedRuntimeHandshake) {
+        self.by_skill_version.write().await.insert(key, entry);
+    }
+
+    async fn clear(&self) {
+        self.by_skill_version.write().await.clear();
+    }
+}
+
+fn runtime_handshake_cache_key(skill_id: &str, version: &str) -> String {
+    format!("{skill_id}::{version}")
+}
 
 async fn ensure_tool_enabled(
     db: &DatabaseConnection,
     agent_id: &str,
     implementation_key: &str,
     auth_state: &AuthState,
+    runtime_sync_state: &RuntimeSyncAppState,
+    handshake_cache: &RuntimeHandshakeCacheState,
 ) -> Result<(), String> {
     let agent_uuid =
         uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
@@ -83,7 +126,15 @@ async fn ensure_tool_enabled(
         if is_core_tool_key(implementation_key) {
             return Ok(());
         }
-        enforce_registry_runtime_gate(agent_id, implementation_key, auth_state).await
+        enforce_registry_runtime_gate(
+            db,
+            agent_id,
+            implementation_key,
+            auth_state,
+            runtime_sync_state,
+            handshake_cache,
+        )
+        .await
     } else {
         Err(format!(
             "Tool '{}' is disabled for this agent. Enable it from agent tools settings.",
@@ -149,6 +200,19 @@ fn is_not_found_runtime_error(error: &str) -> bool {
         || normalized.contains("unknown skill")
 }
 
+fn is_local_runtime_unavailable_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("local_docker")
+        || normalized.contains("local docker")
+        || normalized.contains("docker")
+        || normalized.contains("daemon")
+        || normalized.contains("connection refused")
+        || normalized.contains("connection reset")
+        || normalized.contains("is unavailable")
+        || normalized.contains("runner unavailable")
+        || normalized.contains("(503)")
+}
+
 fn validate_runtime_handshake_response(handshake: &RuntimeHandshake) -> Result<(), String> {
     if handshake.artifact.digest.trim().is_empty() {
         return Err("Registry runtime handshake missing artifact digest.".to_string());
@@ -193,10 +257,27 @@ fn validate_runtime_handshake_response(handshake: &RuntimeHandshake) -> Result<(
 }
 
 async fn enforce_registry_runtime_gate(
+    db: &DatabaseConnection,
     agent_id: &str,
     implementation_key: &str,
     auth_state: &AuthState,
+    runtime_sync_state: &RuntimeSyncAppState,
+    handshake_cache: &RuntimeHandshakeCacheState,
 ) -> Result<(), String> {
+    let diagnostics = get_runtime_sync_diagnostics(db, runtime_sync_state).await?;
+    if diagnostics.freshness == RuntimeSyncFreshness::HardStale.as_str() {
+        return Err(
+            "Registry-managed runtime execution is temporarily blocked: advisory sync is hard-stale (>10m). Retry after sync recovers."
+                .to_string(),
+        );
+    }
+    if diagnostics.freshness == RuntimeSyncFreshness::SoftStale.as_str() {
+        eprintln!(
+            "[RUNTIME_SYNC] soft-stale advisory state detected (agent_id={}, implementation_key={})",
+            agent_id, implementation_key
+        );
+    }
+
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(auth_state)?;
     let assigned = client.list_agent_skills(&token, agent_id).await?;
@@ -217,10 +298,43 @@ async fn enforce_registry_runtime_gate(
     let Some(version) = skill.pinned_version else {
         return Err("Skill runtime blocked: no pinned registry version found.".to_string());
     };
-    let handshake = client
-        .runtime_handshake(&token, &skill.skill_id, &version)
-        .await?;
-    validate_runtime_handshake_response(&handshake)
+
+    let cache_key = runtime_handshake_cache_key(&skill.skill_id, &version);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(cached) = handshake_cache.get(&cache_key).await {
+        let age_ms = now_ms.saturating_sub(cached.cached_at_ms);
+        if age_ms < HANDSHAKE_CACHE_TTL_MS {
+            return validate_runtime_handshake_response(&cached.handshake);
+        }
+    }
+
+    match client.runtime_handshake(&token, &skill.skill_id, &version).await {
+        Ok(handshake) => {
+            validate_runtime_handshake_response(&handshake)?;
+            handshake_cache
+                .put(
+                    cache_key,
+                    CachedRuntimeHandshake {
+                        handshake,
+                        cached_at_ms: now_ms,
+                    },
+                )
+                .await;
+            Ok(())
+        }
+        Err(error) => {
+            if diagnostics.freshness == RuntimeSyncFreshness::SoftStale.as_str() {
+                if let Some(cached) = handshake_cache.get(&cache_key).await {
+                    eprintln!(
+                        "[RUNTIME_GATE] handshake refresh failed in soft-stale mode; using cached handshake: {}",
+                        error
+                    );
+                    return validate_runtime_handshake_response(&cached.handshake);
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 fn execution_mode_from_preferences(preferences: &Value) -> RuntimeExecutionMode {
@@ -313,6 +427,8 @@ async fn run_direct_runtime_skill(
     let parsed_input = input.unwrap_or_else(|| serde_json::json!({}));
     let mut resolved_skill_id = skill_id.clone();
     let mut resolved_version = version.clone();
+    let mut effective_execution_mode = execution_mode;
+    let mut fallback_from: Option<RuntimeExecutionMode> = None;
     let base_run_input = CreateRuntimeRunInput {
         skill_id: resolved_skill_id.clone(),
         version: resolved_version.clone(),
@@ -356,13 +472,43 @@ async fn run_direct_runtime_skill(
                 )
                 .await?
         }
+        Err(error)
+            if execution_mode == RuntimeExecutionMode::LocalDocker
+                && is_local_runtime_unavailable_error(&error) =>
+        {
+            emit_progress(
+                format!(
+                    "Local Docker runtime unavailable; retrying in remote mode. Reason: {}",
+                    error
+                ),
+                None,
+                Some("running".to_string()),
+                0,
+            );
+            fallback_from = Some(RuntimeExecutionMode::LocalDocker);
+            effective_execution_mode = RuntimeExecutionMode::Remote;
+            client
+                .create_runtime_run(
+                    token,
+                    CreateRuntimeRunInput {
+                        execution_mode: RuntimeExecutionMode::Remote,
+                        ..base_run_input.clone()
+                    },
+                )
+                .await
+                .map_err(|remote_error| {
+                    format!(
+                        "Local Docker runtime unavailable ({error}); remote fallback failed: {remote_error}"
+                    )
+                })?
+        }
         Err(error) => return Err(error),
     };
 
     emit_progress(
         format!(
             "Runtime run job received (skillId={}, executionMode={:?}).",
-            resolved_skill_id, execution_mode
+            resolved_skill_id, effective_execution_mode
         ),
         Some(run.run_id.clone()),
         Some("running".to_string()),
@@ -422,7 +568,8 @@ async fn run_direct_runtime_skill(
         implementation_key,
         skill_id: resolved_skill_id,
         version: resolved_version,
-        execution_mode,
+        execution_mode: effective_execution_mode,
+        fallback_from,
         run_id: final_run.run_id,
         status: final_run.status,
         output: final_run.output,
@@ -504,6 +651,9 @@ async fn install_registry_skill(
     auto_update: Option<bool>,
     install_config: Option<serde_json::Value>,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryInstallResponse, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
@@ -512,17 +662,44 @@ async fn install_registry_skill(
         auto_update: auto_update.unwrap_or(true),
         install_config: install_config.unwrap_or_else(|| serde_json::json!({})),
     };
-    client.install_skill(&token, &skill_id, input).await
+    let response = client.install_skill(&token, &skill_id, input).await?;
+    handshake_cache.inner().clear().await;
+    if let Err(error) = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        "install_registry_skill",
+    )
+    .await
+    {
+        let _ = write_failure_state(&db, &error).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
 async fn uninstall_registry_skill(
     skill_id: String,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryUninstallResponse, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
-    client.uninstall_skill(&token, &skill_id).await
+    let response = client.uninstall_skill(&token, &skill_id).await?;
+    handshake_cache.inner().clear().await;
+    if let Err(error) = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        "uninstall_registry_skill",
+    )
+    .await
+    {
+        let _ = write_failure_state(&db, &error).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -530,10 +707,25 @@ async fn pin_registry_skill_version(
     skill_id: String,
     version: String,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryPinResponse, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
-    client.pin_skill_version(&token, &skill_id, version).await
+    let response = client.pin_skill_version(&token, &skill_id, version).await?;
+    handshake_cache.inner().clear().await;
+    if let Err(error) = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        "pin_registry_skill_version",
+    )
+    .await
+    {
+        let _ = write_failure_state(&db, &error).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -543,6 +735,9 @@ async fn assign_registry_skill(
     enabled: Option<bool>,
     config: Option<serde_json::Value>,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryAssignResponse, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
@@ -551,7 +746,19 @@ async fn assign_registry_skill(
         enabled: enabled.unwrap_or(true),
         config: config.unwrap_or_else(|| serde_json::json!({})),
     };
-    client.assign_skill(&token, &skill_id, input).await
+    let response = client.assign_skill(&token, &skill_id, input).await?;
+    handshake_cache.inner().clear().await;
+    if let Err(error) = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        "assign_registry_skill",
+    )
+    .await
+    {
+        let _ = write_failure_state(&db, &error).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -569,10 +776,27 @@ async fn sync_skill_advisories(
     cursor: Option<String>,
     limit: Option<i32>,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<AdvisoryFeedResponse, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
-    client.advisory_feed(&token, cursor, limit).await
+    let response = client.advisory_feed(&token, cursor, limit).await?;
+    if !response.data.is_empty() {
+        handshake_cache.inner().clear().await;
+    }
+    if let Err(error) = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        "sync_skill_advisories",
+    )
+    .await
+    {
+        let _ = write_failure_state(&db, &error).await;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -580,12 +804,86 @@ async fn validate_skill_runtime(
     skill_id: String,
     version: String,
     auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RuntimeHandshake, String> {
+    let diagnostics = get_runtime_sync_diagnostics(&db, runtime_sync_state.inner()).await?;
+    if diagnostics.freshness == RuntimeSyncFreshness::HardStale.as_str() {
+        return Err(
+            "Runtime validation blocked: advisory sync is hard-stale (>10m). Trigger sync and retry."
+                .to_string(),
+        );
+    }
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    let cache_key = runtime_handshake_cache_key(&skill_id, &version);
+    if let Some(cached) = handshake_cache.inner().get(&cache_key).await {
+        let age_ms = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(cached.cached_at_ms);
+        if age_ms < HANDSHAKE_CACHE_TTL_MS {
+            validate_runtime_handshake_response(&cached.handshake)?;
+            return Ok(cached.handshake);
+        }
+    }
     let handshake = client.runtime_handshake(&token, &skill_id, &version).await?;
     validate_runtime_handshake_response(&handshake)?;
+    handshake_cache
+        .inner()
+        .put(
+            cache_key,
+            CachedRuntimeHandshake {
+                handshake: handshake.clone(),
+                cached_at_ms: chrono::Utc::now().timestamp_millis(),
+            },
+        )
+        .await;
     Ok(handshake)
+}
+
+#[tauri::command]
+async fn get_runtime_sync_diagnostics_command(
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+) -> Result<RuntimeSyncDiagnostics, String> {
+    get_runtime_sync_diagnostics(&db, runtime_sync_state.inner()).await
+}
+
+#[tauri::command]
+async fn trigger_runtime_sync_command(
+    reason: Option<String>,
+    db: tauri::State<'_, DatabaseConnection>,
+    auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
+) -> Result<RuntimeSyncDiagnostics, String> {
+    let run = trigger_runtime_sync(
+        &db,
+        &auth_state,
+        runtime_sync_state.inner(),
+        reason
+            .as_deref()
+            .unwrap_or("manual_runtime_sync_trigger"),
+    )
+    .await
+    .inspect_err(|error| {
+        eprintln!("[RUNTIME_SYNC] immediate sync failed: {}", error);
+    })?;
+
+    if run.advisories_changed {
+        handshake_cache.inner().clear().await;
+    }
+    Ok(run.diagnostics)
+}
+
+#[tauri::command]
+fn set_runtime_sync_app_visibility(
+    is_foreground: bool,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+) -> Result<(), String> {
+    runtime_sync_state.set_foreground(is_foreground);
+    Ok(())
 }
 
 #[tauri::command]
@@ -596,9 +894,19 @@ async fn run_agent_runtime_tool(
     client_run_id: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     app: tauri::AppHandle,
 ) -> Result<DirectRuntimeToolRunResult, String> {
-    ensure_tool_enabled(&db, &agent_id, &implementation_key, auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        &implementation_key,
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
 
     let agent_uuid =
         uuid::Uuid::parse_str(&agent_id).map_err(|e| format!("Invalid agent ID: {}", e))?;
@@ -652,6 +960,21 @@ async fn run_agent_runtime_tool(
     )
     .await;
 
+    if result.is_ok() {
+        if let Ok(sync_result) = trigger_runtime_sync(
+            &db,
+            &auth_state,
+            runtime_sync_state.inner(),
+            "run_agent_runtime_tool",
+        )
+        .await
+        {
+            if sync_result.advisories_changed {
+                handshake_cache.inner().clear().await;
+            }
+        }
+    }
+
     if let (Err(error), Some(client_run_id)) = (&result, &client_run_id) {
         let _ = app.emit(
             "direct-runtime-tool-progress",
@@ -678,8 +1001,17 @@ async fn run_registry_skill_direct(
     client_run_id: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     app: tauri::AppHandle,
 ) -> Result<DirectRuntimeToolRunResult, String> {
+    let diagnostics = get_runtime_sync_diagnostics(&db, runtime_sync_state.inner()).await?;
+    if diagnostics.freshness == RuntimeSyncFreshness::HardStale.as_str() {
+        return Err(
+            "Registry-managed runtime execution is temporarily blocked: advisory sync is hard-stale (>10m). Retry after sync recovers."
+                .to_string(),
+        );
+    }
     let execution_mode = resolve_agent_execution_mode(&db, &agent_id, auth_state.inner()).await?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
     let client = SkillsRegistryClient::from_env()?;
@@ -715,6 +1047,21 @@ async fn run_registry_skill_direct(
         client_run_id.as_deref(),
     )
     .await;
+
+    if result.is_ok() {
+        if let Ok(sync_result) = trigger_runtime_sync(
+            &db,
+            &auth_state,
+            runtime_sync_state.inner(),
+            "run_registry_skill_direct",
+        )
+        .await
+        {
+            if sync_result.advisories_changed {
+                handshake_cache.inner().clear().await;
+            }
+        }
+    }
 
     if let (Err(error), Some(client_run_id)) = (&result, &client_run_id) {
         let _ = app.emit(
@@ -1027,10 +1374,20 @@ async fn capture_screenshot(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     ai_client: tauri::State<'_, AiClient>,
     _app: tauri::AppHandle,
 ) -> Result<ScreenshotResult, String> {
-    ensure_tool_enabled(&db, &agent_id, "vision_screenshot", auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        "vision_screenshot",
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
     let vision_service = VisionService::new(&ai_client);
     let result = vision_service.capture_screenshot().await?;
 
@@ -1075,9 +1432,19 @@ async fn analyze_image(
     prompt: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "vision_analysis", auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        "vision_analysis",
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
     let vision_service = VisionService::new(&ai_client);
     let analysis = vision_service
         .analyze_image_base64(&image_base64, prompt)
@@ -1098,8 +1465,18 @@ async fn start_recording(
     agent_id: String,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<(), String> {
-    ensure_tool_enabled(&db, &agent_id, "audio_transcription", auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        "audio_transcription",
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
     // Track usage when starting recording
     PerceptionTracker::track_usage(&db, &agent_id, "audio", "start_recording", None).await?;
 
@@ -1128,9 +1505,19 @@ async fn transcribe_audio(
     audio_base64: String,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "audio_transcription", auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        "audio_transcription",
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
     let audio_service = AudioService::new(&ai_client);
 
     // Simple transcription - audio upload/logging is handled by frontend
@@ -1182,9 +1569,19 @@ async fn text_to_speech(
     voice: Option<String>,
     db: tauri::State<'_, DatabaseConnection>,
     auth_state: tauri::State<'_, AuthState>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
     ai_client: tauri::State<'_, AiClient>,
 ) -> Result<String, String> {
-    ensure_tool_enabled(&db, &agent_id, "voice_synthesis", auth_state.inner()).await?;
+    ensure_tool_enabled(
+        &db,
+        &agent_id,
+        "voice_synthesis",
+        auth_state.inner(),
+        runtime_sync_state.inner(),
+        handshake_cache.inner(),
+    )
+    .await?;
     let audio_service = AudioService::new(&ai_client);
     let audio_base64 = audio_service.text_to_speech_base64(&text, voice).await?;
 
@@ -1291,6 +1688,7 @@ struct DirectRuntimeToolRunResult {
     skill_id: String,
     version: String,
     execution_mode: RuntimeExecutionMode,
+    fallback_from: Option<RuntimeExecutionMode>,
     run_id: String,
     status: String,
     output: Option<Value>,
@@ -2010,7 +2408,12 @@ pub fn run() {
     dotenv::dotenv().ok();
 
     tauri::Builder::default()
+        .manage(AuthState::new())
+        .manage(RuntimeSyncAppState::default())
+        .manage(RuntimeHandshakeCacheState::default())
         .setup(|app| {
+            let runtime_sync_state = app.state::<RuntimeSyncAppState>();
+            runtime_sync_state.set_foreground(true);
             // Initialize database connection at startup
             tauri::async_runtime::block_on(async {
                 match db::init_db().await {
@@ -2024,6 +2427,10 @@ pub fn run() {
                         {
                             eprintln!("[ORCHESTRATION] Startup recovery failed: {}", err);
                         }
+                        if let Err(err) = ensure_runtime_sync_state_schema(&db_conn).await {
+                            eprintln!("[RUNTIME_SYNC] Failed to ensure sync schema: {}", err);
+                        }
+                        app.manage(db_conn.clone());
                         let db_for_scheduler = db_conn.clone();
                         tauri::async_runtime::spawn(async move {
                             loop {
@@ -2036,7 +2443,79 @@ pub fn run() {
                                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                             }
                         });
-                        app.manage(db_conn);
+
+                        let app_handle_control = app.handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            loop {
+                                let auth_state = app_handle_control.state::<AuthState>();
+                                if auth_state.get_session().is_some() {
+                                    let db_state = app_handle_control.state::<DatabaseConnection>();
+                                    let runtime_state =
+                                        app_handle_control.state::<RuntimeSyncAppState>();
+                                    let handshake_cache =
+                                        app_handle_control.state::<RuntimeHandshakeCacheState>();
+                                    match run_control_sync_tick(
+                                        &db_state,
+                                        &auth_state,
+                                        runtime_state.inner(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(run) => {
+                                            if run.advisories_changed {
+                                                handshake_cache.inner().clear().await;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!(
+                                                "[RUNTIME_SYNC] control sync tick failed: {}",
+                                                error
+                                            );
+                                            let _ = write_failure_state(&db_state, &error).await;
+                                        }
+                                    }
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    next_control_sleep_ms(),
+                                ))
+                                .await;
+                            }
+                        });
+
+                        let app_handle_app = app.handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            loop {
+                                let auth_state = app_handle_app.state::<AuthState>();
+                                let runtime_state = app_handle_app.state::<RuntimeSyncAppState>();
+                                if auth_state.get_session().is_some() {
+                                    let db_state = app_handle_app.state::<DatabaseConnection>();
+                                    let handshake_cache =
+                                        app_handle_app.state::<RuntimeHandshakeCacheState>();
+                                    match run_app_sync_tick(
+                                        &db_state,
+                                        &auth_state,
+                                        runtime_state.inner(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(run) => {
+                                            if run.advisories_changed {
+                                                handshake_cache.inner().clear().await;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!("[RUNTIME_SYNC] app sync tick failed: {}", error);
+                                            let _ = write_failure_state(&db_state, &error).await;
+                                        }
+                                    }
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    next_app_sleep_ms(runtime_state.is_foreground()),
+                                ))
+                                .await;
+                            }
+                        });
+
                         println!("[APP] Database connection initialized successfully");
                     }
                     Err(e) => {
@@ -2062,7 +2541,6 @@ pub fn run() {
                 }
             })
         })
-        .manage(AuthState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -2083,6 +2561,9 @@ pub fn run() {
             list_agent_registry_skills,
             sync_skill_advisories,
             validate_skill_runtime,
+            get_runtime_sync_diagnostics_command,
+            trigger_runtime_sync_command,
+            set_runtime_sync_app_visibility,
             run_agent_runtime_tool,
             run_registry_skill_direct,
             create_agent,

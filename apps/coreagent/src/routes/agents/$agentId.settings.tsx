@@ -42,7 +42,6 @@ const PROVIDER_MODELS = {
   ],
   anthropic: [
     { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
-    { id: 'claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet' },
     { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
   ],
 };

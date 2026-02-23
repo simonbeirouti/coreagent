@@ -197,6 +197,7 @@ import { Route } from "./$agentId.chat";
 describe("chat route runtime", () => {
   beforeEach(() => {
     mocks.invoke.mockReset();
+    mocks.invoke.mockResolvedValue(undefined);
     mocks.listen.mockClear();
     mocks.sendMessageStreaming.mockReset();
     mocks.clearStreamingError.mockReset();
@@ -237,18 +238,8 @@ describe("chat route runtime", () => {
     expect(screen.getByText("5/32000")).toBeInTheDocument();
 
     fireEvent.change(composerInput, { target: { value: "/" } });
-    expect(screen.getByText("/screenshot")).toBeInTheDocument();
-    expect(screen.getByText("/coreagent.py.deep_analysis")).toBeInTheDocument();
-    expect(screen.getByText("/coreagent.py.weather_lookup")).toBeInTheDocument();
-    expect(screen.queryByText("/attachment_read")).not.toBeInTheDocument();
-    expect(screen.getAllByText("/coreagent.py.deep_analysis")).toHaveLength(1);
-
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /\/coreagent\.py\.deep_analysis/i,
-      })
-    );
-    expect((composerInput as HTMLInputElement).value).toBe("/coreagent.py.deep_analysis ");
+    expect((composerInput as HTMLInputElement).value).toBe("/");
+    expect(screen.queryByText("/screenshot")).not.toBeInTheDocument();
   });
 
   it("attaches selected file marker from attach button flow", async () => {
@@ -522,169 +513,6 @@ describe("chat route runtime", () => {
 
     expect(firstPayload?.content).toContain("[RuntimeToolContext]");
     expect(secondPayload?.content).toBe("run the deep analysis tool");
-  });
-
-  it("renders direct tool execution inside chat and then asks AI for follow-up", async () => {
-    mocks.invoke.mockResolvedValueOnce({
-      implementationKey: "coreagent.py.deep_analysis",
-      skillId: "skill.deep.analysis",
-      version: "1.0.0",
-      executionMode: "local_docker",
-      runId: "run-123",
-      status: "failed",
-      output: {},
-      error: { message: "Container exited with status 1" },
-      logMessages: [
-        "runtime run job received",
-        "runtime run job received",
-        "runtime run job failed",
-      ],
-    });
-
-    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
-    const queryClient = createTestQueryClient();
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ChatComponent />
-      </QueryClientProvider>
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
-    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
-    fireEvent.change(composerInput, { target: { value: "/coreagent.py.deep_analysis {}" } });
-    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
-
-    await waitFor(() => {
-      expect(screen.getByText(/deep analysis/i)).toBeInTheDocument();
-      expect(screen.getByText(/run completed with status failed/i)).toBeInTheDocument();
-    });
-
-    await waitFor(() => {
-      expect(mocks.sendMessageStreaming).toHaveBeenCalledTimes(1);
-    });
-
-    const payload = mocks.sendMessageStreaming.mock.calls[0]?.[0] as
-      | { content?: string }
-      | undefined;
-    expect(payload?.content).toContain("A direct runtime tool run has completed.");
-    expect(payload?.content).toContain("Tool: coreagent.py.deep_analysis");
-    expect(payload?.content).toContain("Status: failed");
-  });
-
-  it("maps raw slash-command text into schema-aware tool input envelope", async () => {
-    mocks.invoke.mockResolvedValueOnce({
-      implementationKey: "coreagent.py.deep_analysis",
-      skillId: "skill.deep.analysis",
-      version: "1.0.0",
-      executionMode: "local_docker",
-      runId: "run-123",
-      status: "succeeded",
-      output: {},
-      error: null,
-      logMessages: [],
-    });
-
-    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
-    const queryClient = createTestQueryClient();
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ChatComponent />
-      </QueryClientProvider>
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
-    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
-    fireEvent.change(composerInput, { target: { value: "/coreagent.py.deep_analysis analyze this csv" } });
-    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
-
-    await waitFor(() => {
-      expect(mocks.invoke).toHaveBeenCalledWith(
-        "run_agent_runtime_tool",
-        expect.objectContaining({
-          implementationKey: "coreagent.py.deep_analysis",
-          input: expect.objectContaining({
-            text: "analyze this csv",
-            query: "analyze this csv",
-            input: "analyze this csv",
-          }),
-        })
-      );
-    });
-  });
-
-  it("keeps direct tool timeline ordered by progress sequence", async () => {
-    let progressHandler:
-      | ((event: { payload: Record<string, unknown> }) => void)
-      | null = null;
-    (mocks.listen as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async (...args: unknown[]) => {
-      progressHandler = args[1] as (event: { payload: Record<string, unknown> }) => void;
-      return vi.fn();
-    });
-    const randomUuidSpy = vi
-      .spyOn(globalThis.crypto, "randomUUID")
-      .mockReturnValue("11111111-1111-1111-1111-111111111111");
-    mocks.invoke.mockImplementationOnce(async () => {
-      progressHandler?.({
-        payload: {
-          clientRunId: "11111111-1111-1111-1111-111111111111",
-          implementationKey: "coreagent.py.deep_analysis",
-          runId: "run-123",
-          status: "running",
-          message: "step two",
-          sequence: 2,
-          timestampMs: 2000,
-        },
-      });
-      progressHandler?.({
-        payload: {
-          clientRunId: "11111111-1111-1111-1111-111111111111",
-          implementationKey: "coreagent.py.deep_analysis",
-          runId: "run-123",
-          status: "running",
-          message: "step one",
-          sequence: 1,
-          timestampMs: 1000,
-        },
-      });
-      return {
-        implementationKey: "coreagent.py.deep_analysis",
-        skillId: "skill.deep.analysis",
-        version: "1.0.0",
-        executionMode: "local_docker",
-        runId: "run-123",
-        status: "succeeded",
-        output: {},
-        error: null,
-        logMessages: ["step one", "step two"],
-      };
-    });
-
-    const ChatComponent = (Route as unknown as { component: React.ComponentType }).component;
-    const queryClient = createTestQueryClient();
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ChatComponent />
-      </QueryClientProvider>
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "New Conversation" }));
-    const composerInput = screen.getByPlaceholderText("Message Test Agent...");
-    fireEvent.change(composerInput, { target: { value: "/coreagent.py.deep_analysis {}" } });
-    fireEvent.keyPress(composerInput, { key: "Enter", code: "Enter", charCode: 13 });
-
-    await waitFor(() => {
-      expect(screen.getByText(/run completed with status succeeded/i)).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /deep analysis/i }));
-    const stepOne = await screen.findByText("step one");
-    const stepTwo = await screen.findByText("step two");
-    expect(stepOne.compareDocumentPosition(stepTwo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getAllByText("step one")).toHaveLength(1);
-    expect(screen.getAllByText("step two")).toHaveLength(1);
-    expect(mocks.scrollIntoView).toHaveBeenCalled();
-
-    randomUuidSpy.mockRestore();
   });
 
   it("hides persisted direct tool context payload messages", async () => {

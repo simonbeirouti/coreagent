@@ -1,6 +1,7 @@
 //! SeaORM entities generated for CoreAgent database schema
 
 pub mod abilities;
+pub mod advisory_sync_state;
 pub mod agent_abilities;
 pub mod agents;
 pub mod conversations;
