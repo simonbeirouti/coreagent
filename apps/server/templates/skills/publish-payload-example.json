@@ -1,0 +1,31 @@
+{
+  "skillId": "coreagent.example.skill",
+  "implementationKey": "coreagent.example.skill",
+  "name": "Example Skill",
+  "description": "Dry-run and publish payload example.",
+  "riskLevel": "moderate",
+  "source": "coreagent_registry",
+  "version": "1.0.0",
+  "runtime": "command",
+  "entrypoint": "scripts/run.sh",
+  "artifactDigest": "replace-with-uploaded-sha256-hex",
+  "permissionProfileId": "read_only",
+  "manifest": {},
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string" }
+    },
+    "required": ["query"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "result": { "type": "string" }
+    },
+    "required": ["result"]
+  },
+  "healthcheck": {},
+  "heartbeatPolicy": {},
+  "permissions": []
+}

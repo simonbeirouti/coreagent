@@ -1,9 +1,11 @@
 use crate::auth::AuthState;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use tokio::time::{sleep, Duration};
 
 const DEFAULT_REGISTRY_BASE_URL: &str = "http://127.0.0.1:4010";
 const DEFAULT_REGISTRY_TIMEOUT_MS: u64 = 8_000;
+const DEFAULT_REGISTRY_PREFLIGHT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_ADVISORY_LIMIT: i32 = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,9 @@ pub struct RegistrySkillVersion {
     pub compatibility_min_app_version: Option<String>,
     pub compatibility_max_app_version: Option<String>,
     pub policy_status: Option<String>,
+    pub review_status: Option<String>,
+    pub trust_badge: Option<bool>,
+    pub trust_badge_metadata: Option<serde_json::Value>,
     pub revoked_at: Option<String>,
     pub permissions: Option<Vec<RegistryPermission>>,
 }
@@ -39,6 +44,123 @@ pub struct RegistrySkillSummary {
     pub description: String,
     pub latest_version: String,
     pub risk: String,
+    pub trusted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionProfilePermission {
+    pub permission_key: String,
+    pub required: bool,
+    pub risk_level: String,
+    pub permission_scope: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionProfile {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub permissions: Vec<PermissionProfilePermission>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminArtifactUploadInput {
+    pub artifact_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminArtifactUploadResponse {
+    pub digest: String,
+    pub artifact_uri: String,
+    pub size_bytes: i64,
+    pub stored: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPublishSkillInput {
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPublishSkillResponse {
+    pub skill_id: String,
+    pub version: String,
+    pub digest: String,
+    pub artifact_uri: String,
+    pub implementation_key: String,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub published: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSkillPreflightInput {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_input: Option<String>,
+    pub script_artifact_digest: String,
+    pub example_artifact_digest: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSkillPreflightResponse {
+    pub run_id: String,
+    pub script_artifact_digest: String,
+    pub example_artifact_digest: String,
+    pub mode: String,
+    pub status: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub started_at: String,
+    pub finished_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSkillPreflightStatusResponse {
+    pub run_id: String,
+    pub script_artifact_digest: String,
+    pub example_artifact_digest: String,
+    pub mode: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSkillReviewInput {
+    pub review_status: String,
+    pub summary: String,
+    pub trusted_badge_eligible: bool,
+    pub checks: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSkillReviewResponse {
+    pub skill_id: String,
+    pub version: String,
+    pub review_status: String,
+    pub trust_badge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,10 +480,19 @@ impl SkillsRegistryClient {
             .ok_or_else(|| "No authenticated session found for registry request.".to_string())
     }
 
+    pub fn resolve_admin_token() -> Result<String, String> {
+        std::env::var("ADMIN_API_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "ADMIN_API_TOKEN is required for admin skill operations.".to_string())
+    }
+
     pub async fn list_skills(
         &self,
         access_token: &str,
         query: Option<String>,
+        trusted_only: Option<bool>,
     ) -> Result<Vec<RegistrySkillSummary>, String> {
         let mut request = self
             .http
@@ -373,6 +504,126 @@ impl SkillsRegistryClient {
                 request = request.query(&[("query", trimmed)]);
             }
         }
+        if trusted_only.unwrap_or(false) {
+            request = request.query(&[("trustedOnly", "true")]);
+        }
+        self.send_data(request).await
+    }
+
+    pub async fn list_permission_profiles(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<PermissionProfile>, String> {
+        let request = self
+            .http
+            .get(self.url("/v1/permissions/profiles"))
+            .bearer_auth(access_token);
+        self.send_data(request).await
+    }
+
+    pub async fn upload_admin_artifact(
+        &self,
+        admin_token: &str,
+        input: AdminArtifactUploadInput,
+    ) -> Result<AdminArtifactUploadResponse, String> {
+        let request = self
+            .http
+            .post(self.url("/v1/admin/artifacts/upload"))
+            .header("x-admin-token", admin_token)
+            .json(&input);
+        self.send_data(request).await
+    }
+
+    pub async fn publish_admin_skill(
+        &self,
+        admin_token: &str,
+        payload: serde_json::Value,
+    ) -> Result<AdminPublishSkillResponse, String> {
+        let request = self
+            .http
+            .post(self.url("/v1/admin/skills/publish"))
+            .header("x-admin-token", admin_token)
+            .json(&payload);
+        self.send_data(request).await
+    }
+
+    pub async fn dry_run_publish_admin_skill(
+        &self,
+        admin_token: &str,
+        payload: serde_json::Value,
+    ) -> Result<AdminPublishSkillResponse, String> {
+        let request = self
+            .http
+            .post(self.url("/v1/admin/skills/publish/dry-run"))
+            .header("x-admin-token", admin_token)
+            .json(&payload);
+        self.send_data(request).await
+    }
+
+    pub async fn preflight_admin_skill(
+        &self,
+        admin_token: &str,
+        input: AdminSkillPreflightInput,
+    ) -> Result<AdminSkillPreflightResponse, String> {
+        let preflight_timeout_ms = std::env::var("SKILLS_REGISTRY_PREFLIGHT_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_REGISTRY_PREFLIGHT_TIMEOUT_MS);
+        let request = self
+            .http
+            .post(self.url("/v1/admin/skills/preflight"))
+            .header("x-admin-token", admin_token)
+            .timeout(std::time::Duration::from_millis(preflight_timeout_ms))
+            .json(&input);
+        self.send_data(request).await
+    }
+
+    pub async fn start_preflight_admin_skill(
+        &self,
+        admin_token: &str,
+        input: AdminSkillPreflightInput,
+    ) -> Result<AdminSkillPreflightStatusResponse, String> {
+        let preflight_timeout_ms = std::env::var("SKILLS_REGISTRY_PREFLIGHT_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_REGISTRY_PREFLIGHT_TIMEOUT_MS);
+        let request = self
+            .http
+            .post(self.url("/v1/admin/skills/preflight/start"))
+            .header("x-admin-token", admin_token)
+            .timeout(std::time::Duration::from_millis(preflight_timeout_ms))
+            .json(&input);
+        self.send_data(request).await
+    }
+
+    pub async fn get_preflight_admin_skill(
+        &self,
+        admin_token: &str,
+        run_id: &str,
+    ) -> Result<AdminSkillPreflightStatusResponse, String> {
+        let request = self
+            .http
+            .get(self.url(&format!("/v1/admin/skills/preflight/{run_id}")))
+            .header("x-admin-token", admin_token);
+        self.send_data(request).await
+    }
+
+    pub async fn review_admin_skill(
+        &self,
+        admin_token: &str,
+        skill_id: &str,
+        version: &str,
+        input: AdminSkillReviewInput,
+    ) -> Result<AdminSkillReviewResponse, String> {
+        let request = self
+            .http
+            .post(self.url(&format!(
+                "/v1/admin/skills/{skill_id}/versions/{version}/review"
+            )))
+            .header("x-admin-token", admin_token)
+            .json(&input);
         self.send_data(request).await
     }
 
@@ -575,10 +826,28 @@ impl SkillsRegistryClient {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("Registry request failed: {e}"))?;
+        const MAX_TRANSPORT_RETRIES: usize = 2;
+        let mut attempts = 0usize;
+        let mut request_builder = request;
+        let response = loop {
+            let retry_builder = request_builder.try_clone();
+            match request_builder.send().await {
+                Ok(response) => break response,
+                Err(error) => {
+                    let is_transient = error.is_connect() || error.is_timeout();
+                    if is_transient && attempts < MAX_TRANSPORT_RETRIES {
+                        if let Some(next_builder) = retry_builder {
+                            attempts += 1;
+                            let backoff_ms = 200u64 * attempts as u64;
+                            sleep(Duration::from_millis(backoff_ms)).await;
+                            request_builder = next_builder;
+                            continue;
+                        }
+                    }
+                    return Err(format!("Registry request failed: {error}"));
+                }
+            }
+        };
         if !response.status().is_success() {
             return Err(Self::map_error_response(response.status(), response).await);
         }

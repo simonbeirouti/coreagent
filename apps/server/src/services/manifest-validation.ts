@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 import { compareSemver, isValidSemver } from "./semver.js";
+import { resolvePermissionProfile } from "./permission-profiles.js";
 
 const runtimeSchema = z.enum(["command", "http", "wasm"]);
 const riskLevelSchema = z.enum(["low", "moderate", "high"]);
@@ -68,6 +69,7 @@ export type PublishValidationInput = {
   heartbeatPolicy: Record<string, unknown>;
   compatibilityMinAppVersion?: string;
   compatibilityMaxAppVersion?: string;
+  permissionProfileId?: string;
   permissions: PublishPermissionInput[];
   appRuntimeVersion?: string;
 };
@@ -77,6 +79,7 @@ export type ManifestValidationResult = {
   normalizedPermissions: PublishPermissionInput[];
   compatibilityMinAppVersion: string | null;
   compatibilityMaxAppVersion: string | null;
+  appliedPermissionProfileId: string | null;
 };
 
 export class PublishValidationError extends Error {
@@ -183,7 +186,8 @@ function ensureSemverRangeIsValid(
 
 function normalizePermissions(
   requestPermissions: PublishPermissionInput[],
-  manifestPermissions: z.infer<typeof manifestPermissionSchema>[]
+  manifestPermissions: z.infer<typeof manifestPermissionSchema>[],
+  permissionProfileId?: string
 ): PublishPermissionInput[] {
   if (requestPermissions.length === 0 && manifestPermissions.length > 0) {
     return manifestPermissions.map((permission) => ({
@@ -205,7 +209,72 @@ function normalizePermissions(
     }
   }
 
+  if (requestPermissions.length === 0 && manifestPermissions.length === 0 && permissionProfileId) {
+    const profile = resolvePermissionProfile(permissionProfileId);
+    if (!profile) {
+      throw new PublishValidationError(400, `Unknown permission profile '${permissionProfileId}'.`);
+    }
+    return profile.permissions.map((permission) => permissionSchema.parse(permission));
+  }
+
   return requestPermissions.map((permission) => permissionSchema.parse(permission));
+}
+
+function mapOpenClawManifest(rawManifest: Record<string, unknown>): Record<string, unknown> {
+  const openclaw = rawManifest.openclaw;
+  if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
+    return rawManifest;
+  }
+
+  const normalized = { ...rawManifest };
+  const openclawObject = openclaw as Record<string, unknown>;
+  const supportedFields = new Set([
+    "tool_name",
+    "tool_description",
+    "tool_runtime",
+    "tool_entrypoint",
+    "tool_permissions",
+    "min_app_version",
+    "max_app_version"
+  ]);
+  const unsupportedField = Object.keys(openclawObject).find((key) => !supportedFields.has(key));
+  if (unsupportedField) {
+    throw new PublishValidationError(
+      400,
+      `Unsupported OpenClaw metadata field '${unsupportedField}'. See apps/coreagent/docs/platform/openclaw-compatibility-mapping.md.`
+    );
+  }
+
+  if (typeof openclawObject.tool_name === "string") {
+    normalized.name = openclawObject.tool_name;
+  }
+  if (typeof openclawObject.tool_description === "string") {
+    normalized.description = openclawObject.tool_description;
+  }
+  if (typeof openclawObject.tool_runtime === "string") {
+    normalized.runtime = openclawObject.tool_runtime;
+  }
+  if (typeof openclawObject.tool_entrypoint === "string") {
+    normalized.entrypoint = openclawObject.tool_entrypoint;
+  }
+  if (Array.isArray(openclawObject.tool_permissions)) {
+    normalized.permissions = openclawObject.tool_permissions;
+  }
+
+  const compatibility = {
+    ...(normalized.compatibility && typeof normalized.compatibility === "object"
+      ? (normalized.compatibility as Record<string, unknown>)
+      : {})
+  };
+  if (typeof openclawObject.min_app_version === "string") {
+    compatibility.min_app_version = openclawObject.min_app_version;
+  }
+  if (typeof openclawObject.max_app_version === "string") {
+    compatibility.max_app_version = openclawObject.max_app_version;
+  }
+  normalized.compatibility = compatibility;
+  delete normalized.openclaw;
+  return normalized;
 }
 
 function resolveCompatibility(
@@ -280,7 +349,7 @@ export function validateAndNormalizePublishManifest(
     throw new PublishValidationError(400, "version must be a semver value.");
   }
 
-  const rawManifest = input.manifest;
+  const rawManifest = mapOpenClawManifest(input.manifest);
   ensureNoForbiddenManifestFields(rawManifest);
   const parsedManifest = manifestSchema.parse({
     ...rawManifest,
@@ -317,7 +386,14 @@ export function validateAndNormalizePublishManifest(
 
   const compatibility = resolveCompatibility(input, parsedManifest.compatibility);
   ensureSemverRangeIsValid(compatibility.minVersion, compatibility.maxVersion, input.appRuntimeVersion);
-  const permissions = normalizePermissions(input.permissions, parsedManifest.permissions);
+  const manifestPermissionProfileId = (rawManifest.permission_profile ??
+    rawManifest.permissionProfileId) as string | undefined;
+  const selectedPermissionProfile = input.permissionProfileId ?? manifestPermissionProfileId;
+  const permissions = normalizePermissions(
+    input.permissions,
+    parsedManifest.permissions,
+    selectedPermissionProfile
+  );
 
   return {
     normalizedManifest: buildCanonicalManifest(
@@ -334,6 +410,10 @@ export function validateAndNormalizePublishManifest(
     ),
     normalizedPermissions: permissions,
     compatibilityMinAppVersion: compatibility.minVersion,
-    compatibilityMaxAppVersion: compatibility.maxVersion
+    compatibilityMaxAppVersion: compatibility.maxVersion,
+    appliedPermissionProfileId:
+      input.permissions.length === 0 && parsedManifest.permissions.length === 0
+        ? selectedPermissionProfile ?? null
+        : null
   };
 }

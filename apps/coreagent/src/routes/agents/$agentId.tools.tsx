@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/dialog';
 import { Pencil } from 'lucide-react';
 import { toast } from 'sonner';
+import { TrustBadge } from '@/components/skills/trust-badge';
 
 const categoryOrder = ['memory', 'perception', 'communication', 'automation', 'productivity'];
 const AVAILABLE_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const;
@@ -523,9 +524,12 @@ function AgentToolsPage() {
                   <CardHeader>
                     <div className="flex items-start justify-between gap-2">
                       <CardTitle className="text-base">{skill.name}</CardTitle>
-                      <Badge variant="outline" className="capitalize">
-                        {skill.risk}
-                      </Badge>
+                      <div className="flex gap-1">
+                        <Badge variant="outline" className="capitalize">
+                          {skill.risk}
+                        </Badge>
+                        <TrustBadge trusted={skill.trusted} />
+                      </div>
                     </div>
                     <CardDescription className="line-clamp-3">{skill.description}</CardDescription>
                     <p className="text-xs text-muted-foreground">Latest: {skill.latestVersion}</p>

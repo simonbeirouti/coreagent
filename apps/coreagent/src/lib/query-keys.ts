@@ -74,6 +74,7 @@ export const orchestrationKeys = {
 export const registryKeys = {
   all: ['registry'] as const,
   skills: (query = '') => [...registryKeys.all, 'skills', query] as const,
+  trustedSkills: (query = '') => [...registryKeys.all, 'skills', 'trusted', query] as const,
   skill: (skillId: string) => [...registryKeys.all, 'skill', skillId] as const,
   skillVersion: (skillId: string, version: string) =>
     [...registryKeys.all, 'skill-version', skillId, version] as const,
@@ -81,6 +82,9 @@ export const registryKeys = {
   advisories: (cursor = '', limit = 50) =>
     [...registryKeys.all, 'advisories', cursor, limit] as const,
   runtimeSyncDiagnostics: () => [...registryKeys.all, 'runtime-sync-diagnostics'] as const,
+  permissionProfiles: () => [...registryKeys.all, 'permission-profiles'] as const,
+  publishDryRun: () => [...registryKeys.all, 'publish-dry-run'] as const,
+  publishMutation: () => [...registryKeys.all, 'publish-mutation'] as const,
 };
 
 export const userFileKeys = {

@@ -119,6 +119,39 @@ pnpm build
 - Manual slash/direct tool run UI path has been removed from chat in favor of automatic model tool calling.
 - Runtime tool-run timeline now uses accordion entries directly without acceptance-message cards.
 
+## Current Delivery Update (2026-02-24)
+
+- Skills creation flow is now available on a global page (`/skills/create`) with simplified inputs:
+  - title
+  - script file
+  - example input file
+- Docker preflight is now publish-gated for command runtime skills.
+- Preflight runtime selection is dynamic and script-driven:
+  - shebang/heuristic runtime detection
+  - one-time runtime-missing remap retry
+- Preflight now accepts non-JSON examples (for example CSV/text) via normalized input wrapping to match script contracts.
+- Skills create view now includes:
+  - live preflight terminal output (start + poll preflight lifecycle)
+  - separate script/tool response output panel
+- Publish flow hardening updates:
+  - optional field payload mapping fixed (no nullable payload schema violations)
+  - transient registry request retry handling in Tauri client
+  - digest uniqueness conflicts now return explicit `409` with actionable message
+
+## Current Delivery Update (2026-02-24, PRD 4-7 Audit)
+
+- Skills interaction completeness (section 4) is **partially complete**:
+  - unassign default behavior is soft-disable
+  - baseline lifecycle/source/disabled-reason state is surfaced in tools UI
+  - richer failure-state UX and a dedicated diagnostics panel (including force-disabled count) are still pending
+- Orchestration capability controls (section 5) are **partially complete**:
+  - capability prechecks are in place for `record_delegation`
+  - equivalent enforcement is still pending for delegation creation and reassignment paths
+- Test and release gates (section 6) are **partially complete**:
+  - baseline metrics and targeted policy/lifecycle/security test coverage are present
+  - handshake/advisory propagation metrics plus full resilience and security gate coverage are still pending
+- Skills graph MVP (section 7) remains **not started** (no graph route/module/persistence/API delivered yet).
+
 ## Next Validation Steps
 
 1. Start services:

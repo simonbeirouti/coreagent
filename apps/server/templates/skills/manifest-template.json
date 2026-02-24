@@ -1,0 +1,28 @@
+{
+  "skill_id": "coreagent.example.skill",
+  "name": "Example Skill",
+  "version": "1.0.0",
+  "description": "Example skill manifest template.",
+  "runtime": "command",
+  "entrypoint": "scripts/run.sh",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string" }
+    },
+    "required": ["query"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "result": { "type": "string" }
+    },
+    "required": ["result"]
+  },
+  "permissions": [],
+  "compatibility": {
+    "min_app_version": "1.0.0"
+  },
+  "healthcheck": {},
+  "heartbeat_policy": {}
+}

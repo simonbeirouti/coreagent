@@ -6,6 +6,7 @@ import {
   Bot,
   Home,
   FileText,
+  Wrench,
   BookOpen,
   Settings
 } from "lucide-react"
@@ -46,6 +47,11 @@ const data = {
       title: "Files",
       url: "/files",
       icon: FileText,
+    },
+    {
+      title: "Skills",
+      url: "/skills/create",
+      icon: Wrench,
     }
   ],
   secondaryItems: [

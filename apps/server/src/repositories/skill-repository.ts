@@ -7,7 +7,7 @@ import type {
 } from "../domain/skill.js";
 
 export interface SkillRepository {
-  listSkills(query?: string): Promise<SkillSummary[]>;
+  listSkills(query?: string, options?: { trustedOnly?: boolean }): Promise<SkillSummary[]>;
   getSkill(skillId: string): Promise<SkillDetails | null>;
   getSkillVersion(skillId: string, version: string): Promise<SkillVersion | null>;
   listAdvisories(): Promise<SkillAdvisory[]>;
@@ -34,7 +34,7 @@ const SKILLS: SkillDetails[] = [
 const ADVISORIES: SkillAdvisory[] = [];
 
 export class InMemorySkillRepository implements SkillRepository {
-  async listSkills(query?: string): Promise<SkillSummary[]> {
+  async listSkills(query?: string, options?: { trustedOnly?: boolean }): Promise<SkillSummary[]> {
     const filtered = query
       ? SKILLS.filter((skill) => {
           const lowerQuery = query.toLowerCase();
@@ -46,13 +46,18 @@ export class InMemorySkillRepository implements SkillRepository {
         })
       : SKILLS;
 
-    return filtered.map((skill) => ({
+    const mapped = filtered.map((skill) => ({
       skillId: skill.skillId,
       name: skill.name,
       description: skill.description,
       latestVersion: skill.latestVersion,
-      risk: skill.risk
+      risk: skill.risk,
+      trusted: false
     }));
+    if (options?.trustedOnly) {
+      return mapped.filter((skill) => skill.trusted);
+    }
+    return mapped;
   }
 
   async getSkill(skillId: string): Promise<SkillDetails | null> {

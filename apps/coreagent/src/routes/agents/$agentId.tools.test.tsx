@@ -7,6 +7,7 @@ vi.mock('@tanstack/react-router', () => ({
     component: config.component,
     useParams: () => ({ agentId: 'agent-1' }),
   }),
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
 }));
 
 vi.mock('@/hooks/useAbilities', () => ({

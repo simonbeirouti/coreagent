@@ -65,4 +65,34 @@ describe("validateAndNormalizePublishManifest", () => {
       })
     ).toThrowError(PublishValidationError);
   });
+
+  it("applies permission profile defaults when explicit permissions are omitted", () => {
+    const result = validateAndNormalizePublishManifest({
+      ...baseInput(),
+      permissionProfileId: "read_only"
+    });
+
+    expect(result.appliedPermissionProfileId).toBe("read_only");
+    expect(result.normalizedPermissions[0]?.permissionKey).toBe("filesystem.read");
+  });
+
+  it("maps supported OpenClaw metadata fields", () => {
+    const result = validateAndNormalizePublishManifest({
+      ...baseInput(),
+      manifest: {
+        openclaw: {
+          tool_runtime: "command",
+          tool_entrypoint: "scripts/run.sh",
+          min_app_version: "1.0.0"
+        }
+      }
+    });
+    expect(result.normalizedManifest).toMatchObject({
+      runtime: "command",
+      entrypoint: "scripts/run.sh",
+      compatibility: {
+        min_app_version: "1.0.0"
+      }
+    });
+  });
 });

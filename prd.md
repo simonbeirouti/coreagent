@@ -1,8 +1,8 @@
 # CoreAgent Unified Delivery PRD
 
 ## Document Status
-- Version: 5.8
-- Last Updated: 2026-02-23
+- Version: 5.9
+- Last Updated: 2026-02-24
 - Owner: CoreAgent Product + Platform Engineering
 - Scope: Single source of truth for skills registry, tools/runtime integration, skills graph MVP, and next-iteration orchestration + automation
 
@@ -34,6 +34,27 @@
   - Anthropic deprecated model compatibility hardened via normalization/fallback for unavailable model IDs.
   - Runtime-tool response streaming restored so final assistant output arrives incrementally instead of one buffered chunk.
   - Chat tool timeline simplified: run entries render as accordions and acceptance-message cards are removed.
+
+## Status Update (2026-02-24)
+
+### Skill Creation + Publish Flow Completion (Phase)
+- Completed skill creation flow on global route (`/skills/create`) with simplified authoring inputs:
+  - title
+  - script file
+  - example input file
+- Completed Docker preflight gate before publish for command runtime skills.
+- Completed dynamic runtime resolution for preflight execution:
+  - shebang/heuristic detection from uploaded script
+  - one-time runtime-missing remap retry (`LOCAL_RUNTIME_MISSING:*`)
+- Completed preflight input normalization so CSV/text examples can execute through JSON-based script contracts.
+- Completed live preflight run lifecycle support:
+  - start preflight + poll run status/logs
+  - streaming-style terminal output updates in `skills.create`
+- Completed tool response output panel in `skills.create` (script response surfaced separately from terminal metadata).
+- Completed publish flow hardening:
+  - payload optional-field nullability fixes
+  - transient registry transport retry handling
+  - digest uniqueness conflict surfaced as explicit `409` with actionable message
 
 ## Immediate Runtime Todo List
 - [ ] Complete remote runner integration end-to-end (parity with local Docker execution path and diagnostics surface).
@@ -355,38 +376,52 @@ This checklist is the detailed tracker and is ordered by importance and implemen
 - [x] Add stronger runtime handshake cache strategy and invalidation.
 
 ### 3. Skill/Tool Creation Flow Quality
-- [ ] Provide canonical "skill authoring kit":
+- [x] Provide canonical "skill authoring kit":
   - markdown starter templates
   - manifest template + schema examples
   - local validation command
   - publish dry-run command
-- [ ] Add dual-lane creation UX: guided interface flow + artifact upload flow (shared publish backend contract).
-- [ ] Add curated permission profiles for common safe tool classes.
-- [ ] Add documented compatibility mapping for OpenClaw-style skill metadata.
-- [ ] Add trusted-skill review pipeline + catalog trust badge:
+- [x] Add dual-lane creation UX: guided interface flow + artifact upload flow (shared publish backend contract).
+- [x] Add curated permission profiles for common safe tool classes.
+- [x] Add documented compatibility mapping for OpenClaw-style skill metadata.
+- [x] Add trusted-skill review pipeline + catalog trust badge:
   - reviewed code + security tests + reliability checks required
   - only trusted-badge skills are eligible for recommended placement
 
 ### 4. Skills Interaction Completeness
 - [ ] Add explicit "unassign" API/command semantics:
-  - default action is soft-disable
-  - hard-remove is explicit and reserved for cleanup/security
+  - [x] default action is soft-disable
+  - [ ] hard-remove is explicit and reserved for cleanup/security
 - [ ] Add richer state feedback in UI for install/assign/validation failures.
+  - [x] baseline lifecycle/source/disabled-reason state is surfaced in tools UI
+  - [ ] richer install/assign/validation error states with actionable remediation remain
 - [ ] Add registry diagnostics panel (connectivity, last sync, force-disabled count).
+  - [x] connectivity/last-sync diagnostics status is partially surfaced through existing status views
+  - [ ] dedicated registry diagnostics panel with force-disabled count remains
 
 ### 5. Orchestration Capability Controls
 - [ ] Add orchestration capability prechecks for required ability keys on delegation and reassignment paths.
+  - [x] precheck enforcement exists in `record_delegation`
+  - [ ] enforce the same prechecks in `create_agent_delegation`
+  - [ ] enforce the same prechecks in `reassign_task`
 
 ### 6. Test And Release Gates
 - [ ] Add observability metrics for install/assign/handshake/advisory propagation and blocked executions.
+  - [x] baseline install/assign/runtime telemetry is present
+  - [ ] handshake/advisory propagation and blocked-execution metrics remain
 - [ ] Add unit tests for handshake decision logic and permission broker policy.
+  - [x] permission broker policy unit coverage exists
+  - [ ] handshake decision matrix unit coverage remains
 - [ ] Add integration tests for full lifecycle:
+  - [x] publish/install/assign integration coverage exists
   - publish -> install -> assign -> runtime validate -> invoke
   - revocation -> advisory sync -> force-disable
 - [ ] Add resilience tests:
+  - [x] security/resilience suite foundation exists
   - registry unavailable during install/sync
   - advisory sync recovery behavior
 - [ ] Add security checks:
+  - [x] route auth/publish policy security coverage exists
   - token redaction
   - permission escalation attempts
 

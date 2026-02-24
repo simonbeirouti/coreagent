@@ -9,6 +9,7 @@ export interface RegistrySkillSummary {
   description: string;
   latestVersion: string;
   risk: 'low' | 'moderate' | 'high' | string;
+  trusted?: boolean;
 }
 
 export interface RegistrySkillVersion {
@@ -21,6 +22,9 @@ export interface RegistrySkillVersion {
   compatibilityMinAppVersion?: string | null;
   compatibilityMaxAppVersion?: string | null;
   policyStatus?: 'pending' | 'approved' | 'rejected' | 'revoked' | string;
+  reviewStatus?: 'not_submitted' | 'in_review' | 'approved' | 'rejected' | string;
+  trustBadge?: boolean;
+  trustBadgeMetadata?: Record<string, unknown>;
   revokedAt?: string | null;
 }
 
@@ -127,6 +131,15 @@ export function useRegistrySkills(query?: string) {
     queryKey: registryKeys.skills(query ?? ''),
     queryFn: async (): Promise<RegistrySkillSummary[]> =>
       invoke('list_registry_skills', { query: query?.trim() || null }),
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useTrustedRegistrySkills(query?: string) {
+  return useQuery({
+    queryKey: registryKeys.trustedSkills(query ?? ''),
+    queryFn: async (): Promise<RegistrySkillSummary[]> =>
+      invoke('list_registry_skills', { query: query?.trim() || null, trustedOnly: true }),
     ...cacheFirstStaticQueryPolicy,
   });
 }

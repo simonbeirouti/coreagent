@@ -16,6 +16,7 @@ type SkillSummaryRow = {
   description: string;
   latestVersion: string | null;
   risk: SkillSummary["risk"];
+  trusted: boolean;
 };
 
 type SkillVersionRow = {
@@ -28,6 +29,9 @@ type SkillVersionRow = {
   compatibilityMinAppVersion: string | null;
   compatibilityMaxAppVersion: string | null;
   policyStatus: "pending" | "approved" | "rejected" | "revoked";
+  reviewStatus: "not_submitted" | "in_review" | "approved" | "rejected";
+  trustBadge: boolean;
+  trustBadgeMetadata: Record<string, unknown>;
   revokedAt: string | null;
 };
 
@@ -80,17 +84,18 @@ function decodeAdvisoryCursor(value: string): AdvisoryCursor | null {
 export class PostgresSkillRepository implements SkillRepository {
   public constructor(private readonly pool: Pool) {}
 
-  public async listSkills(query?: string): Promise<SkillSummary[]> {
+  public async listSkills(query?: string, options?: { trustedOnly?: boolean }): Promise<SkillSummary[]> {
     const sql = `
       SELECT
         s.skill_id AS "skillId",
         s.name,
         s.description,
         latest_version.version AS "latestVersion",
-        s.risk_level AS "risk"
+        s.risk_level AS "risk",
+        COALESCE(latest_version.trust_badge, false) AS "trusted"
       FROM skills s
       LEFT JOIN LATERAL (
-        SELECT sv.version
+        SELECT sv.version, sv.trust_badge
         FROM skill_versions sv
         WHERE sv.skill_ref_id = s.id
           AND sv.policy_status = 'approved'
@@ -99,6 +104,7 @@ export class PostgresSkillRepository implements SkillRepository {
         LIMIT 1
       ) latest_version ON TRUE
       WHERE s.status <> 'disabled'
+        AND ($2::boolean IS NOT TRUE OR COALESCE(latest_version.trust_badge, false) = TRUE)
         AND (
           $1::text IS NULL
           OR s.skill_id ILIKE '%' || $1::text || '%'
@@ -109,13 +115,14 @@ export class PostgresSkillRepository implements SkillRepository {
       LIMIT 100
     `;
 
-    const result = await this.pool.query<SkillSummaryRow>(sql, [query ?? null]);
+    const result = await this.pool.query<SkillSummaryRow>(sql, [query ?? null, options?.trustedOnly ?? false]);
     return result.rows.map((row) => ({
       skillId: row.skillId,
       name: row.name,
       description: row.description,
       latestVersion: row.latestVersion ?? "",
-      risk: row.risk
+      risk: row.risk,
+      trusted: row.trusted
     }));
   }
 
@@ -126,10 +133,11 @@ export class PostgresSkillRepository implements SkillRepository {
         s.name,
         s.description,
         latest_version.version AS "latestVersion",
-        s.risk_level AS "risk"
+        s.risk_level AS "risk",
+        COALESCE(latest_version.trust_badge, false) AS "trusted"
       FROM skills s
       LEFT JOIN LATERAL (
-        SELECT sv.version
+        SELECT sv.version, sv.trust_badge
         FROM skill_versions sv
         WHERE sv.skill_ref_id = s.id
           AND sv.policy_status = 'approved'
@@ -159,6 +167,9 @@ export class PostgresSkillRepository implements SkillRepository {
         sv.compatibility_min_app_version AS "compatibilityMinAppVersion",
         sv.compatibility_max_app_version AS "compatibilityMaxAppVersion",
         sv.policy_status AS "policyStatus",
+        sv.review_status AS "reviewStatus",
+        sv.trust_badge AS "trustBadge",
+        sv.trust_badge_metadata AS "trustBadgeMetadata",
         sv.revoked_at::text AS "revokedAt"
       FROM skill_versions sv
       JOIN skills s ON s.id = sv.skill_ref_id
@@ -205,6 +216,9 @@ export class PostgresSkillRepository implements SkillRepository {
       compatibilityMinAppVersion: row.compatibilityMinAppVersion,
       compatibilityMaxAppVersion: row.compatibilityMaxAppVersion,
       policyStatus: row.policyStatus,
+      reviewStatus: row.reviewStatus,
+      trustBadge: row.trustBadge,
+      trustBadgeMetadata: row.trustBadgeMetadata,
       revokedAt: row.revokedAt,
       permissions: permissionsByVersion.get(row.version)
     }));
@@ -215,6 +229,7 @@ export class PostgresSkillRepository implements SkillRepository {
       description: summary.description,
       latestVersion: summary.latestVersion ?? "",
       risk: summary.risk,
+      trusted: summary.trusted,
       versions
     };
   }
@@ -231,6 +246,9 @@ export class PostgresSkillRepository implements SkillRepository {
         sv.compatibility_min_app_version AS "compatibilityMinAppVersion",
         sv.compatibility_max_app_version AS "compatibilityMaxAppVersion",
         sv.policy_status AS "policyStatus",
+        sv.review_status AS "reviewStatus",
+        sv.trust_badge AS "trustBadge",
+        sv.trust_badge_metadata AS "trustBadgeMetadata",
         sv.revoked_at::text AS "revokedAt"
       FROM skill_versions sv
       JOIN skills s ON s.id = sv.skill_ref_id
@@ -271,6 +289,9 @@ export class PostgresSkillRepository implements SkillRepository {
       compatibilityMinAppVersion: row.compatibilityMinAppVersion,
       compatibilityMaxAppVersion: row.compatibilityMaxAppVersion,
       policyStatus: row.policyStatus,
+      reviewStatus: row.reviewStatus,
+      trustBadge: row.trustBadge,
+      trustBadgeMetadata: row.trustBadgeMetadata,
       revokedAt: row.revokedAt,
       permissions: permissions.rows.map((permission) => ({
         permissionKey: permission.permissionKey,

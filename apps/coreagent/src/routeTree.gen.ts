@@ -14,6 +14,7 @@ import { Route as FilesRouteImport } from './routes/files'
 import { Route as DocumentationRouteImport } from './routes/documentation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
+import { Route as SkillsCreateRouteImport } from './routes/skills.create'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as AgentsAgentIdVoiceRouteImport } from './routes/agents/$agentId.voice'
 import { Route as AgentsAgentIdToolsRouteImport } from './routes/agents/$agentId.tools'
@@ -45,6 +46,11 @@ const IndexRoute = IndexRouteImport.update({
 const AgentsIndexRoute = AgentsIndexRouteImport.update({
   id: '/agents/',
   path: '/agents/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsCreateRoute = SkillsCreateRouteImport.update({
+  id: '/skills/create',
+  path: '/skills/create',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/files': typeof FilesRoute
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/skills/create': typeof SkillsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
@@ -103,6 +110,7 @@ export interface FileRoutesByTo {
   '/files': typeof FilesRoute
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/skills/create': typeof SkillsCreateRoute
   '/agents': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
@@ -118,6 +126,7 @@ export interface FileRoutesById {
   '/files': typeof FilesRoute
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
+  '/skills/create': typeof SkillsCreateRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
@@ -134,6 +143,7 @@ export interface FileRouteTypes {
     | '/files'
     | '/settings'
     | '/agents/$agentId'
+    | '/skills/create'
     | '/agents/'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
@@ -148,6 +158,7 @@ export interface FileRouteTypes {
     | '/files'
     | '/settings'
     | '/agents/$agentId'
+    | '/skills/create'
     | '/agents'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
@@ -162,6 +173,7 @@ export interface FileRouteTypes {
     | '/files'
     | '/settings'
     | '/agents/$agentId'
+    | '/skills/create'
     | '/agents/'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
@@ -177,6 +189,7 @@ export interface RootRouteChildren {
   FilesRoute: typeof FilesRoute
   SettingsRoute: typeof SettingsRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRouteWithChildren
+  SkillsCreateRoute: typeof SkillsCreateRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
 }
 
@@ -215,6 +228,13 @@ declare module '@tanstack/react-router' {
       path: '/agents'
       fullPath: '/agents/'
       preLoaderRoute: typeof AgentsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/create': {
+      id: '/skills/create'
+      path: '/skills/create'
+      fullPath: '/skills/create'
+      preLoaderRoute: typeof SkillsCreateRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agents/$agentId': {
@@ -297,6 +317,7 @@ const rootRouteChildren: RootRouteChildren = {
   FilesRoute: FilesRoute,
   SettingsRoute: SettingsRoute,
   AgentsAgentIdRoute: AgentsAgentIdRouteWithChildren,
+  SkillsCreateRoute: SkillsCreateRoute,
   AgentsIndexRoute: AgentsIndexRoute,
 }
 export const routeTree = rootRouteImport

@@ -54,11 +54,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use skills_registry_client::{
-    AdvisoryFeedResponse, AssignSkillInput, InstallSkillInput, InstalledSkill, RegistryAgentSkill,
-    RegistryAssignResponse, RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails, RuntimeRunSummary,
-    RegistrySkillSummary, RegistrySkillVersion, RegistryUninstallResponse, RuntimeExecutionMode, RuntimeHandshake,
-    CreateRuntimeRunInput,
-    SkillsRegistryClient,
+    AdvisoryFeedResponse, AdminArtifactUploadInput, AdminArtifactUploadResponse,
+    AdminPublishSkillResponse, AdminSkillPreflightInput, AdminSkillPreflightResponse,
+    AdminSkillPreflightStatusResponse,
+    AdminSkillReviewInput, AdminSkillReviewResponse, AssignSkillInput, CreateRuntimeRunInput,
+    InstallSkillInput, InstalledSkill, PermissionProfile, RegistryAgentSkill, RegistryAssignResponse,
+    RegistryInstallResponse, RegistryPinResponse, RegistrySkillDetails, RegistrySkillSummary,
+    RegistrySkillVersion, RegistryUninstallResponse, RuntimeExecutionMode, RuntimeHandshake,
+    RuntimeRunSummary, SkillsRegistryClient,
 };
 use tauri::{ipc::Channel, Emitter, Manager};
 use vision_service::{ScreenshotResult, VisionService};
@@ -604,14 +607,152 @@ fn verify_session(user_id: String, state: tauri::State<AuthState>) -> Result<boo
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillReviewPayload {
+    review_status: String,
+    summary: String,
+    trusted_badge_eligible: bool,
+    checks: Option<Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillPreflightPayload {
+    title: String,
+    skill_id: Option<String>,
+    ai_input: Option<String>,
+    script_artifact_digest: String,
+    example_artifact_digest: String,
+    mode: Option<String>,
+}
+
 #[tauri::command]
 async fn list_registry_skills(
     query: Option<String>,
+    trusted_only: Option<bool>,
     auth_state: tauri::State<'_, AuthState>,
 ) -> Result<Vec<RegistrySkillSummary>, String> {
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
-    client.list_skills(&token, query).await
+    client.list_skills(&token, query, trusted_only).await
+}
+
+#[tauri::command]
+async fn list_registry_permission_profiles(
+    auth_state: tauri::State<'_, AuthState>,
+) -> Result<Vec<PermissionProfile>, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
+    client.list_permission_profiles(&token).await
+}
+
+#[tauri::command]
+async fn upload_registry_skill_artifact(
+    artifact_base64: String,
+    digest: Option<String>,
+) -> Result<AdminArtifactUploadResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client
+        .upload_admin_artifact(
+            &admin_token,
+            AdminArtifactUploadInput {
+                artifact_base64,
+                digest,
+            },
+        )
+        .await
+}
+
+#[tauri::command]
+async fn dry_run_publish_registry_skill(
+    payload: Value,
+) -> Result<AdminPublishSkillResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client
+        .dry_run_publish_admin_skill(&admin_token, payload)
+        .await
+}
+
+#[tauri::command]
+async fn publish_registry_skill(payload: Value) -> Result<AdminPublishSkillResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client.publish_admin_skill(&admin_token, payload).await
+}
+
+#[tauri::command]
+async fn preflight_registry_skill(
+    payload: SkillPreflightPayload,
+) -> Result<AdminSkillPreflightResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client
+        .preflight_admin_skill(
+            &admin_token,
+            AdminSkillPreflightInput {
+                title: payload.title,
+                skill_id: payload.skill_id,
+                ai_input: payload.ai_input,
+                script_artifact_digest: payload.script_artifact_digest,
+                example_artifact_digest: payload.example_artifact_digest,
+                mode: payload.mode.unwrap_or_else(|| "local_docker".to_string()),
+            },
+        )
+        .await
+}
+
+#[tauri::command]
+async fn start_preflight_registry_skill(
+    payload: SkillPreflightPayload,
+) -> Result<AdminSkillPreflightStatusResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client
+        .start_preflight_admin_skill(
+            &admin_token,
+            AdminSkillPreflightInput {
+                title: payload.title,
+                skill_id: payload.skill_id,
+                ai_input: payload.ai_input,
+                script_artifact_digest: payload.script_artifact_digest,
+                example_artifact_digest: payload.example_artifact_digest,
+                mode: payload.mode.unwrap_or_else(|| "local_docker".to_string()),
+            },
+        )
+        .await
+}
+
+#[tauri::command]
+async fn get_preflight_registry_skill(run_id: String) -> Result<AdminSkillPreflightStatusResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client.get_preflight_admin_skill(&admin_token, &run_id).await
+}
+
+#[tauri::command]
+async fn review_registry_skill(
+    skill_id: String,
+    version: String,
+    review: SkillReviewPayload,
+) -> Result<AdminSkillReviewResponse, String> {
+    let client = SkillsRegistryClient::from_env()?;
+    let admin_token = SkillsRegistryClient::resolve_admin_token()?;
+    client
+        .review_admin_skill(
+            &admin_token,
+            &skill_id,
+            &version,
+            AdminSkillReviewInput {
+                review_status: review.review_status,
+                summary: review.summary,
+                trusted_badge_eligible: review.trusted_badge_eligible,
+                checks: review.checks.unwrap_or_else(|| serde_json::json!({})),
+            },
+        )
+        .await
 }
 
 #[tauri::command]
@@ -2551,6 +2692,14 @@ pub fn run() {
             clear_session,
             verify_session,
             list_registry_skills,
+            list_registry_permission_profiles,
+            upload_registry_skill_artifact,
+            dry_run_publish_registry_skill,
+            publish_registry_skill,
+            preflight_registry_skill,
+            start_preflight_registry_skill,
+            get_preflight_registry_skill,
+            review_registry_skill,
             get_registry_skill,
             get_registry_skill_version,
             list_installed_skills,

@@ -11,6 +11,8 @@
     "start": "node dist/index.js",
     "start:prod": "NODE_ENV=production node dist/index.js",
     "seed:open-skills": "node scripts/seed-open-skills.mjs",
+    "skill:validate": "tsx scripts/validate-skill.mjs",
+    "skill:publish:dry-run": "tsx scripts/publish-dry-run.mjs",
     "verify:runtime-modes": "node scripts/verify-runtime-modes.mjs",
     "test": "vitest run",
     "test:routes": "vitest run src/api/routes",

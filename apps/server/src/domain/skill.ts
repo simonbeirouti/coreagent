@@ -19,6 +19,9 @@ export const SkillVersionSchema = z.object({
   compatibilityMinAppVersion: z.string().nullable().optional(),
   compatibilityMaxAppVersion: z.string().nullable().optional(),
   policyStatus: z.enum(["pending", "approved", "rejected", "revoked"]).optional(),
+  reviewStatus: z.enum(["not_submitted", "in_review", "approved", "rejected"]).optional(),
+  trustBadge: z.boolean().optional(),
+  trustBadgeMetadata: z.record(z.string(), z.unknown()).optional(),
   revokedAt: z.string().nullable().optional(),
   permissions: z.array(SkillPermissionSchema).optional()
 });
@@ -28,7 +31,8 @@ export const SkillSummarySchema = z.object({
   name: z.string(),
   description: z.string(),
   latestVersion: z.string(),
-  risk: SkillRiskSchema
+  risk: SkillRiskSchema,
+  trusted: z.boolean().optional()
 });
 
 export const SkillDetailsSchema = SkillSummarySchema.extend({

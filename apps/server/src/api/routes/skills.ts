@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 
 import { CatalogService } from "../../services/catalog-service.js";
+import { listPermissionProfiles } from "../../services/permission-profiles.js";
 import type { MetricsService } from "../../services/metrics-service.js";
 import type { InMemoryRateLimiter } from "../../services/rate-limiter.js";
 import { ensureRuntimeEnvironmentReady } from "../../services/runtime-environment-builder.js";
@@ -11,7 +12,8 @@ import type { AppEnv } from "../../security/env.js";
 import { resolveUserIdFromRequest } from "../../security/request-auth.js";
 
 const listSkillsQuerySchema = z.object({
-  query: z.string().trim().min(1).optional()
+  query: z.string().trim().min(1).optional(),
+  trustedOnly: z.coerce.boolean().optional().default(false)
 });
 
 const advisoryFeedQuerySchema = z.object({
@@ -61,6 +63,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
     "/v1/skills",
     "/v1/skills/:skillId",
     "/v1/skills/:skillId/versions/:version",
+    "/v1/permissions/profiles",
     "/v1/advisories",
     "/v1/advisories/feed"
   ]);
@@ -121,9 +124,15 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
   });
 
   app.get("/v1/skills", async (request) => {
-    const { query } = listSkillsQuerySchema.parse(request.query);
-    const skills = await catalogService.listSkills(query);
+    const { query, trustedOnly } = listSkillsQuerySchema.parse(request.query);
+    const skills = await catalogService.listSkills(query, { trustedOnly });
     return { data: skills };
+  });
+
+  app.get("/v1/permissions/profiles", async () => {
+    return {
+      data: listPermissionProfiles()
+    };
   });
 
   app.get("/v1/skills/installed", async (request, reply) => {

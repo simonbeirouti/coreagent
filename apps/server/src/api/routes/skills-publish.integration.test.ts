@@ -62,19 +62,21 @@ function createTestEnv(overrides?: Partial<AppEnv>): AppEnv {
 
 function createRepositoryFromState(state: { current: PublishedSkillState | null }): SkillRepository {
   return {
-    async listSkills() {
+    async listSkills(_query?: string, options?: { trustedOnly?: boolean }) {
       if (!state.current) {
         return [];
       }
-      return [
+      const rows = [
         {
           skillId: state.current.skillId,
           name: state.current.name,
           description: state.current.description,
           latestVersion: state.current.latestVersion,
-          risk: state.current.risk
+          risk: state.current.risk,
+          trusted: false
         }
       ];
+      return options?.trustedOnly ? [] : rows;
     },
     async getSkill(skillId: string): Promise<SkillDetails | null> {
       if (!state.current || state.current.skillId !== skillId) {
@@ -223,7 +225,15 @@ describe("skills publish integration", () => {
       artifactStore: new LocalArtifactStore(TEST_ARTIFACT_DIR, 1024 * 1024),
       artifactScanner: new NoopArtifactScanner(),
       signatureService: new HmacSignatureService(env.SIGNING_SECRET, env.SIGNING_KEY_ID),
-      metrics: new MetricsService()
+      metrics: new MetricsService(),
+      runDockerPreflight: async () => ({
+        status: "passed",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString()
+      })
     });
 
     await app.register(skillRoutes, {
@@ -234,20 +244,48 @@ describe("skills publish integration", () => {
       rateLimiter: new InMemoryRateLimiter(100, 60_000)
     });
 
-    const artifactPayload = Buffer.from("echo integration publish", "utf8").toString("base64");
-    const upload = await app.inject({
+    const scriptPayload = Buffer.from("echo integration publish", "utf8").toString("base64");
+    const uploadScript = await app.inject({
       method: "POST",
       url: "/v1/admin/artifacts/upload",
       headers: {
         "x-admin-token": env.ADMIN_API_TOKEN ?? ""
       },
       payload: {
-        artifactBase64: artifactPayload
+        artifactBase64: scriptPayload
       }
     });
+    expect(uploadScript.statusCode).toBe(200);
+    const uploadScriptBody = uploadScript.json() as { data: { digest: string } };
+    const examplePayload = Buffer.from("{\"message\":\"hello\"}", "utf8").toString("base64");
+    const uploadExample = await app.inject({
+      method: "POST",
+      url: "/v1/admin/artifacts/upload",
+      headers: {
+        "x-admin-token": env.ADMIN_API_TOKEN ?? ""
+      },
+      payload: {
+        artifactBase64: examplePayload
+      }
+    });
+    expect(uploadExample.statusCode).toBe(200);
+    const uploadExampleBody = uploadExample.json() as { data: { digest: string } };
 
-    expect(upload.statusCode).toBe(200);
-    const uploadBody = upload.json() as { data: { digest: string } };
+    const preflight = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skills/preflight",
+      headers: {
+        "x-admin-token": env.ADMIN_API_TOKEN ?? ""
+      },
+      payload: {
+        title: "Phase 6 Integration Skill",
+        scriptArtifactDigest: uploadScriptBody.data.digest,
+        exampleArtifactDigest: uploadExampleBody.data.digest,
+        mode: "local_docker"
+      }
+    });
+    expect(preflight.statusCode).toBe(200);
+    const preflightBody = preflight.json() as { data: { runId: string } };
 
     const publish = await app.inject({
       method: "POST",
@@ -262,8 +300,8 @@ describe("skills publish integration", () => {
         description: "Verifies publish-to-catalog integration.",
         version: "1.2.3",
         runtime: "command",
-        entrypoint: "scripts/run.sh",
-        artifactDigest: uploadBody.data.digest,
+        artifactDigest: uploadScriptBody.data.digest,
+        preflightRunId: preflightBody.data.runId,
         permissions: []
       }
     });
@@ -285,7 +323,65 @@ describe("skills publish integration", () => {
     });
     expect(version.statusCode).toBe(200);
     const versionBody = version.json() as { data: SkillVersion };
-    expect(versionBody.data.digest).toBe(uploadBody.data.digest);
+    expect(versionBody.data.digest).toBe(uploadScriptBody.data.digest);
     expect(versionBody.data.signature.startsWith("hmac-sha256.")).toBe(true);
+  });
+
+  it("blocks publish when docker preflight is missing", async () => {
+    const state: { current: PublishedSkillState | null } = { current: null };
+    const env = createTestEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+
+    await app.register(adminSkillRoutes, {
+      env,
+      dbPool: createPublishDbPool(state) as never,
+      artifactStore: new LocalArtifactStore(TEST_ARTIFACT_DIR, 1024 * 1024),
+      artifactScanner: new NoopArtifactScanner(),
+      signatureService: new HmacSignatureService(env.SIGNING_SECRET, env.SIGNING_KEY_ID),
+      metrics: new MetricsService(),
+      runDockerPreflight: async () => ({
+        status: "passed",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString()
+      })
+    });
+
+    const scriptPayload = Buffer.from("echo integration publish", "utf8").toString("base64");
+    const uploadScript = await app.inject({
+      method: "POST",
+      url: "/v1/admin/artifacts/upload",
+      headers: {
+        "x-admin-token": env.ADMIN_API_TOKEN ?? ""
+      },
+      payload: {
+        artifactBase64: scriptPayload
+      }
+    });
+    expect(uploadScript.statusCode).toBe(200);
+    const uploadBody = uploadScript.json() as { data: { digest: string } };
+
+    const publish = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skills/publish",
+      headers: {
+        "x-admin-token": env.ADMIN_API_TOKEN ?? ""
+      },
+      payload: {
+        skillId: "coreagent.phase6.integration",
+        implementationKey: "coreagent.phase6.integration",
+        name: "Phase 6 Integration Skill",
+        description: "Verifies publish gate behavior.",
+        version: "1.2.3",
+        runtime: "command",
+        artifactDigest: uploadBody.data.digest,
+        permissions: []
+      }
+    });
+
+    expect(publish.statusCode).toBe(409);
   });
 });

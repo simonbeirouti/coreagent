@@ -3,8 +3,8 @@ import type { SkillRepository } from "../repositories/skill-repository.js";
 export class CatalogService {
   public constructor(private readonly repository: SkillRepository) {}
 
-  public listSkills(query?: string) {
-    return this.repository.listSkills(query);
+  public listSkills(query?: string, options?: { trustedOnly?: boolean }) {
+    return this.repository.listSkills(query, options);
   }
 
   public getSkill(skillId: string) {

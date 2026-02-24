@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     compatibility_max_app_version TEXT,
     policy_status TEXT NOT NULL DEFAULT 'approved'
         CHECK (policy_status IN ('pending', 'approved', 'rejected', 'revoked')),
+    review_status TEXT NOT NULL DEFAULT 'not_submitted'
+        CHECK (review_status IN ('not_submitted', 'in_review', 'approved', 'rejected')),
+    trust_badge BOOLEAN NOT NULL DEFAULT false,
+    trust_badge_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     published_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -177,6 +181,9 @@ ON skill_versions(skill_ref_id, published_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_skill_versions_policy_status_published
 ON skill_versions(policy_status, published_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_skill_versions_trust_badge
+ON skill_versions(trust_badge, published_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_skill_permissions_version
 ON skill_permissions(skill_version_id);
