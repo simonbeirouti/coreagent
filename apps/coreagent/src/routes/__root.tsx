@@ -187,7 +187,7 @@ function LayoutContent({
     }
 
     // Create breadcrumb for each path segment
-    pathSegments.forEach((segment, index) => {
+    pathSegments.forEach((segment: string, index: number) => {
       const isLast = index === pathSegments.length - 1
       // Check if this segment is a UUID (agent ID)
       const isUUID = segment.length > 20 && segment.includes('-')

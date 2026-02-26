@@ -5,7 +5,7 @@ import {
   MenubarMenu,
   MenubarTrigger,
 } from '@/components/ui/menubar';
-import { MessageSquare, Settings, Phone, Brain, BarChart3, Wrench } from 'lucide-react';
+import { MessageSquare, Settings, Phone, Brain, BarChart3, Wrench, Network } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export const Route = createFileRoute('/agents/$agentId')({
@@ -25,6 +25,7 @@ function AgentLayout() {
   const isDashboardRoute = matchRoute({ to: '/agents/$agentId/dashboard', params: { agentId } });
   const isSettingsRoute = matchRoute({ to: '/agents/$agentId/settings', params: { agentId } });
   const isToolsRoute = matchRoute({ to: '/agents/$agentId/tools', params: { agentId } });
+  const isSkillsGraphRoute = matchRoute({ to: '/agents/$agentId/skills-graph', params: { agentId } });
   const isExactAgentRoute = matchRoute({ to: '/agents/$agentId', params: { agentId } });
 
   if (error) {
@@ -87,6 +88,15 @@ function AgentLayout() {
               <MenubarTrigger className={cn(isToolsRoute && "bg-accent")}>
                 <Wrench className="mr-2 h-4 w-4" />
                 Tools
+              </MenubarTrigger>
+            </Link>
+          </MenubarMenu>
+
+          <MenubarMenu>
+            <Link to="/agents/$agentId/skills-graph" params={{ agentId }}>
+              <MenubarTrigger className={cn(isSkillsGraphRoute && "bg-accent")}>
+                <Network className="mr-2 h-4 w-4" />
+                Skills Graph
               </MenubarTrigger>
             </Link>
           </MenubarMenu>

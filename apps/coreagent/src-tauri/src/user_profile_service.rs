@@ -15,6 +15,7 @@ pub struct UserProfileData {
     pub preferences: serde_json::Value,
     pub habits: serde_json::Value,
     pub work_patterns: serde_json::Value,
+    pub email: Option<String>,
     pub language: String,
     pub ai_response_language: String,
     pub notifications_enabled: bool,
@@ -28,6 +29,7 @@ pub struct UpdateUserProfileRequest {
     pub preferences: Option<serde_json::Value>,
     pub habits: Option<serde_json::Value>,
     pub work_patterns: Option<serde_json::Value>,
+    pub email: Option<String>,
     pub language: Option<String>,
     pub ai_response_language: Option<String>,
     pub notifications_enabled: Option<bool>,
@@ -43,6 +45,7 @@ impl From<user_profiles::Model> for UserProfileData {
             preferences: model.preferences,
             habits: model.habits,
             work_patterns: model.work_patterns,
+            email: model.email,
             language: model.language,
             ai_response_language: model.ai_response_language,
             notifications_enabled: model.notifications_enabled,
@@ -95,6 +98,7 @@ impl UserProfileService {
                 "session_length": "medium"
             })),
             work_patterns: ActiveValue::Set(json!({})),
+            email: ActiveValue::Set(None),
             language: ActiveValue::Set("en".to_string()),
             ai_response_language: ActiveValue::Set("en".to_string()),
             notifications_enabled: ActiveValue::Set(true),
@@ -157,6 +161,14 @@ impl UserProfileService {
         }
         if let Some(work_patterns) = updates.work_patterns {
             profile.work_patterns = Set(work_patterns);
+        }
+        if let Some(email) = updates.email {
+            let normalized = email.trim().to_string();
+            profile.email = Set(if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            });
         }
         if let Some(language) = updates.language {
             profile.language = Set(language);

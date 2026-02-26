@@ -13,6 +13,7 @@ pub struct Model {
     pub preferences: Json,
     pub habits: Json,
     pub work_patterns: Json,
+    pub email: Option<String>,
     pub language: String,
     pub ai_response_language: String,
     pub notifications_enabled: bool,

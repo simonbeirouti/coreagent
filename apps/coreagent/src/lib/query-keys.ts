@@ -87,6 +87,13 @@ export const registryKeys = {
   publishMutation: () => [...registryKeys.all, 'publish-mutation'] as const,
 };
 
+export const skillsGraphKeys = {
+  all: ['skills-graph'] as const,
+  byOwner: (ownerType: 'user' | 'team' | 'agent', ownerId = 'self') =>
+    [...skillsGraphKeys.all, ownerType, ownerId] as const,
+  suggestions: () => [...skillsGraphKeys.all, 'suggestions'] as const,
+};
+
 export const userFileKeys = {
   all: ['user-files'] as const,
   lists: () => [...userFileKeys.all, 'list'] as const,

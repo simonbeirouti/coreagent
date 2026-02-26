@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/use-auth'
 import { useUserProfile, useUpdateUserProfile } from '@/hooks/useUserProfile'
+import { useRuntimeSyncDiagnostics } from '@/hooks/useRegistrySkills'
 import { Spinner } from '@/components/ui/spinner'
 import { Header } from '@/components/header'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -161,6 +162,7 @@ function Settings() {
   // Use the user profile hook
   const { data: profile, isLoading, error } = useUserProfile(user?.id || '')
   const updateProfileMutation = useUpdateUserProfile()
+  const { data: runtimeSyncDiagnostics } = useRuntimeSyncDiagnostics()
 
   // Form state - General settings
   const [language, setLanguage] = useState<LanguageCode>('en')
@@ -306,6 +308,7 @@ function Settings() {
       await updateProfileMutation.mutateAsync({
         userId: user.id,
         updates: {
+          email: user.email ?? '',
           language,
           ai_response_language: aiResponseLanguage,
           notifications_enabled: notifications,
@@ -706,6 +709,38 @@ function Settings() {
                         Install
                       </Button>
                     </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Registry Diagnostics</CardTitle>
+                  <CardDescription>Runtime sync health and registry freshness status</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Freshness</span>
+                    <Badge variant={runtimeSyncDiagnostics?.freshness === 'fresh' ? 'secondary' : 'outline'}>
+                      {runtimeSyncDiagnostics?.freshness ?? 'unknown'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Last success</span>
+                    <span>
+                      {runtimeSyncDiagnostics?.lastSuccessAtMs
+                        ? new Date(runtimeSyncDiagnostics.lastSuccessAtMs).toLocaleString()
+                        : 'none'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Failures</span>
+                    <span>{runtimeSyncDiagnostics?.consecutiveFailures ?? 0}</span>
+                  </div>
+                  {runtimeSyncDiagnostics?.lastError ? (
+                    <p className="text-xs text-muted-foreground break-words">
+                      Last error: {runtimeSyncDiagnostics.lastError}
+                    </p>
                   ) : null}
                 </CardContent>
               </Card>

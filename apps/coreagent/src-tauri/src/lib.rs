@@ -47,8 +47,8 @@ use orchestration_service::{
 };
 use perception_tracker::{PerceptionStat, PerceptionTracker};
 use user_profile_service::UserProfileService;
-use serde::Serialize;
-use sea_orm::DatabaseConnection;
+use serde::{Deserialize, Serialize};
+use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -78,6 +78,14 @@ use runtime_sync_service::{
 };
 
 const HANDSHAKE_CACHE_TTL_MS: i64 = 2 * 60 * 1000;
+const CORE_RUNTIME_TOOL_KEYS: [&str; 6] = [
+    "memory_retrieval",
+    "vision_screenshot",
+    "vision_analysis",
+    "audio_transcription",
+    "voice_synthesis",
+    "attachment_read",
+];
 
 #[derive(Clone, Debug)]
 struct CachedRuntimeHandshake {
@@ -267,6 +275,21 @@ async fn enforce_registry_runtime_gate(
     runtime_sync_state: &RuntimeSyncAppState,
     handshake_cache: &RuntimeHandshakeCacheState,
 ) -> Result<(), String> {
+    if CORE_RUNTIME_TOOL_KEYS.contains(&implementation_key) {
+        return Ok(());
+    }
+
+    let client = SkillsRegistryClient::from_env()?;
+    let token = SkillsRegistryClient::resolve_access_token(auth_state)?;
+    let assigned = client.list_agent_skills(&token, agent_id).await?;
+    let Some(skill) = assigned
+        .into_iter()
+        .find(|entry| entry.implementation_key == implementation_key)
+    else {
+        // Not a registry-managed tool assignment for this agent.
+        return Ok(());
+    };
+
     let diagnostics = get_runtime_sync_diagnostics(db, runtime_sync_state).await?;
     if diagnostics.freshness == RuntimeSyncFreshness::HardStale.as_str() {
         return Err(
@@ -280,17 +303,6 @@ async fn enforce_registry_runtime_gate(
             agent_id, implementation_key
         );
     }
-
-    let client = SkillsRegistryClient::from_env()?;
-    let token = SkillsRegistryClient::resolve_access_token(auth_state)?;
-    let assigned = client.list_agent_skills(&token, agent_id).await?;
-    let Some(skill) = assigned
-        .into_iter()
-        .find(|entry| entry.implementation_key == implementation_key)
-    else {
-        // Not a registry-managed tool assignment for this agent.
-        return Ok(());
-    };
 
     if !is_runnable_install_state(skill.install_state.as_deref()) {
         return Err(format!(
@@ -340,6 +352,23 @@ async fn enforce_registry_runtime_gate(
     }
 }
 
+async fn ensure_registry_mutations_allowed(
+    db: &DatabaseConnection,
+    runtime_sync_state: &RuntimeSyncAppState,
+    operation: &str,
+) -> Result<(), String> {
+    let diagnostics = get_runtime_sync_diagnostics(db, runtime_sync_state).await?;
+    if diagnostics.freshness == RuntimeSyncFreshness::SoftStale.as_str()
+        || diagnostics.freshness == RuntimeSyncFreshness::HardStale.as_str()
+    {
+        return Err(format!(
+            "Registry update '{operation}' blocked while sync is degraded (freshness={}). Core tools remain available; retry after sync recovers.",
+            diagnostics.freshness
+        ));
+    }
+    Ok(())
+}
+
 fn execution_mode_from_preferences(preferences: &Value) -> RuntimeExecutionMode {
     match preferences
         .get("runtime_execution_mode")
@@ -375,6 +404,7 @@ async fn resolve_agent_execution_mode(
             preferences: serde_json::json!({}),
             habits: serde_json::json!({}),
             work_patterns: serde_json::json!({}),
+            email: None,
             language: "en".to_string(),
             ai_response_language: "en".to_string(),
             notifications_enabled: true,
@@ -588,8 +618,47 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn set_session(session: SessionData, state: tauri::State<AuthState>) -> Result<(), String> {
+async fn set_session(
+    session: SessionData,
+    state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
+    handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
+) -> Result<(), String> {
     state.set_session(session);
+
+    // Best-effort startup bootstrap: warm installed-skills state once the backend
+    // has an authenticated session, then run an immediate advisory sync.
+    if let Ok(token) = SkillsRegistryClient::resolve_access_token(state.inner()) {
+        if let Ok(client) = SkillsRegistryClient::from_env() {
+            if let Err(error) = client.list_installed_skills(&token).await {
+                eprintln!(
+                    "[RUNTIME_SYNC] set_session bootstrap installed-skills sync failed: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    match trigger_runtime_sync(
+        &db,
+        state.inner(),
+        runtime_sync_state.inner(),
+        "auth_session_set_bootstrap",
+    )
+    .await
+    {
+        Ok(run) => {
+            if run.advisories_changed {
+                handshake_cache.inner().clear().await;
+            }
+        }
+        Err(error) => {
+            eprintln!("[RUNTIME_SYNC] set_session bootstrap sync failed: {}", error);
+            let _ = write_failure_state(&db, &error).await;
+        }
+    }
+
     Ok(())
 }
 
@@ -625,6 +694,38 @@ struct SkillPreflightPayload {
     script_artifact_digest: String,
     example_artifact_digest: String,
     mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsGraphSuggestionRequest {
+    graph_json: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsGraphSuggestionEdge {
+    source: String,
+    target: String,
+    label: String,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsGraphSuggestionsResponse {
+    proposed_nodes: Vec<Value>,
+    proposed_edges: Vec<SkillsGraphSuggestionEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsGraphSnapshotResponse {
+    owner_type: String,
+    owner_id: String,
+    version: i32,
+    graph_json: Value,
+    updated_at: Option<String>,
 }
 
 #[tauri::command]
@@ -796,6 +897,8 @@ async fn install_registry_skill(
     runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
     handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryInstallResponse, String> {
+    ensure_registry_mutations_allowed(&db, runtime_sync_state.inner(), "install_registry_skill")
+        .await?;
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
     let input = InstallSkillInput {
@@ -826,6 +929,12 @@ async fn uninstall_registry_skill(
     runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
     handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryUninstallResponse, String> {
+    ensure_registry_mutations_allowed(
+        &db,
+        runtime_sync_state.inner(),
+        "uninstall_registry_skill",
+    )
+    .await?;
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
     let response = client.uninstall_skill(&token, &skill_id).await?;
@@ -852,6 +961,12 @@ async fn pin_registry_skill_version(
     runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
     handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryPinResponse, String> {
+    ensure_registry_mutations_allowed(
+        &db,
+        runtime_sync_state.inner(),
+        "pin_registry_skill_version",
+    )
+    .await?;
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
     let response = client.pin_skill_version(&token, &skill_id, version).await?;
@@ -880,6 +995,8 @@ async fn assign_registry_skill(
     runtime_sync_state: tauri::State<'_, RuntimeSyncAppState>,
     handshake_cache: tauri::State<'_, RuntimeHandshakeCacheState>,
 ) -> Result<RegistryAssignResponse, String> {
+    ensure_registry_mutations_allowed(&db, runtime_sync_state.inner(), "assign_registry_skill")
+        .await?;
     let client = SkillsRegistryClient::from_env()?;
     let token = SkillsRegistryClient::resolve_access_token(&auth_state)?;
     let input = AssignSkillInput {
@@ -2070,6 +2187,288 @@ async fn get_perception_stats(
     PerceptionTracker::get_stats(&db, &agent_id).await
 }
 
+fn resolve_skills_graph_owner(
+    auth_state: &AuthState,
+    owner_type: String,
+    owner_id: Option<String>,
+) -> Result<(String, uuid::Uuid, uuid::Uuid), String> {
+    let session = auth_state
+        .get_session()
+        .ok_or_else(|| "No authenticated session found.".to_string())?;
+    let session_user_id = uuid::Uuid::parse_str(&session.user_id)
+        .map_err(|e| format!("Invalid session user ID: {e}"))?;
+    let normalized_owner_type = owner_type.trim().to_ascii_lowercase();
+
+    match normalized_owner_type.as_str() {
+        "user" => {
+            let resolved_owner = owner_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| session.user_id.clone());
+            let owner_uuid = uuid::Uuid::parse_str(&resolved_owner)
+                .map_err(|e| format!("Invalid ownerId for user graph: {e}"))?;
+            if owner_uuid != session_user_id {
+                return Err("User graph access denied for this owner.".to_string());
+            }
+            Ok((normalized_owner_type, owner_uuid, session_user_id))
+        }
+        "team" => {
+            let resolved_owner = owner_id
+                .ok_or_else(|| "team ownerId is required.".to_string())?
+                .trim()
+                .to_string();
+            let owner_uuid = uuid::Uuid::parse_str(&resolved_owner)
+                .map_err(|e| format!("Invalid ownerId for team graph: {e}"))?;
+            Ok((normalized_owner_type, owner_uuid, session_user_id))
+        }
+        "agent" => {
+            let resolved_owner = owner_id
+                .ok_or_else(|| "agent ownerId is required.".to_string())?
+                .trim()
+                .to_string();
+            let owner_uuid = uuid::Uuid::parse_str(&resolved_owner)
+                .map_err(|e| format!("Invalid ownerId for agent graph: {e}"))?;
+            Ok((normalized_owner_type, owner_uuid, session_user_id))
+        }
+        _ => Err("ownerType must be either 'user', 'team', or 'agent'.".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn load_skills_graph(
+    owner_type: String,
+    owner_id: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<SkillsGraphSnapshotResponse, String> {
+    let (resolved_owner_type, resolved_owner_id, session_user_id) =
+        resolve_skills_graph_owner(auth_state.inner(), owner_type, owner_id)?;
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT
+                  owner_type,
+                  owner_id,
+                  version,
+                  graph_jsonb,
+                  updated_at::text AS updated_at
+                FROM skills_graphs
+                WHERE owner_type = $1::text
+                  AND owner_id = $2::uuid
+                  AND (
+                    (owner_type = 'user' AND owner_id = $3::uuid)
+                    OR (owner_type = 'team' AND created_by_user_id = $3::uuid)
+                    OR (
+                      owner_type = 'agent'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM agents a
+                        WHERE a.id = owner_id
+                          AND a.user_id = $3::uuid
+                      )
+                    )
+                  )
+                LIMIT 1
+            "#,
+            vec![
+                resolved_owner_type.clone().into(),
+                resolved_owner_id.into(),
+                session_user_id.into(),
+            ],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading skills graph: {e}"))?;
+
+    if let Some(row) = row {
+        let graph_json: Value = row
+            .try_get("", "graph_jsonb")
+            .map_err(|e| format!("Failed decoding graph_jsonb: {e}"))?;
+        let version: i32 = row
+            .try_get("", "version")
+            .map_err(|e| format!("Failed decoding version: {e}"))?;
+        let updated_at: Option<String> = row
+            .try_get("", "updated_at")
+            .map_err(|e| format!("Failed decoding updated_at: {e}"))?;
+        return Ok(SkillsGraphSnapshotResponse {
+            owner_type: resolved_owner_type,
+            owner_id: resolved_owner_id.to_string(),
+            version,
+            graph_json,
+            updated_at,
+        });
+    }
+
+    Ok(SkillsGraphSnapshotResponse {
+        owner_type: resolved_owner_type,
+        owner_id: resolved_owner_id.to_string(),
+        version: 0,
+        graph_json: serde_json::json!({ "nodes": [], "edges": [], "viewport": {} }),
+        updated_at: None,
+    })
+}
+
+#[tauri::command]
+async fn save_skills_graph(
+    owner_type: String,
+    owner_id: Option<String>,
+    graph_json: Value,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<SkillsGraphSnapshotResponse, String> {
+    let (resolved_owner_type, resolved_owner_id, session_user_id) =
+        resolve_skills_graph_owner(auth_state.inner(), owner_type, owner_id)?;
+
+    if resolved_owner_type == "agent" {
+        let allowed = db
+            .query_one(Statement::from_sql_and_values(
+                db.get_database_backend(),
+                r#"
+                    SELECT 1
+                    FROM agents
+                    WHERE id = $1::uuid
+                      AND user_id = $2::uuid
+                    LIMIT 1
+                "#,
+                vec![resolved_owner_id.into(), session_user_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed validating agent ownership for graph save: {e}"))?
+            .is_some();
+        if !allowed {
+            return Err("Agent graph access denied for this owner.".to_string());
+        }
+    }
+
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                INSERT INTO skills_graphs (
+                  id,
+                  owner_type,
+                  owner_id,
+                  graph_jsonb,
+                  version,
+                  created_by_user_id,
+                  created_at,
+                  updated_at
+                )
+                VALUES (
+                  gen_random_uuid(),
+                  $1::text,
+                  $2::uuid,
+                  $3::jsonb,
+                  1,
+                  $4::uuid,
+                  NOW(),
+                  NOW()
+                )
+                ON CONFLICT (owner_type, owner_id)
+                DO UPDATE SET
+                  graph_jsonb = EXCLUDED.graph_jsonb,
+                  version = skills_graphs.version + 1,
+                  updated_at = NOW()
+                RETURNING
+                  owner_type,
+                  owner_id,
+                  version,
+                  graph_jsonb,
+                  updated_at::text AS updated_at
+            "#,
+            vec![
+                resolved_owner_type.clone().into(),
+                resolved_owner_id.into(),
+                graph_json.into(),
+                session_user_id.into(),
+            ],
+        ))
+        .await
+        .map_err(|e| format!("Failed saving skills graph: {e}"))?
+        .ok_or_else(|| "No row returned after saving skills graph.".to_string())?;
+
+    let saved_graph_json: Value = row
+        .try_get("", "graph_jsonb")
+        .map_err(|e| format!("Failed decoding saved graph_jsonb: {e}"))?;
+    let version: i32 = row
+        .try_get("", "version")
+        .map_err(|e| format!("Failed decoding saved version: {e}"))?;
+    let updated_at: Option<String> = row
+        .try_get("", "updated_at")
+        .map_err(|e| format!("Failed decoding saved updated_at: {e}"))?;
+
+    Ok(SkillsGraphSnapshotResponse {
+        owner_type: resolved_owner_type,
+        owner_id: resolved_owner_id.to_string(),
+        version,
+        graph_json: saved_graph_json,
+        updated_at,
+    })
+}
+
+#[tauri::command]
+async fn suggest_skills_graph_connections(
+    request: SkillsGraphSuggestionRequest,
+) -> Result<SkillsGraphSuggestionsResponse, String> {
+    let nodes = request
+        .graph_json
+        .get("nodes")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let edges = request
+        .graph_json
+        .get("edges")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut existing_pairs = std::collections::HashSet::new();
+    for edge in edges {
+        let source = edge.get("source").and_then(|value| value.as_str());
+        let target = edge.get("target").and_then(|value| value.as_str());
+        if let (Some(source), Some(target)) = (source, target) {
+            existing_pairs.insert(format!("{source}->{target}"));
+        }
+    }
+
+    let mut proposed_edges = Vec::new();
+    for pair in nodes.windows(2) {
+        let source = pair[0].get("id").and_then(|value| value.as_str());
+        let target = pair[1].get("id").and_then(|value| value.as_str());
+        let source_label = pair[0]
+            .get("data")
+            .and_then(|value| value.get("label"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("source skill");
+        let target_label = pair[1]
+            .get("data")
+            .and_then(|value| value.get("label"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("target skill");
+        if let (Some(source), Some(target)) = (source, target) {
+            let key = format!("{source}->{target}");
+            if existing_pairs.contains(&key) {
+                continue;
+            }
+            proposed_edges.push(SkillsGraphSuggestionEdge {
+                source: source.to_string(),
+                target: target.to_string(),
+                label: "related".to_string(),
+                rationale: format!(
+                    "Suggested link between '{}' and '{}' based on adjacency in the current graph.",
+                    source_label, target_label
+                ),
+            });
+        }
+    }
+
+    Ok(SkillsGraphSuggestionsResponse {
+        proposed_nodes: Vec::new(),
+        proposed_edges,
+    })
+}
+
 // User profile commands
 #[tauri::command]
 async fn get_user_profile(
@@ -2430,6 +2829,7 @@ async fn reassign_orchestration_task(
     new_owner_agent_id: String,
     requested_by_agent_id: String,
     reason: Option<String>,
+    required_ability_keys: Option<Vec<String>>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationTaskData, String> {
     OrchestrationService::reassign_task(
@@ -2438,6 +2838,7 @@ async fn reassign_orchestration_task(
         new_owner_agent_id,
         requested_by_agent_id,
         reason,
+        required_ability_keys,
     )
     .await
 }
@@ -2745,6 +3146,9 @@ pub fn run() {
             text_to_speech,
             read_audio_file,
             get_perception_stats,
+            load_skills_graph,
+            save_skills_graph,
+            suggest_skills_graph_connections,
             // User profile commands
             get_user_profile,
             update_user_profile,
@@ -2801,4 +3205,103 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_runtime_handshake_response;
+    use crate::skills_registry_client::{
+        RuntimeArtifact, RuntimeCompatibility, RuntimeForceDisable, RuntimeHandshake,
+        RuntimeInstallState, RuntimePolicy, RuntimeSpec,
+    };
+
+    fn baseline_handshake() -> RuntimeHandshake {
+        RuntimeHandshake {
+            skill_id: "coreagent.test.skill".to_string(),
+            implementation_key: "coreagent.test.skill".to_string(),
+            name: "Test Skill".to_string(),
+            version: "1.0.0".to_string(),
+            install: RuntimeInstallState {
+                install_id: Some("install-id".to_string()),
+                installed: true,
+                install_state: Some("ready".to_string()),
+                auto_update: Some(true),
+                pinned_version: Some("1.0.0".to_string()),
+                install_config: serde_json::json!({}),
+            },
+            runtime: RuntimeSpec {
+                runtime_type: "command".to_string(),
+                entrypoint: "run.sh".to_string(),
+                compatibility: RuntimeCompatibility {
+                    min_app_version: None,
+                    max_app_version: None,
+                },
+            },
+            artifact: RuntimeArtifact {
+                uri: Some("artifact://sha256/test".to_string()),
+                digest: "a".repeat(64),
+                signature: "hmac-sha256.signature".to_string(),
+                signature_algorithm: "hmac-sha256".to_string(),
+            },
+            policy: RuntimePolicy {
+                status: "approved".to_string(),
+                risk_level: "low".to_string(),
+            },
+            permissions: vec![],
+            force_disable: RuntimeForceDisable {
+                required: false,
+                reason: None,
+                advisory: None,
+            },
+        }
+    }
+
+    #[test]
+    fn handshake_validation_accepts_runnable_handshake() {
+        let handshake = baseline_handshake();
+        assert!(validate_runtime_handshake_response(&handshake).is_ok());
+    }
+
+    #[test]
+    fn handshake_validation_rejects_missing_digest() {
+        let mut handshake = baseline_handshake();
+        handshake.artifact.digest = "".to_string();
+        let result = validate_runtime_handshake_response(&handshake);
+        assert!(result.is_err());
+        assert!(result.err().unwrap_or_default().contains("artifact digest"));
+    }
+
+    #[test]
+    fn handshake_validation_rejects_unapproved_policy() {
+        let mut handshake = baseline_handshake();
+        handshake.policy.status = "pending".to_string();
+        let result = validate_runtime_handshake_response(&handshake);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap_or_default()
+            .contains("policy status is 'pending'"));
+    }
+
+    #[test]
+    fn handshake_validation_rejects_non_runnable_install_state() {
+        let mut handshake = baseline_handshake();
+        handshake.install.install_state = Some("resolving".to_string());
+        let result = validate_runtime_handshake_response(&handshake);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap_or_default()
+            .contains("install state is not runnable"));
+    }
+
+    #[test]
+    fn handshake_validation_rejects_force_disable() {
+        let mut handshake = baseline_handshake();
+        handshake.force_disable.required = true;
+        handshake.force_disable.reason = Some("revoked by advisory".to_string());
+        let result = validate_runtime_handshake_response(&handshake);
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap_or_default(), "revoked by advisory");
+    }
 }

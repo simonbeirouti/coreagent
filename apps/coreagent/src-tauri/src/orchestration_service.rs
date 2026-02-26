@@ -161,6 +161,7 @@ pub struct CreateAgentDelegationRequest {
     pub role: String,
     pub ownership_scope: Option<String>,
     pub created_by_user_id: String,
+    pub required_ability_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1487,6 +1488,28 @@ impl OrchestrationService {
                 "Both parent and child agents must belong to the creating user".to_string(),
             );
         }
+        let required_ability_keys: HashSet<String> = request
+            .required_ability_keys
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        if !required_ability_keys.is_empty() {
+            let enabled = Self::get_enabled_ability_keys_for_agent(db, child_agent_id).await?;
+            let missing: Vec<String> = required_ability_keys
+                .iter()
+                .filter(|key| !enabled.contains(key.as_str()))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Delegation blocked: child agent is missing required abilities: {}",
+                    missing.join(",")
+                ));
+            }
+        }
 
         let row = db
             .query_one(Statement::from_sql_and_values(
@@ -1586,6 +1609,7 @@ impl OrchestrationService {
         new_owner_agent_id: String,
         requested_by_agent_id: String,
         reason: Option<String>,
+        required_ability_keys: Option<Vec<String>>,
     ) -> Result<OrchestrationTaskData, String> {
         let task_id = Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id: {e}"))?;
         let new_owner_agent_id = Uuid::parse_str(&new_owner_agent_id)
@@ -1613,6 +1637,12 @@ impl OrchestrationService {
         let previous_owner_agent_id: Uuid = current_row
             .try_get("", "owner_agent_id")
             .map_err(|e| format!("Failed decoding owner_agent_id for reassignment: {e}"))?;
+        let required_ability_keys_set: HashSet<String> = required_ability_keys
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
         Self::evaluate_delegation_policy(
             db,
             run_id,
@@ -1620,7 +1650,7 @@ impl OrchestrationService {
             new_owner_agent_id,
             None,
             Some("execution"),
-            &HashSet::new(),
+            &required_ability_keys_set,
         )
         .await
         .map_err(|rejection| {
@@ -1677,6 +1707,7 @@ impl OrchestrationService {
                 "to_owner_agent_id": new_owner_agent_id,
                 "requested_by_agent_id": requested_by_agent_id,
                 "reason": reason,
+                "required_ability_keys": required_ability_keys_set,
             }),
         )
         .await?;

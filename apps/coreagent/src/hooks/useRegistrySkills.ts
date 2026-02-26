@@ -59,6 +59,12 @@ export interface RegistryAssignResponse {
   assigned: boolean;
 }
 
+export interface RegistryUninstallResponse {
+  installId: string;
+  skillId: string;
+  uninstalled: boolean;
+}
+
 export interface RuntimeHandshake {
   skillId: string;
   implementationKey: string;
@@ -218,6 +224,35 @@ export function useAssignRegistrySkill(agentId: string) {
         queryKey: registryKeys.runtimeSyncDiagnostics(),
         refetchType: 'all',
       });
+    },
+  });
+}
+
+export function useUninstallRegistrySkill(agentId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (params: {
+      skillId: string;
+    }): Promise<RegistryUninstallResponse> =>
+      invoke('uninstall_registry_skill', {
+        skillId: params.skillId,
+      }),
+    onSuccess: () => {
+      invoke('trigger_runtime_sync_command', { reason: 'uninstall_registry_skill_ui' }).catch((error) => {
+        console.error('Failed triggering runtime sync after uninstall:', error);
+      });
+      queryClient.invalidateQueries({ queryKey: registryKeys.installed(), refetchType: 'all' });
+      queryClient.invalidateQueries({
+        queryKey: registryKeys.runtimeSyncDiagnostics(),
+        refetchType: 'all',
+      });
+      if (agentId) {
+        queryClient.invalidateQueries({
+          queryKey: abilityKeys.agentRegistrySkills(agentId),
+          refetchType: 'all',
+        });
+        queryClient.invalidateQueries({ queryKey: abilityKeys.toolSettings(agentId), refetchType: 'all' });
+      }
     },
   });
 }

@@ -30,6 +30,7 @@ export interface UserProfile {
   preferences: UserPreferences;
   habits: UserHabits;
   work_patterns: UserWorkPatterns;
+  email?: string | null;
   language: LanguageCode;
   ai_response_language: LanguageCode;
   notifications_enabled: boolean;
@@ -42,6 +43,7 @@ export interface UpdateUserProfileRequest {
   preferences?: UserPreferences;
   habits?: UserHabits;
   work_patterns?: UserWorkPatterns;
+  email?: string;
   language?: LanguageCode;
   ai_response_language?: LanguageCode;
   notifications_enabled?: boolean;

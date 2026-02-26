@@ -261,9 +261,81 @@ describe("skills security and resilience", () => {
       }
     });
 
-    expect(response.statusCode).toBe(503);
+    expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({
-      message: "SIGNING_SECRET is not configured."
+      message: "Docker preflight is required before publish. Run /v1/admin/skills/preflight first."
     });
+  });
+
+  it("records handshake failures and blocked execution reasons metrics", async () => {
+    const env = createEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+    const metrics = new MetricsService();
+
+    const dbPool = {
+      async query<T>(text: string): Promise<{ rows: T[]; rowCount: number }> {
+        if (text.includes("FROM skills s") && text.includes("LEFT JOIN skill_installs")) {
+          return {
+            rows: [
+              {
+                skillRefId: "skill-ref-id",
+                implementationKey: "coreagent.phase6.metrics",
+                name: "Phase 6 Metrics Skill",
+                riskLevel: "high",
+                runtime: "command",
+                entrypoint: "scripts/run.sh",
+                artifactUri: "artifact://sha256/a".padEnd(82, "a"),
+                digest: "a".repeat(64),
+                signature: "hmac-sha256.sig",
+                compatibilityMinAppVersion: null,
+                compatibilityMaxAppVersion: null,
+                policyStatus: "rejected",
+                revokedAt: null,
+                installId: null,
+                installState: null,
+                autoUpdate: null,
+                installConfig: {},
+                pinnedVersion: null
+              } as T
+            ],
+            rowCount: 1
+          };
+        }
+        if (text.includes("FROM skill_permissions sp")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("FROM skill_advisories sa")) {
+          return { rows: [], rowCount: 0 };
+        }
+        throw new Error(`Unhandled SQL in test pool: ${text.slice(0, 64)}`);
+      }
+    };
+
+    await app.register(skillRoutes, {
+      repository: emptyRepository,
+      dbPool: dbPool as never,
+      env,
+      metrics,
+      rateLimiter: new InMemoryRateLimiter(100, 60_000)
+    });
+
+    const unauthorized = await app.inject({
+      method: "GET",
+      url: "/v1/runtime/skills/coreagent.phase6.metrics/versions/1.0.0/handshake"
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const handshake = await app.inject({
+      method: "GET",
+      url: "/v1/runtime/skills/coreagent.phase6.metrics/versions/1.0.0/handshake",
+      headers: authHeader()
+    });
+    expect(handshake.statusCode).toBe(200);
+
+    const snapshot = metrics.snapshot();
+    expect(snapshot.handshake.failures).toBe(1);
+    expect(snapshot.runtimeGate.blockedExecutionsByReason["policy_status:rejected"]).toBe(1);
+    expect(snapshot.runtimeGate.blockedExecutionsByReason.install_missing).toBe(1);
   });
 });

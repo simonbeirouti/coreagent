@@ -14,10 +14,12 @@ import { Route as FilesRouteImport } from './routes/files'
 import { Route as DocumentationRouteImport } from './routes/documentation'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
+import { Route as SkillsGraphRouteImport } from './routes/skills.graph'
 import { Route as SkillsCreateRouteImport } from './routes/skills.create'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as AgentsAgentIdVoiceRouteImport } from './routes/agents/$agentId.voice'
 import { Route as AgentsAgentIdToolsRouteImport } from './routes/agents/$agentId.tools'
+import { Route as AgentsAgentIdSkillsGraphRouteImport } from './routes/agents/$agentId.skills-graph'
 import { Route as AgentsAgentIdSettingsRouteImport } from './routes/agents/$agentId.settings'
 import { Route as AgentsAgentIdMemoryRouteImport } from './routes/agents/$agentId.memory'
 import { Route as AgentsAgentIdDashboardRouteImport } from './routes/agents/$agentId.dashboard'
@@ -48,6 +50,11 @@ const AgentsIndexRoute = AgentsIndexRouteImport.update({
   path: '/agents/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SkillsGraphRoute = SkillsGraphRouteImport.update({
+  id: '/skills/graph',
+  path: '/skills/graph',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SkillsCreateRoute = SkillsCreateRouteImport.update({
   id: '/skills/create',
   path: '/skills/create',
@@ -68,6 +75,12 @@ const AgentsAgentIdToolsRoute = AgentsAgentIdToolsRouteImport.update({
   path: '/tools',
   getParentRoute: () => AgentsAgentIdRoute,
 } as any)
+const AgentsAgentIdSkillsGraphRoute =
+  AgentsAgentIdSkillsGraphRouteImport.update({
+    id: '/skills-graph',
+    path: '/skills-graph',
+    getParentRoute: () => AgentsAgentIdRoute,
+  } as any)
 const AgentsAgentIdSettingsRoute = AgentsAgentIdSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -96,11 +109,13 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
   '/skills/create': typeof SkillsCreateRoute
+  '/skills/graph': typeof SkillsGraphRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
   '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/skills-graph': typeof AgentsAgentIdSkillsGraphRoute
   '/agents/$agentId/tools': typeof AgentsAgentIdToolsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -111,11 +126,13 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
   '/skills/create': typeof SkillsCreateRoute
+  '/skills/graph': typeof SkillsGraphRoute
   '/agents': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
   '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/skills-graph': typeof AgentsAgentIdSkillsGraphRoute
   '/agents/$agentId/tools': typeof AgentsAgentIdToolsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -127,11 +144,13 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
   '/skills/create': typeof SkillsCreateRoute
+  '/skills/graph': typeof SkillsGraphRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/$agentId/chat': typeof AgentsAgentIdChatRoute
   '/agents/$agentId/dashboard': typeof AgentsAgentIdDashboardRoute
   '/agents/$agentId/memory': typeof AgentsAgentIdMemoryRoute
   '/agents/$agentId/settings': typeof AgentsAgentIdSettingsRoute
+  '/agents/$agentId/skills-graph': typeof AgentsAgentIdSkillsGraphRoute
   '/agents/$agentId/tools': typeof AgentsAgentIdToolsRoute
   '/agents/$agentId/voice': typeof AgentsAgentIdVoiceRoute
 }
@@ -144,11 +163,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/agents/$agentId'
     | '/skills/create'
+    | '/skills/graph'
     | '/agents/'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
     | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/skills-graph'
     | '/agents/$agentId/tools'
     | '/agents/$agentId/voice'
   fileRoutesByTo: FileRoutesByTo
@@ -159,11 +180,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/agents/$agentId'
     | '/skills/create'
+    | '/skills/graph'
     | '/agents'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
     | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/skills-graph'
     | '/agents/$agentId/tools'
     | '/agents/$agentId/voice'
   id:
@@ -174,11 +197,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/agents/$agentId'
     | '/skills/create'
+    | '/skills/graph'
     | '/agents/'
     | '/agents/$agentId/chat'
     | '/agents/$agentId/dashboard'
     | '/agents/$agentId/memory'
     | '/agents/$agentId/settings'
+    | '/agents/$agentId/skills-graph'
     | '/agents/$agentId/tools'
     | '/agents/$agentId/voice'
   fileRoutesById: FileRoutesById
@@ -190,6 +215,7 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRouteWithChildren
   SkillsCreateRoute: typeof SkillsCreateRoute
+  SkillsGraphRoute: typeof SkillsGraphRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
 }
 
@@ -230,6 +256,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/skills/graph': {
+      id: '/skills/graph'
+      path: '/skills/graph'
+      fullPath: '/skills/graph'
+      preLoaderRoute: typeof SkillsGraphRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/skills/create': {
       id: '/skills/create'
       path: '/skills/create'
@@ -256,6 +289,13 @@ declare module '@tanstack/react-router' {
       path: '/tools'
       fullPath: '/agents/$agentId/tools'
       preLoaderRoute: typeof AgentsAgentIdToolsRouteImport
+      parentRoute: typeof AgentsAgentIdRoute
+    }
+    '/agents/$agentId/skills-graph': {
+      id: '/agents/$agentId/skills-graph'
+      path: '/skills-graph'
+      fullPath: '/agents/$agentId/skills-graph'
+      preLoaderRoute: typeof AgentsAgentIdSkillsGraphRouteImport
       parentRoute: typeof AgentsAgentIdRoute
     }
     '/agents/$agentId/settings': {
@@ -294,6 +334,7 @@ interface AgentsAgentIdRouteChildren {
   AgentsAgentIdDashboardRoute: typeof AgentsAgentIdDashboardRoute
   AgentsAgentIdMemoryRoute: typeof AgentsAgentIdMemoryRoute
   AgentsAgentIdSettingsRoute: typeof AgentsAgentIdSettingsRoute
+  AgentsAgentIdSkillsGraphRoute: typeof AgentsAgentIdSkillsGraphRoute
   AgentsAgentIdToolsRoute: typeof AgentsAgentIdToolsRoute
   AgentsAgentIdVoiceRoute: typeof AgentsAgentIdVoiceRoute
 }
@@ -303,6 +344,7 @@ const AgentsAgentIdRouteChildren: AgentsAgentIdRouteChildren = {
   AgentsAgentIdDashboardRoute: AgentsAgentIdDashboardRoute,
   AgentsAgentIdMemoryRoute: AgentsAgentIdMemoryRoute,
   AgentsAgentIdSettingsRoute: AgentsAgentIdSettingsRoute,
+  AgentsAgentIdSkillsGraphRoute: AgentsAgentIdSkillsGraphRoute,
   AgentsAgentIdToolsRoute: AgentsAgentIdToolsRoute,
   AgentsAgentIdVoiceRoute: AgentsAgentIdVoiceRoute,
 }
@@ -318,6 +360,7 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   AgentsAgentIdRoute: AgentsAgentIdRouteWithChildren,
   SkillsCreateRoute: SkillsCreateRoute,
+  SkillsGraphRoute: SkillsGraphRoute,
   AgentsIndexRoute: AgentsIndexRoute,
 }
 export const routeTree = rootRouteImport

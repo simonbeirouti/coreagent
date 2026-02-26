@@ -12,6 +12,8 @@ import {
   useInstallRegistrySkill,
   useInstalledSkills,
   useRegistrySkills,
+  useRuntimeSyncDiagnostics,
+  useUninstallRegistrySkill,
 } from '@/hooks/useRegistrySkills';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
@@ -30,6 +32,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Pencil } from 'lucide-react';
 import { toast } from 'sonner';
 import { TrustBadge } from '@/components/skills/trust-badge';
@@ -133,6 +145,31 @@ function resolveDisabledReason(setting: AgentToolSetting) {
   return 'Disabled for this agent.';
 }
 
+function toErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return error;
+  }
+  return fallback;
+}
+
+function toRemediationMessage(error: unknown) {
+  const message = toErrorMessage(error, 'Operation failed');
+  const normalized = message.toLowerCase();
+  if (normalized.includes('blocked while sync is degraded') || normalized.includes('hard-stale')) {
+    return `${message} Run a runtime sync and retry.`;
+  }
+  if (normalized.includes('not installed')) {
+    return `${message} Install the skill first, then retry assignment.`;
+  }
+  if (normalized.includes('agent not found')) {
+    return `${message} Refresh the page and confirm the selected agent still exists.`;
+  }
+  return message;
+}
+
 export const Route = createFileRoute('/agents/$agentId/tools')({
   component: AgentToolsPage,
 });
@@ -143,12 +180,15 @@ function AgentToolsPage() {
   const { data: registrySkills = [] } = useAgentRegistrySkills(agentId);
   const { data: catalogSkills = [], isLoading: isCatalogLoading } = useRegistrySkills();
   const { data: installedSkills = [] } = useInstalledSkills();
+  const { data: runtimeSyncDiagnostics } = useRuntimeSyncDiagnostics();
   const installRegistrySkill = useInstallRegistrySkill();
   const assignRegistrySkill = useAssignRegistrySkill(agentId);
+  const uninstallRegistrySkill = useUninstallRegistrySkill(agentId);
   const setEnabled = useSetAgentAbilityEnabled(agentId);
   const updateConfig = useUpdateAgentAbilityConfig(agentId);
   const [editingTool, setEditingTool] = useState<AgentToolSetting | null>(null);
   const [configDrafts, setConfigDrafts] = useState<Record<string, string>>({});
+  const [hardRemoveTarget, setHardRemoveTarget] = useState<{ skillId: string; skillName: string } | null>(null);
 
   const mergedSettings = useMemo(() => {
     if (registrySkills.length === 0) {
@@ -239,6 +279,10 @@ function AgentToolsPage() {
     () => new Set(registrySkills.filter((skill) => skill.enabled).map((skill) => skill.skillId)),
     [registrySkills]
   );
+  const forceDisabledCount = useMemo(
+    () => mergedSettings.filter((tool) => tool.enforcement_state === 'force_disabled').length,
+    [mergedSettings]
+  );
 
   const setToolEnabled = async (setting: AgentToolSetting, enabled: boolean) => {
     try {
@@ -321,7 +365,7 @@ function AgentToolsPage() {
       await assignRegistrySkill.mutateAsync({ skillId, enabled: true });
       toast.success('Skill installed and assigned to agent');
     } catch (installError) {
-      toast.error('Failed to install and assign skill');
+      toast.error(toRemediationMessage(installError));
       console.error(installError);
     }
   };
@@ -331,7 +375,7 @@ function AgentToolsPage() {
       await assignRegistrySkill.mutateAsync({ skillId });
       toast.success('Skill assigned to agent');
     } catch (assignError) {
-      toast.error('Failed to assign skill');
+      toast.error(toRemediationMessage(assignError));
       console.error(assignError);
     }
   };
@@ -339,10 +383,21 @@ function AgentToolsPage() {
   const unassignSkill = async (skillId: string) => {
     try {
       await assignRegistrySkill.mutateAsync({ skillId, enabled: false });
-      toast.success('Skill unassigned from agent');
+      toast.success('Skill unassigned (soft-disabled) from agent');
     } catch (unassignError) {
-      toast.error('Failed to unassign skill');
+      toast.error(toRemediationMessage(unassignError));
       console.error(unassignError);
+    }
+  };
+
+  const hardRemoveSkill = async (skillId: string) => {
+    try {
+      await uninstallRegistrySkill.mutateAsync({ skillId });
+      toast.success('Skill install removed from this user');
+      setHardRemoveTarget(null);
+    } catch (removeError) {
+      toast.error(toRemediationMessage(removeError));
+      console.error(removeError);
     }
   };
 
@@ -495,6 +550,42 @@ function AgentToolsPage() {
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Registry Diagnostics
+        </h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <Card className="px-0 py-4">
+            <CardHeader>
+              <CardTitle className="text-base">Connectivity</CardTitle>
+              <CardDescription>
+                {runtimeSyncDiagnostics?.freshness === 'hard_stale'
+                  ? 'Registry sync is hard-stale'
+                  : runtimeSyncDiagnostics?.freshness === 'soft_stale'
+                    ? 'Registry sync is degraded'
+                    : 'Registry sync looks healthy'}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+          <Card className="px-0 py-4">
+            <CardHeader>
+              <CardTitle className="text-base">Last Sync</CardTitle>
+              <CardDescription>
+                {runtimeSyncDiagnostics?.lastSuccessAtMs
+                  ? new Date(runtimeSyncDiagnostics.lastSuccessAtMs).toLocaleString()
+                  : 'No successful sync yet'}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+          <Card className="px-0 py-4">
+            <CardHeader>
+              <CardTitle className="text-base">Force-Disabled Tools</CardTitle>
+              <CardDescription>{forceDisabledCount} currently blocked</CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
           Registry Skills
         </h2>
         {isCatalogLoading ? (
@@ -518,7 +609,8 @@ function AgentToolsPage() {
             {catalogSkills.map((skill) => {
               const isInstalled = installedSkillIds.has(skill.skillId);
               const isAssigned = assignedSkillIds.has(skill.skillId);
-              const actionPending = installRegistrySkill.isPending || assignRegistrySkill.isPending;
+              const actionPending =
+                installRegistrySkill.isPending || assignRegistrySkill.isPending || uninstallRegistrySkill.isPending;
               return (
                 <Card key={skill.skillId} className="px-0 py-4">
                   <CardHeader>
@@ -559,14 +651,29 @@ function AgentToolsPage() {
                         Assign
                       </Button>
                     ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={actionPending}
-                        onClick={() => void unassignSkill(skill.skillId)}
-                      >
-                        Unassign
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={actionPending}
+                          onClick={() => void unassignSkill(skill.skillId)}
+                        >
+                          Unassign
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={actionPending}
+                          onClick={() =>
+                            setHardRemoveTarget({
+                              skillId: skill.skillId,
+                              skillName: skill.name,
+                            })
+                          }
+                        >
+                          Hard Remove
+                        </Button>
+                      </div>
                     )}
                   </CardContent>
                 </Card>
@@ -651,6 +758,31 @@ function AgentToolsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <AlertDialog
+        open={hardRemoveTarget !== null}
+        onOpenChange={(open) => (!open ? setHardRemoveTarget(null) : undefined)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Hard remove installed skill?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the skill install for your user account. Use this only for cleanup or security actions.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (!hardRemoveTarget) return;
+                void hardRemoveSkill(hardRemoveTarget.skillId);
+              }}
+            >
+              Remove {hardRemoveTarget?.skillName ?? 'skill'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -107,6 +107,7 @@ interface CreateDelegationRequest {
   role: AgentDelegation['role'];
   ownership_scope?: AgentDelegation['ownership_scope'];
   created_by_user_id: string;
+  required_ability_keys?: string[];
 }
 
 interface CreateTaskRequest {
@@ -436,6 +437,7 @@ export function useReassignOrchestrationTask(runId: string) {
       newOwnerAgentId: string;
       requestedByAgentId: string;
       reason?: string;
+      requiredAbilityKeys?: string[];
     }): Promise<OrchestrationTask> => invoke('reassign_orchestration_task', params),
     onMutate: async (params) => {
       await queryClient.cancelQueries({ queryKey: orchestrationKeys.tasks(runId) });

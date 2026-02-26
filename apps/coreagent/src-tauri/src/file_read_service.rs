@@ -312,7 +312,11 @@ impl AttachmentReadService {
                         content_excerpt: None,
                         truncated: false,
                         metadata: serde_json::json!({
-                            "errorCode": if missing_object { "storage_object_not_found" } else { "read_failed" }
+                            "errorCode": if missing_object { "storage_object_not_found" } else { "read_failed" },
+                            "parseDiagnostics": {
+                                "attemptedParser": marker.file_type,
+                                "quality": "failed"
+                            }
                         }),
                         error: Some(error),
                     }
@@ -418,7 +422,12 @@ impl AttachmentReadService {
             truncated,
             metadata: serde_json::json!({
                 "sizeBytes": byte_len,
-                "parser": parser
+                "parser": parser,
+                "parseDiagnostics": {
+                    "attemptedParser": parser,
+                    "quality": if truncated { "partial" } else { "full" },
+                    "truncated": truncated
+                }
             }),
             error: None,
         })

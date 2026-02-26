@@ -156,17 +156,26 @@ async function listAllRunEvents(baseUrl, token, runId) {
 function eventSummary(events) {
   const typeCounts = new Map();
   const stateTransitions = [];
+  let sequenceMonotonic = true;
+  let lastSequence = -1;
   for (const event of events) {
     const type = String(event?.type ?? "unknown");
     typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
     if (type === "state_transition" && typeof event?.status === "string") {
       stateTransitions.push(event.status);
     }
+    if (typeof event?.sequence === "number") {
+      if (event.sequence < lastSequence) {
+        sequenceMonotonic = false;
+      }
+      lastSequence = event.sequence;
+    }
   }
   return {
     total: events.length,
     logCount: typeCounts.get("log") ?? 0,
     stateTransitions,
+    sequenceMonotonic,
     typeCounts: Object.fromEntries([...typeCounts.entries()].sort(([a], [b]) => a.localeCompare(b))),
   };
 }
@@ -180,6 +189,12 @@ function assertParity(remoteRun, localRun, remoteEvents, localEvents) {
   }
   if (remoteRun.error || localRun.error) {
     throw new Error("One or both runs reported a runtime error payload.");
+  }
+  if (remoteRun.executionMode && remoteRun.executionMode !== "remote") {
+    throw new Error(`Remote run reported unexpected executionMode=${remoteRun.executionMode}`);
+  }
+  if (localRun.executionMode && localRun.executionMode !== "local_docker") {
+    throw new Error(`Local run reported unexpected executionMode=${localRun.executionMode}`);
   }
 
   const remoteOutputSig = outputSignature(remoteRun.output);
@@ -203,6 +218,11 @@ function assertParity(remoteRun, localRun, remoteEvents, localEvents) {
   if (remoteEventSummary.logCount < 1 || localEventSummary.logCount < 1) {
     throw new Error(
       `Expected log events in both modes (remote=${remoteEventSummary.logCount}, local_docker=${localEventSummary.logCount}).`,
+    );
+  }
+  if (!remoteEventSummary.sequenceMonotonic || !localEventSummary.sequenceMonotonic) {
+    throw new Error(
+      `Event sequence ordering is unstable (remote=${remoteEventSummary.sequenceMonotonic}, local_docker=${localEventSummary.sequenceMonotonic}).`,
     );
   }
 }

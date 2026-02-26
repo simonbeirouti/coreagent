@@ -202,12 +202,15 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
   });
 
   app.get("/v1/runtime/skills/:skillId/versions/:version/handshake", async (request, reply) => {
+    const startedAtMs = Date.now();
     const user = await resolveUserIdFromRequest(request.headers as Record<string, unknown>, options.env);
     if (!user.ok) {
+      options.metrics.recordHandshakeFailure();
       return reply.code(user.statusCode).send({ message: user.message });
     }
 
     if (!options.dbPool) {
+      options.metrics.recordHandshakeFailure();
       return reply.code(503).send({ message: "DATABASE_URL is not configured." });
     }
 
@@ -265,6 +268,7 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
 
     const row = versionRecord.rows[0];
     if (!row) {
+      options.metrics.recordHandshakeFailure();
       return reply.code(404).send({ message: "Skill version not found." });
     }
 
@@ -329,6 +333,24 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
       : advisory
         ? advisory.summary
         : null;
+    if (row.policyStatus !== "approved") {
+      options.metrics.recordBlockedExecution(`policy_status:${row.policyStatus}`);
+    }
+    if (!row.installId) {
+      options.metrics.recordBlockedExecution("install_missing");
+    } else if (!row.installState || !["installed", "ready"].includes(row.installState)) {
+      options.metrics.recordBlockedExecution(`install_state:${row.installState ?? "unknown"}`);
+    }
+    if (forceDisable) {
+      const reason =
+        row.revokedAt
+          ? "revoked"
+          : advisory?.advisoryType
+            ? `advisory:${advisory.advisoryType}`
+            : "force_disable";
+      options.metrics.recordBlockedExecution(reason);
+    }
+    options.metrics.recordHandshakeLatencyMs(Date.now() - startedAtMs);
 
     return {
       data: {
@@ -388,10 +410,17 @@ export const skillRoutes: FastifyPluginAsync<SkillRoutesOptions> = async (app, o
 
   app.get("/v1/advisories/feed", async (request) => {
     const { cursor, limit } = advisoryFeedQuerySchema.parse(request.query);
-    const feed = await catalogService.listAdvisoryFeed({
-      ...(cursor ? { cursor } : {}),
-      limit
-    });
+    const feed = await (async () => {
+      try {
+        return await catalogService.listAdvisoryFeed({
+          ...(cursor ? { cursor } : {}),
+          limit
+        });
+      } catch (error) {
+        options.metrics.recordAdvisoryPropagationFailure();
+        throw error;
+      }
+    })();
     for (const advisory of feed.advisories) {
       const publishedAtMs = Date.parse(advisory.publishedAt);
       if (Number.isNaN(publishedAtMs)) {

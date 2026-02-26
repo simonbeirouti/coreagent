@@ -334,6 +334,7 @@ CREATE TABLE user_profiles (
     work_patterns JSONB DEFAULT '{}',
     language TEXT NOT NULL DEFAULT 'en',
     ai_response_language TEXT NOT NULL DEFAULT 'en',
+    email TEXT,
     notifications_enabled BOOLEAN NOT NULL DEFAULT true,
     analytics_enabled BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -348,6 +349,7 @@ COMMENT ON COLUMN user_profiles.work_patterns IS 'Professional context, domain e
 
 -- Create index for performance
 CREATE INDEX idx_user_profiles_user_id ON user_profiles(user_id);
+CREATE INDEX idx_user_profiles_email ON user_profiles(email);
 
 -- Enable RLS on user_profiles table
 ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
@@ -424,6 +426,7 @@ ON perception_logs FOR ALL USING (
 
 COMMENT ON COLUMN user_profiles.language IS 'UI language preference (ISO 639-1 code)';
 COMMENT ON COLUMN user_profiles.ai_response_language IS 'Language the AI should respond in (ISO 639-1 code)';
+COMMENT ON COLUMN user_profiles.email IS 'Optional contact email used for product updates/notifications.';
 COMMENT ON COLUMN user_profiles.notifications_enabled IS 'Whether notifications are enabled for the user';
 COMMENT ON COLUMN user_profiles.analytics_enabled IS 'Whether the user has opted in to analytics';
 
@@ -441,6 +444,7 @@ BEGIN
     work_patterns,
     language,
     ai_response_language,
+    email,
     notifications_enabled,
     analytics_enabled
   )
@@ -451,10 +455,11 @@ BEGIN
     '{}'::jsonb,
     'en',
     'en',
+    NEW.email,
     true,
     false
   );
-  
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -1401,6 +1406,74 @@ ON orchestration_schedules FOR ALL USING (
           )
     )
 );
+
+-- ============================================================================
+-- Skills Graph Snapshots
+-- ============================================================================
+
+-- Skills graph snapshots for user/team scopes.
+CREATE TABLE skills_graphs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_type TEXT NOT NULL CHECK (owner_type IN ('user', 'team', 'agent')),
+  owner_id UUID NOT NULL,
+  graph_jsonb JSONB NOT NULL DEFAULT '{"nodes":[],"edges":[],"viewport":{}}'::jsonb,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (owner_type, owner_id)
+);
+
+CREATE INDEX idx_skills_graphs_owner ON skills_graphs(owner_type, owner_id);
+
+ALTER TABLE skills_graphs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can read own graphs" ON skills_graphs
+  FOR SELECT USING (
+    (owner_type = 'user' AND owner_id = auth.uid())
+    OR (
+      owner_type = 'agent'
+      AND EXISTS (
+        SELECT 1 FROM agents a
+        WHERE a.id = owner_id
+          AND a.user_id = auth.uid()
+      )
+    )
+  );
+
+CREATE POLICY "Users can write own user graphs" ON skills_graphs
+  FOR INSERT WITH CHECK (
+    (
+      owner_type = 'user' AND owner_id = auth.uid() AND created_by_user_id = auth.uid()
+    )
+    OR (
+      owner_type = 'agent'
+      AND created_by_user_id = auth.uid()
+      AND EXISTS (
+        SELECT 1 FROM agents a
+        WHERE a.id = owner_id
+          AND a.user_id = auth.uid()
+      )
+    )
+  );
+
+CREATE POLICY "Users can update own user graphs" ON skills_graphs
+  FOR UPDATE USING (
+    (owner_type = 'user' AND owner_id = auth.uid())
+    OR (
+      owner_type = 'agent'
+      AND EXISTS (
+        SELECT 1 FROM agents a
+        WHERE a.id = owner_id
+          AND a.user_id = auth.uid()
+      )
+    )
+  );
+
+CREATE TRIGGER update_skills_graphs_updated_at
+  BEFORE UPDATE ON skills_graphs
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
 
 -- Helper for periodic retention in scheduler/admin maintenance jobs.
 CREATE OR REPLACE FUNCTION purge_old_orchestration_events(retention_days integer DEFAULT 30)

@@ -67,6 +67,18 @@ export type ServiceMetricsSnapshot = {
       avg: number;
       max: number;
     };
+    propagationFailures: number;
+  };
+  handshake: {
+    latencyMs: {
+      samples: number;
+      avg: number;
+      max: number;
+    };
+    failures: number;
+  };
+  runtimeGate: {
+    blockedExecutionsByReason: Record<string, number>;
   };
 };
 
@@ -88,6 +100,12 @@ export class MetricsService {
   private advisoryLagSamples = 0;
   private advisoryLagTotalMs = 0;
   private advisoryLagMaxMs = 0;
+  private advisoryPropagationFailures = 0;
+  private handshakeLatencySamples = 0;
+  private handshakeLatencyTotalMs = 0;
+  private handshakeLatencyMaxMs = 0;
+  private handshakeFailures = 0;
+  private readonly blockedExecutionCounts = new Map<string, number>();
 
   private readonly catalogByRoute: Record<CatalogRouteKey, CatalogRouteMetric> = {
     "GET /v1/skills": createCatalogRouteMetric(),
@@ -153,6 +171,27 @@ export class MetricsService {
     this.advisoryLagSamples += 1;
     this.advisoryLagTotalMs += normalizedLagMs;
     this.advisoryLagMaxMs = Math.max(this.advisoryLagMaxMs, normalizedLagMs);
+  }
+
+  public recordAdvisoryPropagationFailure(): void {
+    this.advisoryPropagationFailures += 1;
+  }
+
+  public recordHandshakeLatencyMs(latencyMs: number): void {
+    const normalizedLatencyMs = toNonNegativeNumber(latencyMs);
+    this.handshakeLatencySamples += 1;
+    this.handshakeLatencyTotalMs += normalizedLatencyMs;
+    this.handshakeLatencyMaxMs = Math.max(this.handshakeLatencyMaxMs, normalizedLatencyMs);
+  }
+
+  public recordHandshakeFailure(): void {
+    this.handshakeFailures += 1;
+  }
+
+  public recordBlockedExecution(reason: string): void {
+    const normalizedReason = reason.trim().length > 0 ? reason.trim() : "unknown";
+    const existing = this.blockedExecutionCounts.get(normalizedReason) ?? 0;
+    this.blockedExecutionCounts.set(normalizedReason, existing + 1);
   }
 
   public snapshot(): ServiceMetricsSnapshot {
@@ -248,7 +287,21 @@ export class MetricsService {
           samples: this.advisoryLagSamples,
           avg: this.advisoryLagSamples > 0 ? this.advisoryLagTotalMs / this.advisoryLagSamples : 0,
           max: this.advisoryLagMaxMs
-        }
+        },
+        propagationFailures: this.advisoryPropagationFailures
+      },
+      handshake: {
+        latencyMs: {
+          samples: this.handshakeLatencySamples,
+          avg: this.handshakeLatencySamples > 0 ? this.handshakeLatencyTotalMs / this.handshakeLatencySamples : 0,
+          max: this.handshakeLatencyMaxMs
+        },
+        failures: this.handshakeFailures
+      },
+      runtimeGate: {
+        blockedExecutionsByReason: Object.fromEntries(
+          [...this.blockedExecutionCounts.entries()].sort(([a], [b]) => a.localeCompare(b))
+        )
       }
     };
   }

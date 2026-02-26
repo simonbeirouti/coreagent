@@ -61,6 +61,16 @@ pnpm check-types
 pnpm build
 ```
 
+### Targeted Vitest For Dynamic Route Files
+
+Use `vitest` directly via `pnpm exec` and quote file paths that contain `$` (for example `$agentId`) so shell expansion does not rewrite the filename.
+
+```bash
+pnpm --filter coreagent exec vitest run \
+  'src/routes/agents/$agentId.skills-graph.test.tsx' \
+  'src/routes/agents/$agentId.tools.test.tsx'
+```
+
 ## Notes
 
 - Queue-backed runtime in `apps/server` is controlled by `ENABLE_RUNTIME_QUEUE=true`.
@@ -148,7 +158,7 @@ pnpm build
   - capability prechecks are in place for `record_delegation`
   - equivalent enforcement is still pending for delegation creation and reassignment paths
 - Test and release gates (section 6) are **partially complete**:
-  - baseline metrics and targeted policy/lifecycle/security test coverage are present
+  - baseline publish/catalog/advisory metrics and targeted policy/lifecycle/security test coverage are present
   - handshake/advisory propagation metrics plus full resilience and security gate coverage are still pending
 - Skills graph MVP (section 7) remains **not started** (no graph route/module/persistence/API delivered yet).
 

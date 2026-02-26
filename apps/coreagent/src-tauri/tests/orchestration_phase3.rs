@@ -47,6 +47,7 @@ async fn orchestration_phase3_lifecycle_policy_and_memory_flow() -> Result<(), S
             role: "researcher".to_string(),
             ownership_scope: Some("delegated".to_string()),
             created_by_user_id: fixture.user_id.to_string(),
+            required_ability_keys: None,
         },
     )
     .await?;
@@ -235,6 +236,63 @@ async fn orchestration_phase3_lifecycle_policy_and_memory_flow() -> Result<(), S
 
     let processed = OrchestrationService::run_scheduler_tick(&db).await?;
     assert!(processed >= 1);
+
+    let _ = db
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM agents WHERE id = $1::uuid",
+            vec![child_agent_id.into()],
+        ))
+        .await;
+    cleanup_fixture(&db, &fixture).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_agent_delegation_blocks_when_required_abilities_missing() -> Result<(), String> {
+    let Some(db) = connect_test_db().await else {
+        return Ok(());
+    };
+    let fixture = create_fixture(&db, "orchestration-phase3-capability").await?;
+    let child_agent_id = Uuid::new_v4();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+            INSERT INTO agents (
+                id, user_id, name, persona, provider_type, model_id, state, created_at, updated_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::text, $4::text, 'openai', 'gpt-4o-mini', 'active', $5::timestamptz, $5::timestamptz
+            )
+        "#,
+        vec![
+            child_agent_id.into(),
+            fixture.user_id.into(),
+            format!("child-agent-capability-{}", fixture.run_id).into(),
+            "child persona".to_string().into(),
+            Utc::now().into(),
+        ],
+    ))
+    .await
+    .map_err(|e| format!("Failed inserting child agent fixture: {e}"))?;
+
+    let result = OrchestrationService::create_agent_delegation(
+        &db,
+        CreateAgentDelegationRequest {
+            parent_agent_id: fixture.agent_id.to_string(),
+            child_agent_id: child_agent_id.to_string(),
+            role: "researcher".to_string(),
+            ownership_scope: Some("delegated".to_string()),
+            created_by_user_id: fixture.user_id.to_string(),
+            required_ability_keys: Some(vec!["attachment_read".to_string()]),
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .unwrap_or_default()
+        .contains("missing required abilities"));
 
     let _ = db
         .execute(Statement::from_sql_and_values(

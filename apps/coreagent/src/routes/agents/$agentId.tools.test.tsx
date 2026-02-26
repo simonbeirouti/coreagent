@@ -105,6 +105,19 @@ vi.mock('@/hooks/useRegistrySkills', () => ({
     mutateAsync: vi.fn(),
     isPending: false,
   }),
+  useUninstallRegistrySkill: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+  useRuntimeSyncDiagnostics: () => ({
+    data: {
+      freshness: 'fresh',
+      appIsForeground: true,
+      lastSuccessAtMs: Date.now(),
+      consecutiveFailures: 0,
+      nextBackoffSeconds: 0,
+    },
+  }),
 }));
 
 import { Route } from './$agentId.tools';
@@ -123,6 +136,7 @@ describe('tools route runtime', () => {
     expect(screen.getByText('Core')).toBeInTheDocument();
     expect(screen.getAllByText('Registry').length).toBeGreaterThan(0);
     expect(screen.getByText('Registry Skills')).toBeInTheDocument();
+    expect(screen.getByText('Registry Diagnostics')).toBeInTheDocument();
     expect(screen.getByText('Research Brief Composer')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Install & Assign' })).toBeInTheDocument();
   });
