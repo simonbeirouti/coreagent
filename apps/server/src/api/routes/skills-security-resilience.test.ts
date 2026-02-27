@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminSkillRoutes } from "./admin-skills.js";
 import { skillRoutes } from "./skills.js";
@@ -11,6 +11,12 @@ import { HmacSignatureService } from "../../services/signature-service.js";
 import type { SkillRepository } from "../../repositories/skill-repository.js";
 
 const TEST_JWT_SECRET = "phase6-jwt-secret";
+
+vi.mock("../../services/runtime-environment-builder.js", () => ({
+  ensureRuntimeEnvironmentReady: async () => ({
+    runtimeEnvironmentId: "runtime-env-test"
+  })
+}));
 
 function createEnv(overrides?: Partial<AppEnv>): AppEnv {
   return {
@@ -337,5 +343,328 @@ describe("skills security and resilience", () => {
     expect(snapshot.handshake.failures).toBe(1);
     expect(snapshot.runtimeGate.blockedExecutionsByReason["policy_status:rejected"]).toBe(1);
     expect(snapshot.runtimeGate.blockedExecutionsByReason.install_missing).toBe(1);
+  });
+
+  it("covers install -> assign -> runtime validate and revocation force-disable lifecycle", async () => {
+    const env = createEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+
+    const state = {
+      installState: null as string | null,
+      installId: "install-lifecycle-1",
+      revoked: false,
+      agentId: "22222222-2222-4222-8222-222222222222"
+    };
+
+    const dbPool = {
+      async query<T>(text: string, values: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+        if (
+          text.includes("FROM skills s") &&
+          text.includes("WHERE s.skill_id = $1::text") &&
+          text.includes("status <> 'disabled'") &&
+          !text.includes("abilityId")
+        ) {
+          return {
+            rows: [{ skillRefId: "skill-ref", implementationKey: "coreagent.phase6.lifecycle" } as T],
+            rowCount: 1
+          };
+        }
+        if (text.includes("FROM skill_versions sv") && text.includes("sv.version = $2::text")) {
+          return {
+            rows: [{ skillVersionId: "skill-version-ref", version: "1.0.0", digest: "b".repeat(64) } as T],
+            rowCount: 1
+          };
+        }
+        if (text.includes("INSERT INTO skill_installs")) {
+          state.installState = "resolving";
+          return {
+            rows: [{ installId: state.installId } as T],
+            rowCount: 1
+          };
+        }
+        if (text.includes("UPDATE skill_installs") && text.includes("install_state = 'ready'")) {
+          state.installState = "ready";
+          return { rows: [] as T[], rowCount: 1 };
+        }
+        if (text.includes("LEFT JOIN abilities ab")) {
+          return {
+            rows: [
+              {
+                skillRefId: "skill-ref",
+                implementationKey: "coreagent.phase6.lifecycle",
+                abilityId: "ability-id"
+              } as T
+            ],
+            rowCount: 1
+          };
+        }
+        if (text.includes("install_state IN ('installed', 'ready')")) {
+          return {
+            rows: state.installState === "ready" ? ([{ id: state.installId }] as T[]) : [],
+            rowCount: state.installState === "ready" ? 1 : 0
+          };
+        }
+        if (text.includes("FROM agents a")) {
+          const requestedAgent = String(values[0] ?? "");
+          return {
+            rows: requestedAgent === state.agentId ? ([{ id: state.agentId }] as T[]) : [],
+            rowCount: requestedAgent === state.agentId ? 1 : 0
+          };
+        }
+        if (text.includes("INSERT INTO agent_abilities")) {
+          return {
+            rows: [{ agentAbilityId: "agent-ability-id" } as T],
+            rowCount: 1
+          };
+        }
+        if (text.includes("FROM skills s") && text.includes("LEFT JOIN skill_installs")) {
+          return {
+            rows: [
+              {
+                skillRefId: "skill-ref",
+                implementationKey: "coreagent.phase6.lifecycle",
+                name: "Phase 6 Lifecycle Skill",
+                riskLevel: "moderate",
+                runtime: "command",
+                entrypoint: "scripts/run.sh",
+                artifactUri: `artifact://sha256/${"b".repeat(64)}`,
+                digest: "b".repeat(64),
+                signature: "hmac-sha256.sig",
+                compatibilityMinAppVersion: null,
+                compatibilityMaxAppVersion: null,
+                policyStatus: "approved",
+                revokedAt: state.revoked ? "2026-02-26T00:00:00.000Z" : null,
+                installId: state.installState === "ready" ? state.installId : null,
+                installState: state.installState,
+                autoUpdate: true,
+                installConfig: {},
+                pinnedVersion: "1.0.0"
+              } as T
+            ],
+            rowCount: 1
+          };
+        }
+        if (text.includes("FROM skill_permissions sp")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("FROM skill_advisories sa")) {
+          if (!state.revoked) {
+            return { rows: [], rowCount: 0 };
+          }
+          return {
+            rows: [
+              {
+                advisoryId: "adv-1",
+                advisoryType: "revocation",
+                title: "Revoked",
+                summary: "Version revoked via advisory.",
+                severity: "critical",
+                publishedAt: "2026-02-26T00:00:00.000Z",
+                metadata: { force_disable: true }
+              } as T
+            ],
+            rowCount: 1
+          };
+        }
+        throw new Error(`Unhandled SQL in lifecycle test pool: ${text.slice(0, 80)}`);
+      }
+    };
+
+    await app.register(skillRoutes, {
+      repository: emptyRepository,
+      dbPool: dbPool as never,
+      env,
+      metrics: new MetricsService(),
+      rateLimiter: new InMemoryRateLimiter(100, 60_000)
+    });
+
+    const install = await app.inject({
+      method: "POST",
+      url: "/v1/skills/coreagent.phase6.lifecycle/install",
+      headers: authHeader(),
+      payload: {
+        version: "1.0.0",
+        autoUpdate: true,
+        installConfig: {}
+      }
+    });
+    expect(install.statusCode).toBe(200);
+
+    const assign = await app.inject({
+      method: "POST",
+      url: "/v1/skills/coreagent.phase6.lifecycle/assign",
+      headers: authHeader(),
+      payload: {
+        agentId: state.agentId,
+        enabled: true,
+        config: {}
+      }
+    });
+    expect(assign.statusCode).toBe(200);
+
+    const validate = await app.inject({
+      method: "GET",
+      url: "/v1/runtime/skills/coreagent.phase6.lifecycle/versions/1.0.0/handshake",
+      headers: authHeader()
+    });
+    expect(validate.statusCode).toBe(200);
+    expect(validate.json()).toMatchObject({
+      data: {
+        install: { installed: true, installState: "ready" },
+        forceDisable: { required: false }
+      }
+    });
+
+    state.revoked = true;
+    const revokedValidate = await app.inject({
+      method: "GET",
+      url: "/v1/runtime/skills/coreagent.phase6.lifecycle/versions/1.0.0/handshake",
+      headers: authHeader()
+    });
+    expect(revokedValidate.statusCode).toBe(200);
+    expect(revokedValidate.json()).toMatchObject({
+      data: {
+        forceDisable: { required: true }
+      }
+    });
+  });
+
+  it("records advisory feed recovery after transient failure", async () => {
+    const env = createEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+    const metrics = new MetricsService();
+    let failOnce = true;
+
+    const recoveringRepository: SkillRepository = {
+      ...emptyRepository,
+      async listAdvisoryFeed() {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error("registry temporarily unavailable");
+        }
+        return {
+          advisories: [
+            {
+              id: "adv-recover-1",
+              skillId: "coreagent.phase6.lifecycle",
+              version: "1.0.0",
+              advisoryType: "warning",
+              severity: "moderate",
+              title: "Recovery advisory",
+              summary: "Recovered",
+              sequenceCursor: "42",
+              forceDisable: false,
+              publishedAt: new Date(Date.now() - 2_000).toISOString(),
+              resolvedAt: null
+            }
+          ],
+          nextCursor: null,
+          hasMore: false
+        };
+      }
+    };
+
+    await app.register(skillRoutes, {
+      repository: recoveringRepository,
+      dbPool: null,
+      env,
+      metrics,
+      rateLimiter: new InMemoryRateLimiter(100, 60_000)
+    });
+
+    const first = await app.inject({ method: "GET", url: "/v1/advisories/feed?limit=5" });
+    expect(first.statusCode).toBe(500);
+
+    const second = await app.inject({ method: "GET", url: "/v1/advisories/feed?limit=5" });
+    expect(second.statusCode).toBe(200);
+
+    const snapshot = metrics.snapshot();
+    expect(snapshot.advisories.propagationFailures).toBe(1);
+    expect(snapshot.advisories.propagationLagMs.samples).toBeGreaterThanOrEqual(1);
+  });
+
+  it("blocks permission escalation when assigning to another user's agent", async () => {
+    const env = createEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+
+    const dbPool = {
+      async query<T>(text: string): Promise<{ rows: T[]; rowCount: number }> {
+        if (text.includes("LEFT JOIN abilities ab")) {
+          return {
+            rows: [
+              {
+                skillRefId: "skill-ref",
+                implementationKey: "coreagent.phase6.escalation",
+                abilityId: "ability-id"
+              } as T
+            ],
+            rowCount: 1
+          };
+        }
+        if (text.includes("install_state IN ('installed', 'ready')")) {
+          return {
+            rows: [{ id: "install-id" } as T],
+            rowCount: 1
+          };
+        }
+        if (text.includes("FROM agents a")) {
+          return { rows: [], rowCount: 0 };
+        }
+        throw new Error(`Unhandled SQL in escalation test pool: ${text.slice(0, 80)}`);
+      }
+    };
+
+    await app.register(skillRoutes, {
+      repository: emptyRepository,
+      dbPool: dbPool as never,
+      env,
+      metrics: new MetricsService(),
+      rateLimiter: new InMemoryRateLimiter(100, 60_000)
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/skills/coreagent.phase6.escalation/assign",
+      headers: authHeader(),
+      payload: {
+        agentId: "33333333-3333-4333-8333-333333333333",
+        enabled: true,
+        config: {}
+      }
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ message: "Agent not found." });
+  });
+
+  it("does not leak bearer token values in auth failure responses", async () => {
+    const env = createEnv();
+    const app = Fastify({ logger: false });
+    appsToClose.push(app);
+
+    await app.register(skillRoutes, {
+      repository: emptyRepository,
+      dbPool: null,
+      env,
+      metrics: new MetricsService(),
+      rateLimiter: new InMemoryRateLimiter(100, 60_000)
+    });
+
+    const rawToken = "raw-super-secret-token-value";
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/skills/installed",
+      headers: {
+        authorization: `Bearer ${rawToken}`
+      }
+    });
+
+    expect(response.statusCode).toBe(401);
+    const bodyText = response.body;
+    expect(bodyText).not.toContain(rawToken);
+    expect(bodyText.toLowerCase()).not.toContain("bearer raw-super-secret-token-value");
   });
 });

@@ -1,7 +1,7 @@
 # CoreAgent Unified Delivery PRD (Active)
 
 ## Document Status
-- Version: 6.1
+- Version: 6.2
 - Last Updated: 2026-02-26
 - Owner: CoreAgent Product + Platform Engineering
 - Purpose: active roadmap only (completed work removed from execution backlog)
@@ -41,21 +41,18 @@
   - dedicated registry diagnostics surfaced in settings/tools views
   - `attachment_read` now returns parse diagnostics metadata for UI surfaces
   - skills graph usability baseline shipped (search control, post-search filtering, edge typing selector, human-review apply flow for suggestions)
+- P0 release-gate validation coverage shipped:
+  - lifecycle integration tests now cover install -> assign -> runtime validate and revocation force-disable transitions
+  - resilience/security coverage expanded for advisory sync recovery, permission-escalation blocking, and token-redaction assertions in auth failures
 
 ## Active Priorities (Canonical Order)
-- Current execution scope: P0 + P1.
+- Current execution scope: Phase 4 go/no-go and backlog prioritization.
 
 ### P0 - Runtime Hardening Closure
 - Completed in 6.1; removed from active backlog.
 
 ### P0 - Release Gates (Must Pass Before Phase 4)
-- [ ] Add lifecycle integration coverage:
-  - publish -> install -> assign -> runtime validate -> invoke
-  - revocation -> advisory sync -> force-disable
-- [ ] Expand resilience/security suites:
-  - registry unavailable during install/sync
-  - advisory sync recovery behavior
-  - token redaction and permission-escalation protections
+- Completed in 6.2; removed from active backlog.
 
 ### P1 - Skills Interaction UX/Policy Completion
 - Completed in 6.1; removed from active backlog.
@@ -77,18 +74,22 @@
 Move from mostly manual, single-agent execution toward reliable delegated and scheduled automation while preserving runtime safety guarantees.
 
 ### Phase 4 Entry Criteria (Go/No-Go)
-- [ ] P0 Runtime Hardening Closure complete.
-- [ ] P0 Release Gates complete and passing.
-- [ ] Skills Graph usability baseline ready for operational planning workflows.
+- [x] P0 Runtime Hardening Closure complete.
+- [x] P0 Release Gates complete and passing.
+- [x] Skills Graph usability baseline ready for operational planning workflows.
 - [ ] No critical open reliability/security defects in orchestration/runtime paths.
 
 ### Planned Phase 4 Scope (When Entry Criteria Pass)
 - Capability-aware delegation/reassignment across orchestration paths.
 - Durable orchestration state progression with retries/heartbeats/recovery.
-- Scheduled automation jobs with explicit policy boundaries and observability.
+- Human-in-the-loop task review loop (`approved` / `rework` / `rejected`) backed by orchestration task feedback state.
+- Delegation management completion (revoke/reactivate) and stronger run/task detail UX.
+- Session-bound orchestration write identity (remove trust in client-supplied owner IDs).
 - Unified diagnostics across orchestration + runtime execution.
 
+Phase 4 detail PRD (implementation-aligned): `agent-to-agent.md` (v2.0).
+
 ## Execution Focus For Next Step
-1. Finish remaining P0 release-gate lifecycle integration coverage.
-2. Close remaining resilience/security suite gaps (registry outage, advisory recovery, token/permission protections).
-3. Re-evaluate go/no-go for Phase 4 kickoff once release gates are fully passing.
+1. Run final reliability/security audit for orchestration/runtime critical paths.
+2. If audit is clean, execute Phase 4 milestones from `agent-to-agent.md` in order (M1 -> M6).
+3. Re-prioritize P2 backlog items relative to the Phase 4 milestone plan.

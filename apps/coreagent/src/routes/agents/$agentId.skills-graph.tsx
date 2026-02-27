@@ -48,6 +48,8 @@ import {
   useSkillsGraph,
   useSuggestSkillsGraphConnections,
 } from '@/hooks/useSkillsGraph';
+import { skillsGraphKeys } from '@/lib/query-keys';
+import { getCachedData } from '@/lib/tauri-store';
 
 type EdgeLabelType = 'prereq' | 'related' | 'used_with';
 const EDGE_LABEL_OPTIONS: Array<{ value: EdgeLabelType; label: string }> = [
@@ -81,35 +83,17 @@ export const Route = createFileRoute('/agents/$agentId/skills-graph')({
   component: AgentSkillsGraphPage,
 });
 
-function normalizeGraphFromStorage(raw: string): { nodes: Node<SkillsGraphNodeData>[]; edges: Edge[] } | null {
-  try {
-    const parsed = JSON.parse(raw) as {
-      nodes?: Node<SkillsGraphNodeData>[];
-      edges?: Edge[];
-    };
-    return {
-      nodes: Array.isArray(parsed.nodes) ? parsed.nodes : [],
-      edges: Array.isArray(parsed.edges) ? parsed.edges : [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-function getFastHydratedGraph(
-  agentId: string,
-  localGraphKey: string
-): { nodes: Node<SkillsGraphNodeData>[]; edges: Edge[] } {
+function getFastHydratedGraph(agentId: string): { nodes: Node<SkillsGraphNodeData>[]; edges: Edge[] } {
   const fromMemory = graphViewCache.get(agentId);
   if (fromMemory) {
     return { nodes: fromMemory.nodes, edges: fromMemory.edges };
   }
-
-  const local = localStorage.getItem(localGraphKey);
-  if (!local) return { nodes: [], edges: [] };
-  const parsed = normalizeGraphFromStorage(local);
-  if (!parsed) return { nodes: [], edges: [] };
-  return parsed;
+  const cachedSnapshot = getCachedData<{
+    graphJson?: { nodes?: Node<SkillsGraphNodeData>[]; edges?: Edge[] };
+  }>(skillsGraphKeys.byOwner('agent', agentId));
+  const nodes = Array.isArray(cachedSnapshot?.graphJson?.nodes) ? cachedSnapshot.graphJson.nodes : [];
+  const edges = Array.isArray(cachedSnapshot?.graphJson?.edges) ? cachedSnapshot.graphJson.edges : [];
+  return { nodes, edges };
 }
 
 function layoutGraph(nodes: Node<SkillsGraphNodeData>[], edges: Edge[]): Node<SkillsGraphNodeData>[] {
@@ -286,13 +270,12 @@ function AgentSkillsGraphPage() {
   const assignRegistrySkill = useAssignRegistrySkill(agentId);
   const setAgentAbilityEnabled = useSetAgentAbilityEnabled(agentId);
   const { data: installedSkills = [] } = useInstalledSkills();
-  const localGraphKey = `coreagent.skills.graph.local.v3.${agentId}`;
   const { data: snapshot, isLoading: isSnapshotLoading } = useSkillsGraph('agent', agentId);
   const saveMutation = useSaveSkillsGraph('agent', agentId);
   const suggestMutation = useSuggestSkillsGraphConnections();
   const initialGraph = useMemo(
-    () => getFastHydratedGraph(agentId, localGraphKey),
-    [agentId, localGraphKey]
+    () => getFastHydratedGraph(agentId),
+    [agentId]
   );
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<SkillsGraphNodeData>>(initialGraph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(initialGraph.edges);
@@ -309,12 +292,12 @@ function AgentSkillsGraphPage() {
   const agentAvatar = (agent as { image_url?: string | null } | undefined)?.image_url ?? null;
 
   useEffect(() => {
-    const fastHydrated = getFastHydratedGraph(agentId, localGraphKey);
+    const fastHydrated = getFastHydratedGraph(agentId);
     if (fastHydrated.nodes.length > 0 || fastHydrated.edges.length > 0) {
       setNodes(fastHydrated.nodes);
       setEdges(fastHydrated.edges);
     }
-  }, [agentId, localGraphKey, setEdges, setNodes]);
+  }, [agentId, setEdges, setNodes]);
 
   useEffect(() => {
     const hasRemoteGraph =
@@ -326,16 +309,6 @@ function AgentSkillsGraphPage() {
       setNodes(snapshot.graphJson.nodes as Node<SkillsGraphNodeData>[]);
       setEdges(snapshot.graphJson.edges as Edge[]);
       return;
-    }
-
-    const local = localStorage.getItem(localGraphKey);
-    if (local) {
-      const parsed = normalizeGraphFromStorage(local);
-      if (parsed && (parsed.nodes.length > 0 || parsed.edges.length > 0)) {
-        setNodes(parsed.nodes);
-        setEdges(parsed.edges);
-        return;
-      }
     }
 
     if (toolSettings.length > 0) {
@@ -355,7 +328,6 @@ function AgentSkillsGraphPage() {
   }, [
     agentId,
     agentName,
-    localGraphKey,
     setEdges,
     setNodes,
     isSnapshotLoading,
@@ -366,9 +338,8 @@ function AgentSkillsGraphPage() {
   ]);
 
   useEffect(() => {
-    localStorage.setItem(localGraphKey, JSON.stringify({ nodes, edges }));
     graphViewCache.set(agentId, { nodes, edges });
-  }, [edges, localGraphKey, nodes]);
+  }, [agentId, edges, nodes]);
 
   const renderedNodes = useMemo(() => {
     const nodeById = new Map(nodes.map((node) => [node.id, node]));

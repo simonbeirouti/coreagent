@@ -52,6 +52,42 @@ export interface AgentDelegation {
   updated_at: string;
 }
 
+export interface OrchestrationTaskFeedback {
+  id: string;
+  task_id: string;
+  run_id: string;
+  user_id: string;
+  verdict: 'approved' | 'rework' | 'rejected';
+  notes?: string | null;
+  created_at: string;
+}
+
+export interface OrchestrationTaskAttempt {
+  id: string;
+  run_id: string;
+  task_id: string;
+  attempt_number: number;
+  executor_agent_id: string;
+  status: 'scheduled' | 'started' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+  backoff_seconds: number;
+  error_class?: string | null;
+  error_message?: string | null;
+  started_at: string;
+  ended_at?: string | null;
+  latency_ms?: number | null;
+  created_at: string;
+}
+
+export interface OrchestrationEventRecord {
+  id: string;
+  run_id: string;
+  task_id?: string | null;
+  event_type: string;
+  severity: 'info' | 'warning' | 'error';
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface OrchestrationMemory {
   id: string;
   run_id: string;
@@ -64,6 +100,38 @@ export interface OrchestrationMemory {
   promoted_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface OrchestrationTaskDetail {
+  task: OrchestrationTask;
+  attempts: OrchestrationTaskAttempt[];
+  events: OrchestrationEventRecord[];
+  memories: OrchestrationMemory[];
+  feedback: OrchestrationTaskFeedback[];
+}
+
+export interface AssignmentReviewCandidate {
+  agent_id: string;
+  role: string;
+  persona: string;
+  state: string;
+  score: number;
+  current_load: number;
+  hard_filter_passed: boolean;
+  hard_fail_reasons: string[];
+  soft_match_reasons: string[];
+  enabled_ability_keys: string[];
+}
+
+export interface AssignmentReview {
+  task_id: string;
+  run_id: string;
+  recommended_agent_id?: string | null;
+  confidence: number;
+  required_ability_keys: string[];
+  preferred_role?: string | null;
+  candidates: AssignmentReviewCandidate[];
+  rationale: string;
 }
 
 export interface OrchestrationSchedule {
@@ -95,7 +163,6 @@ export interface OrchestrationDiagnostics {
 
 interface CreateRunRequest {
   parent_agent_id: string;
-  owner_user_id: string;
   title: string;
   objective: string;
   priority?: 'low' | 'normal' | 'high';
@@ -106,7 +173,6 @@ interface CreateDelegationRequest {
   child_agent_id: string;
   role: AgentDelegation['role'];
   ownership_scope?: AgentDelegation['ownership_scope'];
-  created_by_user_id: string;
   required_ability_keys?: string[];
 }
 
@@ -116,6 +182,8 @@ interface CreateTaskRequest {
   owner_agent_id: string;
   title: string;
   description?: string;
+  required_ability_keys?: string[];
+  preferred_role?: 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom';
   task_order?: number;
   idempotency_key?: string;
   max_retries?: number;
@@ -187,7 +255,7 @@ export function useCreateAgentDelegation(agentId: string) {
         role: request.role,
         ownership_scope: request.ownership_scope ?? 'delegated',
         is_active: true,
-        created_by_user_id: request.created_by_user_id,
+        created_by_user_id: 'pending-session-user',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -209,6 +277,18 @@ export function useCreateAgentDelegation(agentId: string) {
       });
     },
     onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.delegations(agentId) });
+    },
+  });
+}
+
+export function useRevokeAgentDelegation(agentId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (params: { delegationId: string }): Promise<AgentDelegation> =>
+      invoke('revoke_agent_delegation', params),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: orchestrationKeys.delegations(agentId) });
     },
   });
@@ -237,6 +317,30 @@ export function useOrchestrationTasks(runId: string) {
   return useQuery({
     queryKey,
     queryFn: async (): Promise<OrchestrationTask[]> => invoke('list_orchestration_tasks', { runId }),
+    enabled: !!runId,
+    initialData,
+    initialDataUpdatedAt,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useOrchestrationTaskDetail(taskId: string) {
+  return useQuery({
+    queryKey: [...orchestrationKeys.all, 'task-detail', taskId] as const,
+    queryFn: async (): Promise<OrchestrationTaskDetail> => invoke('get_orchestration_task_detail', { taskId }),
+    enabled: !!taskId,
+    ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useOrchestrationEvents(runId: string, limit = 100) {
+  const queryKey = orchestrationKeys.events(runId, limit);
+  const initialData = getCachedData<OrchestrationEventRecord[]>(queryKey);
+  const initialDataUpdatedAt = getCachedDataUpdatedAt(queryKey);
+
+  return useQuery({
+    queryKey,
+    queryFn: async (): Promise<OrchestrationEventRecord[]> => invoke('list_orchestration_events', { runId, limit }),
     enabled: !!runId,
     initialData,
     initialDataUpdatedAt,
@@ -293,7 +397,7 @@ export function useCreateOrchestrationRun(agentId: string) {
       const optimistic: OrchestrationRun = {
         id: tempId,
         parent_agent_id: request.parent_agent_id,
-        owner_user_id: request.owner_user_id,
+        owner_user_id: 'pending-session-user',
         title: request.title,
         objective: request.objective,
         status: 'queued',
@@ -418,18 +522,107 @@ export function useUpdateOrchestrationRunStatus(agentId: string) {
 
 export function useRetryOrchestrationTask(runId: string) {
   const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
   return useMutation({
     mutationFn: async (params: { taskId: string; requestedByAgentId: string }): Promise<OrchestrationTask> =>
       invoke('retry_orchestration_task', params),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: orchestrationKeys.tasks(runId) });
+      queryClient.invalidateQueries({ queryKey: eventKey });
       queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
+    },
+  });
+}
+
+export function useSkipOrchestrationTask(runId: string) {
+  const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
+  return useMutation({
+    mutationFn: async (params: {
+      taskId: string;
+      requestedByAgentId: string;
+      reason?: string;
+    }): Promise<OrchestrationTask> => invoke('skip_orchestration_task', params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.tasks(runId) });
+      queryClient.invalidateQueries({ queryKey: eventKey });
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
+    },
+  });
+}
+
+export function useSubmitOrchestrationTaskFeedback(runId: string) {
+  const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
+  return useMutation({
+    mutationFn: async (params: {
+      taskId: string;
+      verdict: 'approved' | 'rework' | 'rejected';
+      notes?: string | null;
+      requestedByAgentId: string;
+    }): Promise<OrchestrationTaskFeedback> =>
+      invoke('submit_orchestration_task_feedback', {
+        taskId: params.taskId,
+        verdict: params.verdict,
+        notes: params.notes ?? null,
+        requestedByAgentId: params.requestedByAgentId,
+      }),
+    onSuccess: (_feedback, params) => {
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.tasks(runId) });
+      queryClient.invalidateQueries({ queryKey: eventKey });
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
+      queryClient.invalidateQueries({ queryKey: [...orchestrationKeys.all, 'task-detail', params.taskId] });
+    },
+  });
+}
+
+export function useReviewOrchestrationTaskAssignment(runId: string) {
+  const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
+  return useMutation({
+    mutationFn: async (params: {
+      taskId: string;
+      requiredAbilityKeys?: string[];
+      preferredRole?: 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom';
+    }): Promise<AssignmentReview> =>
+      invoke('review_orchestration_task_assignment', {
+        taskId: params.taskId,
+        requiredAbilityKeys: params.requiredAbilityKeys ?? null,
+        preferredRole: params.preferredRole ?? null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: eventKey });
+    },
+  });
+}
+
+export function useAutoAssignOrchestrationTask(runId: string) {
+  const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
+  return useMutation({
+    mutationFn: async (params: {
+      taskId: string;
+      requestedByAgentId?: string;
+      requiredAbilityKeys?: string[];
+      preferredRole?: 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom';
+    }): Promise<OrchestrationTask> =>
+      invoke('auto_assign_orchestration_task', {
+        taskId: params.taskId,
+        requestedByAgentId: params.requestedByAgentId ?? null,
+        requiredAbilityKeys: params.requiredAbilityKeys ?? null,
+        preferredRole: params.preferredRole ?? null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.tasks(runId) });
+      queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
+      queryClient.invalidateQueries({ queryKey: eventKey });
     },
   });
 }
 
 export function useReassignOrchestrationTask(runId: string) {
   const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
 
   return useMutation({
     mutationFn: async (params: {
@@ -461,6 +654,7 @@ export function useReassignOrchestrationTask(runId: string) {
     },
     onSuccess: (task) => {
       queryClient.setQueryData<OrchestrationTask[]>(orchestrationKeys.tasks(runId), (old = []) => upsertTask(old, task));
+      queryClient.invalidateQueries({ queryKey: eventKey });
       queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
     },
     onSettled: () => {
@@ -471,6 +665,7 @@ export function useReassignOrchestrationTask(runId: string) {
 
 export function useSetOrchestrationSchedule(runId: string) {
   const queryClient = useQueryClient();
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
   return useMutation({
     mutationFn: async (params: { enabled: boolean; intervalMinutes?: number }): Promise<OrchestrationSchedule> =>
       invoke('set_orchestration_schedule', {
@@ -479,6 +674,7 @@ export function useSetOrchestrationSchedule(runId: string) {
         intervalMinutes: params.intervalMinutes ?? 15,
       }),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: eventKey });
       queryClient.invalidateQueries({ queryKey: orchestrationKeys.diagnostics(runId) });
     },
   });
@@ -487,6 +683,7 @@ export function useSetOrchestrationSchedule(runId: string) {
 export function useUpsertOrchestrationMemory(runId: string, viewerAgentId: string, scopeFilter: 'all' | OrchestrationMemory['scope'] = 'all') {
   const queryClient = useQueryClient();
   const memoryKey = orchestrationKeys.memories(runId, viewerAgentId, scopeFilter);
+  const eventKey = [...orchestrationKeys.all, 'events', runId] as const;
 
   return useMutation({
     mutationFn: async (request: UpsertMemoryRequest): Promise<OrchestrationMemory> =>
@@ -523,6 +720,7 @@ export function useUpsertOrchestrationMemory(runId: string, viewerAgentId: strin
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: memoryKey });
+      queryClient.invalidateQueries({ queryKey: eventKey });
     },
   });
 }

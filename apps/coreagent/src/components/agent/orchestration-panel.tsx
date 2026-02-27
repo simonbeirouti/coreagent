@@ -1,17 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useAgent } from '@/hooks/useAgents';
 import {
+  AssignmentReview,
   useAgentDelegations,
+  useAutoAssignOrchestrationTask,
   useCreateAgentDelegation,
   useCreateOrchestrationRun,
   useCreateOrchestrationTask,
   useOrchestrationDiagnostics,
+  useOrchestrationEvents,
   useOrchestrationMemories,
   useOrchestrationRuns,
+  useOrchestrationTaskDetail,
   useOrchestrationTasks,
+  useRevokeAgentDelegation,
   useReassignOrchestrationTask,
+  useReviewOrchestrationTaskAssignment,
   useRetryOrchestrationTask,
   useSetOrchestrationSchedule,
+  useSkipOrchestrationTask,
+  useSubmitOrchestrationTaskFeedback,
   useUpdateOrchestrationRunStatus,
   useUpsertOrchestrationMemory,
 } from '@/hooks/useOrchestration';
@@ -25,6 +32,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
+import { REQUIREMENT_TEMPLATES, templateAbilityCsv } from '@/lib/orchestration-requirement-templates';
 
 const STATUS_COLOR: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   queued: 'outline',
@@ -46,7 +54,6 @@ function toLabel(value: string) {
 }
 
 export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
-  const { data: agent } = useAgent(agentId);
   const { data: runs = [], isLoading: isRunsLoading } = useOrchestrationRuns(agentId);
   const { data: delegations = [] } = useAgentDelegations(agentId);
 
@@ -55,6 +62,9 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
   const [runObjective, setRunObjective] = useState('');
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
+  const [taskRequirementTemplateId, setTaskRequirementTemplateId] = useState<string>('');
+  const [taskRequiredAbilities, setTaskRequiredAbilities] = useState('');
+  const [taskPreferredRole, setTaskPreferredRole] = useState<'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom'>('custom');
   const [taskOwnerAgentId, setTaskOwnerAgentId] = useState(agentId);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleInterval, setScheduleInterval] = useState('15');
@@ -65,17 +75,27 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
   const [memoryScope, setMemoryScope] = useState<'private' | 'shared_run' | 'parent_visible'>('shared_run');
   const [memoryKey, setMemoryKey] = useState('run-summary');
   const [memorySummary, setMemorySummary] = useState('');
+  const [feedbackNotes, setFeedbackNotes] = useState<Record<string, string>>({});
+  const [assignmentReviews, setAssignmentReviews] = useState<Record<string, AssignmentReview>>({});
+  const [selectedTaskId, setSelectedTaskId] = useState<string>('');
 
   const createRun = useCreateOrchestrationRun(agentId);
   const createDelegation = useCreateAgentDelegation(agentId);
+  const revokeDelegation = useRevokeAgentDelegation(agentId);
   const updateRunStatus = useUpdateOrchestrationRunStatus(agentId);
   const createTask = useCreateOrchestrationTask(selectedRunId);
   const retryTask = useRetryOrchestrationTask(selectedRunId);
+  const skipTask = useSkipOrchestrationTask(selectedRunId);
+  const submitTaskFeedback = useSubmitOrchestrationTaskFeedback(selectedRunId);
   const reassignTask = useReassignOrchestrationTask(selectedRunId);
+  const reviewTaskAssignment = useReviewOrchestrationTaskAssignment(selectedRunId);
+  const autoAssignTask = useAutoAssignOrchestrationTask(selectedRunId);
   const setSchedule = useSetOrchestrationSchedule(selectedRunId);
   const upsertMemory = useUpsertOrchestrationMemory(selectedRunId, agentId, 'all');
   const { data: diagnostics, isLoading: isDiagnosticsLoading } = useOrchestrationDiagnostics(selectedRunId, 10);
+  const { data: runEvents = [] } = useOrchestrationEvents(selectedRunId, 120);
   const { data: tasks = [] } = useOrchestrationTasks(selectedRunId);
+  const { data: selectedTaskDetail, isLoading: isTaskDetailLoading } = useOrchestrationTaskDetail(selectedTaskId);
   const { data: memories = [] } = useOrchestrationMemories(selectedRunId, agentId, 'all');
 
   const ownerOptions = useMemo(() => {
@@ -100,13 +120,20 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
     }
   }, [agentId, ownerOptions, taskOwnerAgentId]);
 
+  useEffect(() => {
+    if (!selectedRunId) {
+      setSelectedTaskId('');
+      return;
+    }
+    if (selectedTaskId && tasks.some((task) => task.id === selectedTaskId)) {
+      return;
+    }
+    setSelectedTaskId(tasks[0]?.id ?? '');
+  }, [selectedRunId, selectedTaskId, tasks]);
+
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId), [runs, selectedRunId]);
 
   const submitRun = async () => {
-    if (!agent?.user_id) {
-      toast.error('Missing owner user context for run creation');
-      return;
-    }
     if (!runTitle.trim() || !runObjective.trim()) {
       toast.error('Run title and objective are required');
       return;
@@ -114,7 +141,6 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
     try {
       const created = await createRun.mutateAsync({
         parent_agent_id: agentId,
-        owner_user_id: agent.user_id,
         title: runTitle.trim(),
         objective: runObjective.trim(),
         priority: 'normal',
@@ -129,10 +155,6 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
   };
 
   const submitDelegation = async () => {
-    if (!agent?.user_id) {
-      toast.error('Missing user context for delegation creation');
-      return;
-    }
     if (!newChildAgentId.trim()) {
       toast.error('Child agent id is required');
       return;
@@ -143,7 +165,6 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
         child_agent_id: newChildAgentId.trim(),
         role: delegationRole,
         ownership_scope: delegationScope,
-        created_by_user_id: agent.user_id,
       });
       setNewChildAgentId('');
       toast.success('Sub-agent delegation added');
@@ -161,15 +182,28 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
       toast.error('Task title is required');
       return;
     }
+    const requiredAbilityKeys = taskRequiredAbilities
+      .split(',')
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value.length > 0);
+    if (requiredAbilityKeys.length === 0) {
+      toast.error('Task requires at least one required ability key for deterministic assignment');
+      return;
+    }
     try {
       await createTask.mutateAsync({
         run_id: selectedRunId,
         owner_agent_id: taskOwnerAgentId,
         title: taskTitle.trim(),
         description: taskDescription.trim() || undefined,
+        required_ability_keys: requiredAbilityKeys,
+        preferred_role: taskPreferredRole,
       });
       setTaskTitle('');
       setTaskDescription('');
+      setTaskRequirementTemplateId('');
+      setTaskRequiredAbilities('');
+      setTaskPreferredRole('custom');
       toast.success('Task added');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed adding task');
@@ -244,6 +278,74 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
     }
   };
 
+  const handleSkip = async (taskId: string) => {
+    try {
+      await skipTask.mutateAsync({
+        taskId,
+        requestedByAgentId: agentId,
+        reason: 'task_skipped_from_dashboard',
+      });
+      toast.success('Task skipped');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed skipping task');
+    }
+  };
+
+  const handleReviewAssignment = async (taskId: string) => {
+    try {
+      const review = await reviewTaskAssignment.mutateAsync({ taskId });
+      setAssignmentReviews((previous) => ({ ...previous, [taskId]: review }));
+      if (!review.recommended_agent_id) {
+        toast.error('No eligible agent found for this task.');
+        return;
+      }
+      toast.success(`Recommended ${review.recommended_agent_id.slice(0, 8)} (${Math.round(review.confidence * 100)}%)`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed reviewing assignment');
+    }
+  };
+
+  const handleAutoAssign = async (taskId: string) => {
+    const review = assignmentReviews[taskId];
+    try {
+      await autoAssignTask.mutateAsync({
+        taskId,
+        requestedByAgentId: agentId,
+        requiredAbilityKeys: review?.required_ability_keys,
+        preferredRole: (review?.preferred_role as 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom' | null) ?? undefined,
+      });
+      toast.success('Task auto-assigned to best suited agent');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed auto-assigning task');
+    }
+  };
+
+  const handleSubmitFeedback = async (taskId: string, verdict: 'approved' | 'rework' | 'rejected') => {
+    try {
+      await submitTaskFeedback.mutateAsync({
+        taskId,
+        verdict,
+        notes: feedbackNotes[taskId]?.trim() || null,
+        requestedByAgentId: agentId,
+      });
+      setFeedbackNotes((previous) => ({ ...previous, [taskId]: '' }));
+      toast.success(`Task feedback submitted (${verdict})`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed submitting task feedback');
+    }
+  };
+
+  const handleRevokeDelegation = async (delegationId: string) => {
+    try {
+      await revokeDelegation.mutateAsync({
+        delegationId,
+      });
+      toast.success('Delegation revoked');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed revoking delegation');
+    }
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -271,7 +373,7 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
             />
           </div>
         </div>
-        <Button onClick={submitRun} disabled={createRun.isPending || !agent?.user_id}>
+        <Button onClick={submitRun} disabled={createRun.isPending}>
           {createRun.isPending ? 'Creating...' : 'Create Run'}
         </Button>
 
@@ -307,16 +409,30 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
                 <SelectItem value="observer">observer</SelectItem>
               </SelectContent>
             </Select>
-            <Button onClick={submitDelegation} disabled={createDelegation.isPending || !agent?.user_id}>
+            <Button onClick={submitDelegation} disabled={createDelegation.isPending}>
               {createDelegation.isPending ? 'Adding...' : 'Add Sub-Agent'}
             </Button>
           </div>
           {delegations.length > 0 && (
-            <div className="flex flex-wrap gap-2">
+            <div className="space-y-2">
               {delegations.map((delegation) => (
-                <Badge key={delegation.id} variant={delegation.is_active ? 'secondary' : 'outline'}>
-                  {delegation.role}: {delegation.child_agent_id.slice(0, 8)}
-                </Badge>
+                <div key={delegation.id} className="flex items-center justify-between rounded-md border p-2">
+                  <Badge variant={delegation.is_active ? 'secondary' : 'outline'}>
+                    {delegation.role}: {delegation.child_agent_id.slice(0, 8)} ({delegation.ownership_scope})
+                  </Badge>
+                  {delegation.is_active ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleRevokeDelegation(delegation.id)}
+                      disabled={revokeDelegation.isPending}
+                    >
+                      Revoke
+                    </Button>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Inactive</span>
+                  )}
+                </div>
               ))}
             </div>
           )}
@@ -420,7 +536,34 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
 
         <div className="space-y-3">
           <Label>Create Task</Label>
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <Select
+              value={taskRequirementTemplateId || 'custom'}
+              onValueChange={(value) => {
+                if (value === 'custom') {
+                  setTaskRequirementTemplateId('');
+                  return;
+                }
+                const template = REQUIREMENT_TEMPLATES.find((item) => item.id === value);
+                if (!template) return;
+                setTaskRequirementTemplateId(template.id);
+                setTaskRequiredAbilities(templateAbilityCsv(template.id));
+                setTaskPreferredRole(template.preferredRole);
+              }}
+              disabled={!selectedRunId}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Requirement template" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="custom">Custom</SelectItem>
+                {REQUIREMENT_TEMPLATES.map((template) => (
+                  <SelectItem key={template.id} value={template.id}>
+                    {template.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Input
               value={taskTitle}
               onChange={(event) => setTaskTitle(event.target.value)}
@@ -433,6 +576,36 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
               placeholder="Focus on architecture and schema notes"
               disabled={!selectedRunId}
             />
+            <Input
+              value={taskRequiredAbilities}
+              onChange={(event) => {
+                setTaskRequirementTemplateId('');
+                setTaskRequiredAbilities(event.target.value);
+              }}
+              placeholder="Required abilities (comma-separated)"
+              disabled={!selectedRunId}
+            />
+            <Select
+              value={taskPreferredRole}
+              onValueChange={(value) =>
+                {
+                  setTaskRequirementTemplateId('');
+                  setTaskPreferredRole(value as 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom');
+                }
+              }
+              disabled={!selectedRunId}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Preferred role" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="custom">custom</SelectItem>
+                <SelectItem value="planner">planner</SelectItem>
+                <SelectItem value="researcher">researcher</SelectItem>
+                <SelectItem value="executor">executor</SelectItem>
+                <SelectItem value="reviewer">reviewer</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={taskOwnerAgentId} onValueChange={setTaskOwnerAgentId} disabled={!selectedRunId}>
               <SelectTrigger>
                 <SelectValue placeholder="Task owner" />
@@ -515,10 +688,171 @@ export function OrchestrationPanel({ agentId }: OrchestrationPanelProps) {
                           Retry
                         </Button>
                       )}
+                      {!['completed', 'cancelled'].includes(task.status) && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleSkip(task.id)}
+                          disabled={skipTask.isPending}
+                        >
+                          Skip
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setSelectedTaskId(task.id)}
+                      >
+                        Inspect
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void handleReviewAssignment(task.id)}
+                        disabled={reviewTaskAssignment.isPending}
+                      >
+                        Review Match
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        onClick={() => void handleAutoAssign(task.id)}
+                        disabled={autoAssignTask.isPending || !assignmentReviews[task.id]?.recommended_agent_id}
+                      >
+                        Auto-Assign
+                      </Button>
                     </div>
+                    {assignmentReviews[task.id] ? (
+                      <div className="mt-3 rounded-md border p-2 text-xs">
+                        <p className="font-medium">
+                          Recommendation:{" "}
+                          {assignmentReviews[task.id]?.recommended_agent_id
+                            ? assignmentReviews[task.id]!.recommended_agent_id!.slice(0, 8)
+                            : 'none'}
+                          {" · "}
+                          confidence {Math.round((assignmentReviews[task.id]?.confidence ?? 0) * 100)}%
+                        </p>
+                        <p className="mt-1 text-muted-foreground">{assignmentReviews[task.id]?.rationale}</p>
+                      </div>
+                    ) : null}
+                    {task.status === 'completed' && (
+                      <div className="mt-3 space-y-2 rounded-md border p-2">
+                        <Label className="text-xs">Feedback Notes (optional)</Label>
+                        <Textarea
+                          value={feedbackNotes[task.id] ?? ''}
+                          onChange={(event) =>
+                            setFeedbackNotes((previous) => ({ ...previous, [task.id]: event.target.value }))
+                          }
+                          placeholder="What should be improved or accepted?"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => void handleSubmitFeedback(task.id, 'approved')}
+                            disabled={submitTaskFeedback.isPending}
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleSubmitFeedback(task.id, 'rework')}
+                            disabled={submitTaskFeedback.isPending}
+                          >
+                            Rework
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => void handleSubmitFeedback(task.id, 'rejected')}
+                            disabled={submitTaskFeedback.isPending}
+                          >
+                            Reject
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+
+        <Separator />
+
+        <div className="space-y-3">
+          <Label>Run Event Timeline</Label>
+          {runEvents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No orchestration events for this run yet.</p>
+          ) : (
+            <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border p-2">
+              {runEvents.slice(0, 40).map((event) => (
+                <div key={event.id} className="rounded-md border p-2">
+                  <div className="flex items-center justify-between">
+                    <Badge variant={event.severity === 'error' ? 'destructive' : event.severity === 'warning' ? 'secondary' : 'outline'}>
+                      {event.event_type}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{new Date(event.created_at).toLocaleString()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <Separator />
+
+        <div className="space-y-3">
+          <Label>Task Detail</Label>
+          {!selectedTaskId ? (
+            <p className="text-sm text-muted-foreground">Select a task with Inspect to view attempts, events, memories, and feedback history.</p>
+          ) : isTaskDetailLoading ? (
+            <p className="text-sm text-muted-foreground">Loading task detail...</p>
+          ) : !selectedTaskDetail ? (
+            <p className="text-sm text-muted-foreground">Task detail unavailable.</p>
+          ) : (
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">{selectedTaskDetail.task.title}</p>
+                <Badge variant={STATUS_COLOR[selectedTaskDetail.task.status] ?? 'outline'}>
+                  {toLabel(selectedTaskDetail.task.status)}
+                </Badge>
+              </div>
+              <div>
+                <p className="text-xs font-medium">Attempts</p>
+                <p className="text-xs text-muted-foreground">
+                  {selectedTaskDetail.attempts.length === 0
+                    ? 'No attempts recorded'
+                    : selectedTaskDetail.attempts.map((attempt) => `#${attempt.attempt_number} ${attempt.status}`).join(' · ')}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-medium">Latest Events</p>
+                {selectedTaskDetail.events.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No task events</p>
+                ) : (
+                  <div className="space-y-1">
+                    {selectedTaskDetail.events.slice(0, 4).map((event) => (
+                      <p key={event.id} className="text-xs text-muted-foreground">
+                        {event.event_type}
+                        {event.event_type === 'task.assignment_reviewed' && typeof event.payload?.rationale === 'string'
+                          ? ` · ${event.payload.rationale}`
+                          : ''}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <p className="text-xs font-medium">Feedback History</p>
+                <p className="text-xs text-muted-foreground">
+                  {selectedTaskDetail.feedback.length === 0
+                    ? 'No feedback submitted'
+                    : selectedTaskDetail.feedback.map((item) => item.verdict).join(' · ')}
+                </p>
+              </div>
             </div>
           )}
         </div>

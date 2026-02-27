@@ -39,11 +39,12 @@ use memory_service::{
     RetrievalEvalResult, RetrievalTuningStatus, SimilarMessage,
 };
 use orchestration_service::{
-    AgentDelegationData, CreateAgentDelegationRequest, CreateOrchestrationRunRequest,
-    CreateOrchestrationTaskRequest, OrchestrationDiagnostics, OrchestrationHeartbeatData,
-    OrchestrationMemoryData, OrchestrationRunData, OrchestrationScheduleData, OrchestrationService,
-    OrchestrationTaskData, RecordDelegationRequest, UpsertHeartbeatRequest,
-    UpsertOrchestrationMemoryRequest,
+    AgentDelegationData, AssignmentReviewData, CreateAgentDelegationRequest,
+    CreateOrchestrationRunRequest, CreateOrchestrationTaskRequest, OrchestrationDiagnostics,
+    OrchestrationHeartbeatData, OrchestrationEventData, OrchestrationMemoryData,
+    OrchestrationRunData, OrchestrationScheduleData, OrchestrationService,
+    OrchestrationTaskData, OrchestrationTaskDetailData, OrchestrationTaskFeedbackData,
+    RecordDelegationRequest, UpsertHeartbeatRequest, UpsertOrchestrationMemoryRequest,
 };
 use perception_tracker::{PerceptionStat, PerceptionTracker};
 use user_profile_service::UserProfileService;
@@ -1340,6 +1341,195 @@ async fn run_registry_skill_direct(
 }
 
 // Agent commands
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderModelInfo {
+    id: String,
+    provider: String,
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelListResponse {
+    data: Vec<OpenAiModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelEntry {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelListResponse {
+    data: Vec<AnthropicModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelEntry {
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrchestrationProjectData {
+    id: uuid::Uuid,
+    owner_user_id: uuid::Uuid,
+    manager_agent_id: uuid::Uuid,
+    run_id: uuid::Uuid,
+    manager_conversation_id: Option<uuid::Uuid>,
+    name: String,
+    objective: String,
+    status: String,
+    manager_agent_name: String,
+    manager_model_id: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateOrchestrationProjectRequest {
+    manager_agent_id: String,
+    name: String,
+    objective: String,
+    priority: Option<String>,
+}
+
+fn provider_model_fallback(provider_type: &str) -> Vec<ProviderModelInfo> {
+    match provider_type {
+        "openai" => vec![
+            ProviderModelInfo {
+                id: "gpt-5".to_string(),
+                provider: "openai".to_string(),
+                display_name: "gpt-5".to_string(),
+            },
+            ProviderModelInfo {
+                id: "gpt-5-mini".to_string(),
+                provider: "openai".to_string(),
+                display_name: "gpt-5-mini".to_string(),
+            },
+            ProviderModelInfo {
+                id: "gpt-5-nano".to_string(),
+                provider: "openai".to_string(),
+                display_name: "gpt-5-nano".to_string(),
+            },
+            ProviderModelInfo {
+                id: "gpt-4.1".to_string(),
+                provider: "openai".to_string(),
+                display_name: "gpt-4.1".to_string(),
+            },
+        ],
+        "anthropic" => vec![
+            ProviderModelInfo {
+                id: "claude-sonnet-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                display_name: "claude-sonnet-4-5".to_string(),
+            },
+            ProviderModelInfo {
+                id: "claude-sonnet-4".to_string(),
+                provider: "anthropic".to_string(),
+                display_name: "claude-sonnet-4".to_string(),
+            },
+            ProviderModelInfo {
+                id: "claude-haiku-4-5".to_string(),
+                provider: "anthropic".to_string(),
+                display_name: "claude-haiku-4-5".to_string(),
+            },
+        ],
+        _ => vec![],
+    }
+}
+
+fn normalize_provider_model_list(
+    provider_type: &str,
+    raw_ids: Vec<String>,
+) -> Vec<ProviderModelInfo> {
+    let mut ids: Vec<String> = raw_ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| {
+            if provider_type == "openai" {
+                id.starts_with("gpt-")
+            } else {
+                id.starts_with("claude")
+            }
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| ProviderModelInfo {
+            display_name: id.clone(),
+            id,
+            provider: provider_type.to_string(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn list_provider_models(provider_type: String) -> Result<Vec<ProviderModelInfo>, String> {
+    let provider = provider_type.to_ascii_lowercase();
+    if provider != "openai" && provider != "anthropic" {
+        return Err("Unsupported provider type. Expected openai or anthropic.".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let fetch_result: Result<Vec<ProviderModelInfo>, String> = if provider == "openai" {
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| "OPENAI_API_KEY not set in environment".to_string())?;
+        let response = client
+            .get("https://api.openai.com/v1/models")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(|error| format!("Failed fetching OpenAI models: {}", error))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "OpenAI model listing failed with status {}",
+                response.status()
+            ));
+        }
+        let payload: OpenAiModelListResponse = response
+            .json()
+            .await
+            .map_err(|error| format!("Invalid OpenAI models response: {}", error))?;
+        Ok(normalize_provider_model_list(
+            "openai",
+            payload.data.into_iter().map(|entry| entry.id).collect(),
+        ))
+    } else {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| "ANTHROPIC_API_KEY not set in environment".to_string())?;
+        let response = client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|error| format!("Failed fetching Anthropic models: {}", error))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Anthropic model listing failed with status {}",
+                response.status()
+            ));
+        }
+        let payload: AnthropicModelListResponse = response
+            .json()
+            .await
+            .map_err(|error| format!("Invalid Anthropic models response: {}", error))?;
+        Ok(normalize_provider_model_list(
+            "anthropic",
+            payload.data.into_iter().map(|entry| entry.id).collect(),
+        ))
+    };
+
+    match fetch_result {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => Ok(provider_model_fallback(&provider)),
+        Err(error) => {
+            eprintln!("[MODELS] provider model listing fallback for {}: {}", provider, error);
+            Ok(provider_model_fallback(&provider))
+        }
+    }
+}
+
 #[tauri::command]
 async fn create_agent(
     request: CreateAgentRequest,
@@ -2234,6 +2424,191 @@ fn resolve_skills_graph_owner(
     }
 }
 
+fn resolve_session_user_uuid(auth_state: &AuthState) -> Result<uuid::Uuid, String> {
+    let session = auth_state
+        .get_session()
+        .ok_or_else(|| "No authenticated session found.".to_string())?;
+    uuid::Uuid::parse_str(&session.user_id).map_err(|e| format!("Invalid session user ID: {e}"))
+}
+
+async fn ensure_orchestration_run_owned_by_session(
+    db: &DatabaseConnection,
+    run_id: &str,
+    session_user_id: uuid::Uuid,
+) -> Result<(), String> {
+    let run_id =
+        uuid::Uuid::parse_str(run_id).map_err(|e| format!("Invalid run ID: {e}"))?;
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT 1
+                FROM orchestration_runs
+                WHERE id = $1::uuid
+                  AND owner_user_id = $2::uuid
+                LIMIT 1
+            "#,
+            vec![run_id.into(), session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed validating orchestration run ownership: {e}"))?;
+    if row.is_none() {
+        return Err("Orchestration run is not owned by the authenticated session.".to_string());
+    }
+    Ok(())
+}
+
+async fn ensure_orchestration_task_owned_by_session(
+    db: &DatabaseConnection,
+    task_id: &str,
+    session_user_id: uuid::Uuid,
+) -> Result<(), String> {
+    let task_id =
+        uuid::Uuid::parse_str(task_id).map_err(|e| format!("Invalid task ID: {e}"))?;
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT 1
+                FROM orchestration_tasks t
+                JOIN orchestration_runs r ON r.id = t.run_id
+                WHERE t.id = $1::uuid
+                  AND r.owner_user_id = $2::uuid
+                LIMIT 1
+            "#,
+            vec![task_id.into(), session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed validating orchestration task ownership: {e}"))?;
+    if row.is_none() {
+        return Err("Orchestration task is not owned by the authenticated session.".to_string());
+    }
+    Ok(())
+}
+
+async fn ensure_orchestration_memory_owned_by_session(
+    db: &DatabaseConnection,
+    memory_id: &str,
+    session_user_id: uuid::Uuid,
+) -> Result<(), String> {
+    let memory_id =
+        uuid::Uuid::parse_str(memory_id).map_err(|e| format!("Invalid memory ID: {e}"))?;
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT 1
+                FROM orchestration_memories m
+                JOIN orchestration_runs r ON r.id = m.run_id
+                WHERE m.id = $1::uuid
+                  AND r.owner_user_id = $2::uuid
+                LIMIT 1
+            "#,
+            vec![memory_id.into(), session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed validating orchestration memory ownership: {e}"))?;
+    if row.is_none() {
+        return Err("Orchestration memory is not owned by the authenticated session.".to_string());
+    }
+    Ok(())
+}
+
+fn map_project_row(
+    row: sea_orm::QueryResult,
+) -> Result<OrchestrationProjectData, String> {
+    let id: uuid::Uuid = row
+        .try_get("", "id")
+        .map_err(|e| format!("Failed decoding project id: {e}"))?;
+    let owner_user_id: uuid::Uuid = row
+        .try_get("", "owner_user_id")
+        .map_err(|e| format!("Failed decoding project owner_user_id: {e}"))?;
+    let manager_agent_id: uuid::Uuid = row
+        .try_get("", "manager_agent_id")
+        .map_err(|e| format!("Failed decoding project manager_agent_id: {e}"))?;
+    let run_id: uuid::Uuid = row
+        .try_get("", "run_id")
+        .map_err(|e| format!("Failed decoding project run_id: {e}"))?;
+    let manager_conversation_id: Option<uuid::Uuid> = row
+        .try_get("", "manager_conversation_id")
+        .map_err(|e| format!("Failed decoding project manager_conversation_id: {e}"))?;
+    let name: String = row
+        .try_get("", "name")
+        .map_err(|e| format!("Failed decoding project name: {e}"))?;
+    let objective: String = row
+        .try_get("", "objective")
+        .map_err(|e| format!("Failed decoding project objective: {e}"))?;
+    let status: String = row
+        .try_get("", "status")
+        .map_err(|e| format!("Failed decoding project status: {e}"))?;
+    let manager_agent_name: String = row
+        .try_get("", "manager_agent_name")
+        .map_err(|e| format!("Failed decoding project manager_agent_name: {e}"))?;
+    let manager_model_id: String = row
+        .try_get("", "manager_model_id")
+        .map_err(|e| format!("Failed decoding project manager_model_id: {e}"))?;
+    let created_at: String = row
+        .try_get("", "created_at")
+        .map_err(|e| format!("Failed decoding project created_at: {e}"))?;
+    let updated_at: String = row
+        .try_get("", "updated_at")
+        .map_err(|e| format!("Failed decoding project updated_at: {e}"))?;
+
+    Ok(OrchestrationProjectData {
+        id,
+        owner_user_id,
+        manager_agent_id,
+        run_id,
+        manager_conversation_id,
+        name,
+        objective,
+        status,
+        manager_agent_name,
+        manager_model_id,
+        created_at,
+        updated_at,
+    })
+}
+
+async fn get_project_by_id_for_owner(
+    db: &DatabaseConnection,
+    project_id: uuid::Uuid,
+    owner_user_id: uuid::Uuid,
+) -> Result<Option<OrchestrationProjectData>, String> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT
+                    p.id,
+                    p.owner_user_id,
+                    p.manager_agent_id,
+                    p.root_run_id AS run_id,
+                    p.manager_conversation_id,
+                    p.name,
+                    p.objective,
+                    p.status,
+                    a.name AS manager_agent_name,
+                    a.model_id AS manager_model_id,
+                    p.created_at::text AS created_at,
+                    p.updated_at::text AS updated_at
+                FROM orchestration_projects p
+                JOIN agents a ON a.id = p.manager_agent_id
+                WHERE p.id = $1::uuid
+                  AND p.owner_user_id = $2::uuid
+                LIMIT 1
+            "#,
+            vec![project_id.into(), owner_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading project by id: {e}"))?;
+
+    match row {
+        Some(row) => Ok(Some(map_project_row(row)?)),
+        None => Ok(None),
+    }
+}
+
 #[tauri::command]
 async fn load_skills_graph(
     owner_type: String,
@@ -2739,19 +3114,544 @@ async fn list_personality_adjustments(
 }
 
 #[tauri::command]
+async fn create_orchestration_project(
+    request: CreateOrchestrationProjectRequest,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<OrchestrationProjectData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let manager_agent_id = uuid::Uuid::parse_str(request.manager_agent_id.trim())
+        .map_err(|e| format!("Invalid manager agent ID: {e}"))?;
+    let name = request.name.trim();
+    let objective = request.objective.trim();
+
+    if name.is_empty() {
+        return Err("Project name is required.".to_string());
+    }
+    if objective.is_empty() {
+        return Err("Project objective is required.".to_string());
+    }
+
+    let manager_is_owned = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT 1
+                FROM agents
+                WHERE id = $1::uuid
+                  AND user_id = $2::uuid
+                LIMIT 1
+            "#,
+            vec![manager_agent_id.into(), session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed validating manager ownership: {e}"))?
+        .is_some();
+
+    if !manager_is_owned {
+        return Err("Manager agent is not owned by the authenticated session.".to_string());
+    }
+
+    let run = OrchestrationService::create_run(
+        &db,
+        CreateOrchestrationRunRequest {
+            parent_agent_id: manager_agent_id.to_string(),
+            title: name.to_string(),
+            objective: objective.to_string(),
+            priority: request.priority,
+        },
+        session_user_id,
+    )
+    .await?;
+
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                INSERT INTO orchestration_projects (
+                    id,
+                    owner_user_id,
+                    manager_agent_id,
+                    root_run_id,
+                    name,
+                    objective,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    gen_random_uuid(),
+                    $1::uuid,
+                    $2::uuid,
+                    $3::uuid,
+                    $4::text,
+                    $5::text,
+                    'active',
+                    NOW(),
+                    NOW()
+                )
+                RETURNING id
+            "#,
+            vec![
+                session_user_id.into(),
+                manager_agent_id.into(),
+                run.id.into(),
+                name.to_string().into(),
+                objective.to_string().into(),
+            ],
+        ))
+        .await
+        .map_err(|e| format!("Failed creating orchestration project: {e}"))?
+        .ok_or_else(|| "No project row returned after create.".to_string())?;
+
+    let project_id: uuid::Uuid = row
+        .try_get("", "id")
+        .map_err(|e| format!("Failed decoding created project id: {e}"))?;
+
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        r#"
+            INSERT INTO orchestration_project_selections (
+                user_id,
+                project_id,
+                created_at,
+                updated_at
+            )
+            VALUES ($1::uuid, $2::uuid, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                project_id = EXCLUDED.project_id,
+                updated_at = NOW()
+        "#,
+        vec![session_user_id.into(), project_id.into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed setting current orchestration project: {e}"))?;
+
+    get_project_by_id_for_owner(&db, project_id, session_user_id)
+        .await?
+        .ok_or_else(|| "Created project could not be reloaded.".to_string())
+}
+
+#[tauri::command]
+async fn list_orchestration_projects(
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<Vec<OrchestrationProjectData>, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT
+                    p.id,
+                    p.owner_user_id,
+                    p.manager_agent_id,
+                    p.root_run_id AS run_id,
+                    p.manager_conversation_id,
+                    p.name,
+                    p.objective,
+                    p.status,
+                    a.name AS manager_agent_name,
+                    a.model_id AS manager_model_id,
+                    p.created_at::text AS created_at,
+                    p.updated_at::text AS updated_at
+                FROM orchestration_projects p
+                JOIN agents a ON a.id = p.manager_agent_id
+                WHERE p.owner_user_id = $1::uuid
+                ORDER BY p.created_at DESC
+            "#,
+            vec![session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed listing orchestration projects: {e}"))?;
+
+    rows.into_iter().map(map_project_row).collect()
+}
+
+#[tauri::command]
+async fn get_current_orchestration_project(
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<Option<OrchestrationProjectData>, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let selection = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT project_id
+                FROM orchestration_project_selections
+                WHERE user_id = $1::uuid
+                LIMIT 1
+            "#,
+            vec![session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading project selection: {e}"))?;
+
+    if let Some(selection) = selection {
+        let project_id: Option<uuid::Uuid> = selection
+            .try_get("", "project_id")
+            .map_err(|e| format!("Failed decoding selected project id: {e}"))?;
+        if let Some(project_id) = project_id {
+            return get_project_by_id_for_owner(&db, project_id, session_user_id).await;
+        }
+    }
+
+    let latest = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT id
+                FROM orchestration_projects
+                WHERE owner_user_id = $1::uuid
+                ORDER BY created_at DESC
+                LIMIT 1
+            "#,
+            vec![session_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading fallback project: {e}"))?;
+
+    let Some(latest) = latest else {
+        return Ok(None);
+    };
+
+    let project_id: uuid::Uuid = latest
+        .try_get("", "id")
+        .map_err(|e| format!("Failed decoding fallback project id: {e}"))?;
+
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        r#"
+            INSERT INTO orchestration_project_selections (
+                user_id,
+                project_id,
+                created_at,
+                updated_at
+            )
+            VALUES ($1::uuid, $2::uuid, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                project_id = EXCLUDED.project_id,
+                updated_at = NOW()
+        "#,
+        vec![session_user_id.into(), project_id.into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed setting fallback current project: {e}"))?;
+
+    get_project_by_id_for_owner(&db, project_id, session_user_id).await
+}
+
+#[tauri::command]
+async fn set_current_orchestration_project(
+    project_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<Option<OrchestrationProjectData>, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id.trim()).map_err(|e| format!("Invalid project ID: {e}"))?;
+
+    let existing = get_project_by_id_for_owner(&db, project_uuid, session_user_id).await?;
+    if existing.is_none() {
+        return Err("Project is not owned by the authenticated session.".to_string());
+    }
+
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        r#"
+            INSERT INTO orchestration_project_selections (
+                user_id,
+                project_id,
+                created_at,
+                updated_at
+            )
+            VALUES ($1::uuid, $2::uuid, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                project_id = EXCLUDED.project_id,
+                updated_at = NOW()
+        "#,
+        vec![session_user_id.into(), project_uuid.into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed setting current project: {e}"))?;
+
+    get_project_by_id_for_owner(&db, project_uuid, session_user_id).await
+}
+
+async fn ensure_project_manager_conversation_for_owner(
+    db: &DatabaseConnection,
+    project: &OrchestrationProjectData,
+    owner_user_id: uuid::Uuid,
+) -> Result<conversation_service::ConversationData, String> {
+    if let Some(conversation_id) = project.manager_conversation_id {
+        if let Ok(existing) = ConversationService::get_conversation(db, conversation_id.to_string()).await {
+            if existing.agent_id == project.manager_agent_id && existing.user_id == owner_user_id {
+                return Ok(existing);
+            }
+        }
+
+        db.execute(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                UPDATE orchestration_projects
+                SET manager_conversation_id = NULL,
+                    updated_at = NOW()
+                WHERE id = $1::uuid
+                  AND owner_user_id = $2::uuid
+            "#,
+            vec![project.id.into(), owner_user_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed clearing stale manager conversation binding: {e}"))?;
+    }
+
+    let conversation = ConversationService::create_conversation(
+        db,
+        CreateConversationRequest {
+            agent_id: project.manager_agent_id.to_string(),
+            user_id: owner_user_id.to_string(),
+            title: Some(format!("Project manager: {}", project.name)),
+        },
+    )
+    .await?;
+
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        r#"
+            UPDATE orchestration_projects
+            SET manager_conversation_id = $1::uuid,
+                updated_at = NOW()
+            WHERE id = $2::uuid
+              AND owner_user_id = $3::uuid
+        "#,
+        vec![
+            conversation.id.into(),
+            project.id.into(),
+            owner_user_id.into(),
+        ],
+    ))
+    .await
+    .map_err(|e| format!("Failed binding project manager conversation: {e}"))?;
+
+    Ok(conversation)
+}
+
+async fn build_project_manager_context(
+    db: &DatabaseConnection,
+    project: &OrchestrationProjectData,
+) -> Result<String, String> {
+    let run_row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT status
+                FROM orchestration_runs
+                WHERE id = $1::uuid
+                LIMIT 1
+            "#,
+            vec![project.run_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading project run status: {e}"))?;
+    let run_status = run_row
+        .and_then(|row| row.try_get::<String>("", "status").ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let counts_row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('queued', 'planned', 'waiting'))::bigint AS backlog_count,
+                    COUNT(*) FILTER (WHERE status = 'in_progress')::bigint AS in_progress_count,
+                    COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_count,
+                    COUNT(*) FILTER (WHERE status IN ('failed', 'cancelled'))::bigint AS blocked_count
+                FROM orchestration_tasks
+                WHERE run_id = $1::uuid
+            "#,
+            vec![project.run_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading project task counters: {e}"))?
+        .ok_or_else(|| "Could not load project task counters.".to_string())?;
+
+    let backlog_count: i64 = counts_row
+        .try_get("", "backlog_count")
+        .map_err(|e| format!("Failed decoding backlog_count: {e}"))?;
+    let in_progress_count: i64 = counts_row
+        .try_get("", "in_progress_count")
+        .map_err(|e| format!("Failed decoding in_progress_count: {e}"))?;
+    let completed_count: i64 = counts_row
+        .try_get("", "completed_count")
+        .map_err(|e| format!("Failed decoding completed_count: {e}"))?;
+    let blocked_count: i64 = counts_row
+        .try_get("", "blocked_count")
+        .map_err(|e| format!("Failed decoding blocked_count: {e}"))?;
+
+    let recent_rows = db
+        .query_all(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            r#"
+                SELECT
+                    t.title,
+                    t.status,
+                    a.name AS owner_agent_name
+                FROM orchestration_tasks t
+                JOIN agents a ON a.id = t.owner_agent_id
+                WHERE t.run_id = $1::uuid
+                ORDER BY t.updated_at DESC
+                LIMIT 5
+            "#,
+            vec![project.run_id.into()],
+        ))
+        .await
+        .map_err(|e| format!("Failed loading recent project tasks: {e}"))?;
+
+    let recent_tasks = recent_rows
+        .into_iter()
+        .map(|row| {
+            let title: String = row.try_get("", "title").unwrap_or_else(|_| "Untitled task".to_string());
+            let status: String = row.try_get("", "status").unwrap_or_else(|_| "unknown".to_string());
+            let owner_agent_name: String =
+                row.try_get("", "owner_agent_name").unwrap_or_else(|_| "unknown".to_string());
+            format!("- {title} ({status}, owner: {owner_agent_name})")
+        })
+        .collect::<Vec<_>>();
+
+    let recent_tasks_block = if recent_tasks.is_empty() {
+        "- none yet".to_string()
+    } else {
+        recent_tasks.join("\n")
+    };
+
+    Ok(format!(
+        "project_id: {}\nproject_name: {}\nobjective: {}\nmanager_agent: {}\nrun_id: {}\nrun_status: {}\nbacklog_count: {}\nin_progress_count: {}\ncompleted_count: {}\nblocked_count: {}\nrecent_tasks:\n{}",
+        project.id,
+        project.name,
+        project.objective,
+        project.manager_agent_name,
+        project.run_id,
+        run_status,
+        backlog_count,
+        in_progress_count,
+        completed_count,
+        blocked_count,
+        recent_tasks_block
+    ))
+}
+
+#[tauri::command]
+async fn ensure_project_manager_conversation(
+    project_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<conversation_service::ConversationData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id.trim()).map_err(|e| format!("Invalid project ID: {e}"))?;
+    let project = get_project_by_id_for_owner(&db, project_uuid, session_user_id)
+        .await?
+        .ok_or_else(|| "Project is not owned by the authenticated session.".to_string())?;
+    ensure_project_manager_conversation_for_owner(&db, &project, session_user_id).await
+}
+
+#[tauri::command]
+async fn send_project_manager_message(
+    project_id: String,
+    content: String,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+    ai_client: tauri::State<'_, AiClient>,
+) -> Result<conversation_service::MessageData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    let trimmed_content = content.trim();
+    if trimmed_content.is_empty() {
+        return Err("Message content cannot be empty.".to_string());
+    }
+
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id.trim()).map_err(|e| format!("Invalid project ID: {e}"))?;
+    let project = get_project_by_id_for_owner(&db, project_uuid, session_user_id)
+        .await?
+        .ok_or_else(|| "Project is not owned by the authenticated session.".to_string())?;
+
+    let conversation =
+        ensure_project_manager_conversation_for_owner(&db, &project, session_user_id).await?;
+    let context_block = build_project_manager_context(&db, &project).await?;
+    let access_token = SkillsRegistryClient::resolve_access_token(&auth_state).ok();
+
+    let context_message = format!(
+        "[ProjectManagementContext]\n{}\n[/ProjectManagementContext]\nRespond specifically about this project and ask clarifying questions when needed.",
+        context_block
+    );
+
+    db.execute(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        r#"
+            INSERT INTO messages (
+                id,
+                conversation_id,
+                role,
+                content,
+                message_type,
+                metadata,
+                created_at,
+                parent_id
+            )
+            VALUES (
+                gen_random_uuid(),
+                $1::uuid,
+                'system',
+                $2::text,
+                'text',
+                '{"internal": true, "project_context": true}'::jsonb,
+                NOW(),
+                NULL
+            )
+        "#,
+        vec![conversation.id.into(), context_message.into()],
+    ))
+    .await
+    .map_err(|e| format!("Failed writing project context system message: {e}"))?;
+
+    let response = ConversationService::send_message(
+        &db,
+        conversation.id.to_string(),
+        trimmed_content.to_string(),
+        None,
+        access_token.as_deref(),
+        &ai_client,
+    )
+    .await?;
+
+    let _ =
+        AbilityService::track_ability_usage(&db, conversation.agent_id, "conversation", true)
+            .await;
+    Ok(response)
+}
+
+#[tauri::command]
 async fn create_orchestration_run(
     request: CreateOrchestrationRunRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationRunData, String> {
-    OrchestrationService::create_run(&db, request).await
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    OrchestrationService::create_run(&db, request, session_user_id).await
 }
 
 #[tauri::command]
 async fn create_agent_delegation(
     request: CreateAgentDelegationRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<AgentDelegationData, String> {
-    OrchestrationService::create_agent_delegation(&db, request).await
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    OrchestrationService::create_agent_delegation(&db, request, session_user_id).await
 }
 
 #[tauri::command]
@@ -2763,11 +3663,24 @@ async fn list_agent_delegations(
 }
 
 #[tauri::command]
+async fn revoke_agent_delegation(
+    delegation_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<AgentDelegationData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    OrchestrationService::revoke_agent_delegation(&db, delegation_id, session_user_id).await
+}
+
+#[tauri::command]
 async fn list_orchestration_runs(
     parent_agent_id: String,
+    status_filter: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<Vec<OrchestrationRunData>, String> {
-    OrchestrationService::list_runs(&db, parent_agent_id).await
+    OrchestrationService::list_runs(&db, parent_agent_id, status_filter, page, per_page).await
 }
 
 #[tauri::command]
@@ -2783,16 +3696,22 @@ async fn update_orchestration_run_status(
     run_id: String,
     status: String,
     last_error: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationRunData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &run_id, session_user_id).await?;
     OrchestrationService::update_run_status(&db, run_id, status, last_error).await
 }
 
 #[tauri::command]
 async fn create_orchestration_task(
     request: CreateOrchestrationTaskRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &request.run_id, session_user_id).await?;
     OrchestrationService::create_task(&db, request).await
 }
 
@@ -2805,21 +3724,118 @@ async fn list_orchestration_tasks(
 }
 
 #[tauri::command]
+async fn get_orchestration_task_detail(
+    task_id: String,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<OrchestrationTaskDetailData, String> {
+    OrchestrationService::get_task_detail(&db, task_id).await
+}
+
+#[tauri::command]
+async fn list_orchestration_events(
+    run_id: String,
+    limit: Option<i64>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<Vec<OrchestrationEventData>, String> {
+    OrchestrationService::list_events(&db, run_id, limit).await
+}
+
+#[tauri::command]
+async fn review_orchestration_task_assignment(
+    task_id: String,
+    required_ability_keys: Option<Vec<String>>,
+    preferred_role: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<AssignmentReviewData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
+    OrchestrationService::review_task_assignment(
+        &db,
+        task_id,
+        required_ability_keys,
+        preferred_role,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn auto_assign_orchestration_task(
+    task_id: String,
+    requested_by_agent_id: Option<String>,
+    required_ability_keys: Option<Vec<String>>,
+    preferred_role: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
+    OrchestrationService::auto_assign_task(
+        &db,
+        task_id,
+        requested_by_agent_id,
+        required_ability_keys,
+        preferred_role,
+    )
+    .await
+}
+
+#[tauri::command]
 async fn update_orchestration_task_status(
     task_id: String,
     status: String,
     failure_reason: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
     OrchestrationService::update_task_status(&db, task_id, status, failure_reason).await
+}
+
+#[tauri::command]
+async fn submit_orchestration_task_feedback(
+    task_id: String,
+    verdict: String,
+    notes: Option<String>,
+    requested_by_agent_id: String,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<OrchestrationTaskFeedbackData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    OrchestrationService::submit_task_feedback(
+        &db,
+        task_id,
+        verdict,
+        notes,
+        session_user_id,
+        requested_by_agent_id,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn skip_orchestration_task(
+    task_id: String,
+    requested_by_agent_id: String,
+    reason: Option<String>,
+    auth_state: tauri::State<'_, AuthState>,
+    db: tauri::State<'_, DatabaseConnection>,
+) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
+    OrchestrationService::skip_task(&db, task_id, requested_by_agent_id, reason).await
 }
 
 #[tauri::command]
 async fn retry_orchestration_task(
     task_id: String,
     requested_by_agent_id: String,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
     OrchestrationService::retry_task(&db, task_id, requested_by_agent_id).await
 }
 
@@ -2830,8 +3846,11 @@ async fn reassign_orchestration_task(
     requested_by_agent_id: String,
     reason: Option<String>,
     required_ability_keys: Option<Vec<String>>,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationTaskData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_task_owned_by_session(&db, &task_id, session_user_id).await?;
     OrchestrationService::reassign_task(
         &db,
         task_id,
@@ -2846,24 +3865,33 @@ async fn reassign_orchestration_task(
 #[tauri::command]
 async fn record_orchestration_delegation(
     request: RecordDelegationRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<orchestration_service::OrchestrationDelegationData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &request.run_id, session_user_id).await?;
     OrchestrationService::record_delegation(&db, request).await
 }
 
 #[tauri::command]
 async fn upsert_orchestration_heartbeat(
     request: UpsertHeartbeatRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationHeartbeatData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &request.run_id, session_user_id).await?;
     OrchestrationService::upsert_heartbeat(&db, request).await
 }
 
 #[tauri::command]
 async fn upsert_orchestration_memory(
     request: UpsertOrchestrationMemoryRequest,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationMemoryData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &request.run_id, session_user_id).await?;
     OrchestrationService::upsert_memory(&db, request).await
 }
 
@@ -2881,8 +3909,11 @@ async fn list_orchestration_memories(
 async fn promote_orchestration_memory(
     memory_id: String,
     requested_by_agent_id: String,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationMemoryData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_memory_owned_by_session(&db, &memory_id, session_user_id).await?;
     OrchestrationService::promote_memory_to_parent_visible(&db, memory_id, requested_by_agent_id)
         .await
 }
@@ -2890,24 +3921,33 @@ async fn promote_orchestration_memory(
 #[tauri::command]
 async fn pause_orchestration_run(
     run_id: String,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationRunData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &run_id, session_user_id).await?;
     OrchestrationService::update_run_status(&db, run_id, "paused".to_string(), None).await
 }
 
 #[tauri::command]
 async fn resume_orchestration_run(
     run_id: String,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationRunData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &run_id, session_user_id).await?;
     OrchestrationService::update_run_status(&db, run_id, "in_progress".to_string(), None).await
 }
 
 #[tauri::command]
 async fn cancel_orchestration_run(
     run_id: String,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationRunData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &run_id, session_user_id).await?;
     OrchestrationService::update_run_status(&db, run_id, "cancelled".to_string(), None).await
 }
 
@@ -2916,8 +3956,11 @@ async fn set_orchestration_schedule(
     run_id: String,
     enabled: bool,
     interval_minutes: Option<i32>,
+    auth_state: tauri::State<'_, AuthState>,
     db: tauri::State<'_, DatabaseConnection>,
 ) -> Result<OrchestrationScheduleData, String> {
+    let session_user_id = resolve_session_user_uuid(auth_state.inner())?;
+    ensure_orchestration_run_owned_by_session(&db, &run_id, session_user_id).await?;
     OrchestrationService::set_schedule(&db, run_id, enabled, interval_minutes.unwrap_or(15)).await
 }
 
@@ -3116,6 +4159,7 @@ pub fn run() {
             set_runtime_sync_app_visibility,
             run_agent_runtime_tool,
             run_registry_skill_direct,
+            list_provider_models,
             create_agent,
             list_agents,
             get_agent,
@@ -3177,15 +4221,28 @@ pub fn run() {
             revert_agent_last_adaptation_cycle,
             list_personality_adjustments,
             // Orchestration commands
+            create_orchestration_project,
+            list_orchestration_projects,
+            get_current_orchestration_project,
+            set_current_orchestration_project,
+            ensure_project_manager_conversation,
+            send_project_manager_message,
             create_orchestration_run,
             create_agent_delegation,
             list_agent_delegations,
+            revoke_agent_delegation,
             list_orchestration_runs,
             get_orchestration_run,
             update_orchestration_run_status,
             create_orchestration_task,
             list_orchestration_tasks,
+            get_orchestration_task_detail,
+            list_orchestration_events,
+            review_orchestration_task_assignment,
+            auto_assign_orchestration_task,
             update_orchestration_task_status,
+            submit_orchestration_task_feedback,
+            skip_orchestration_task,
             retry_orchestration_task,
             reassign_orchestration_task,
             record_orchestration_delegation,

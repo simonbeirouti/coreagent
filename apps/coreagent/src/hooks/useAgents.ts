@@ -7,6 +7,12 @@ import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 export { agentKeys };
 
+export interface ProviderModelInfo {
+  id: string;
+  provider: 'openai' | 'anthropic';
+  display_name: string;
+}
+
 // Fetch all agents for a user
 export function useAgents(userId: string) {
   const initialData = getCachedData<Agent[]>(agentKeys.list(userId));
@@ -38,6 +44,14 @@ export function useAgent(agentId: string) {
     initialData,
     initialDataUpdatedAt,
     ...cacheFirstStaticQueryPolicy,
+  });
+}
+
+export function useProviderModels(providerType: 'openai' | 'anthropic') {
+  return useQuery({
+    queryKey: ['provider-models', providerType],
+    queryFn: async (): Promise<ProviderModelInfo[]> => tauriCommandClient.listProviderModels(providerType),
+    staleTime: 5 * 60 * 1000,
   });
 }
 

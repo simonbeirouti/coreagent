@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -105,10 +105,22 @@ vi.mock('@/hooks/useRegistrySkills', () => ({
   }),
 }));
 
+vi.mock('@/components/agent/orchestration-panel', () => ({
+  OrchestrationPanel: () => <div>OrchestrationPanel</div>,
+}));
+
+vi.mock('@/components/ui/select', () => ({
+  Select: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  SelectItem: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  SelectTrigger: ({ children }: { children: React.ReactNode }) => <button type="button">{children}</button>,
+  SelectValue: ({ placeholder }: { placeholder?: string }) => <span>{placeholder ?? ''}</span>,
+}));
+
 import { Route } from './index';
 
 describe('index route orchestration wizard', () => {
-  it('opens guided assignment dialog from root route', () => {
+  it('renders backlog and agent lanes with no manual assignment entrypoint', () => {
     const DashboardComponent = (Route as unknown as { component: React.ComponentType }).component;
     const queryClient = createTestQueryClient();
     render(
@@ -118,14 +130,10 @@ describe('index route orchestration wizard', () => {
     );
 
     expect(screen.getByText('Orchestration Board')).toBeInTheDocument();
+    expect(screen.getByText('Backlog')).toBeInTheDocument();
     expect(screen.getByText('Idle Queue')).toBeInTheDocument();
     expect(screen.getByText('Working Now')).toBeInTheDocument();
     expect(screen.getByText('Ready For Review')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /create job assignment/i }));
-
-    expect(screen.getByText('Create Orchestration Assignment')).toBeInTheDocument();
-    expect(screen.getByText('1. Select Agent')).toBeInTheDocument();
-    expect(screen.getByText('Select Agent')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create job assignment/i })).not.toBeInTheDocument();
   });
 });

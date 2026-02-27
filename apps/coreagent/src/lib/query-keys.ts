@@ -65,10 +65,18 @@ export const orchestrationKeys = {
   runs: (agentId: string) => [...orchestrationKeys.all, 'runs', agentId] as const,
   run: (runId: string) => [...orchestrationKeys.all, 'run', runId] as const,
   tasks: (runId: string) => [...orchestrationKeys.all, 'tasks', runId] as const,
+  events: (runId: string, limit = 200) => [...orchestrationKeys.all, 'events', runId, limit] as const,
   diagnostics: (runId: string) => [...orchestrationKeys.all, 'diagnostics', runId] as const,
   delegations: (agentId: string) => [...orchestrationKeys.all, 'delegations', agentId] as const,
   memories: (runId: string, viewerAgentId: string, scopeFilter = 'all') =>
     [...orchestrationKeys.all, 'memories', runId, viewerAgentId, scopeFilter] as const,
+  boardLanes: () => [...orchestrationKeys.all, 'board-lanes'] as const,
+};
+
+export const projectKeys = {
+  all: ['projects'] as const,
+  list: () => [...projectKeys.all, 'list'] as const,
+  current: () => [...projectKeys.all, 'current'] as const,
 };
 
 export const registryKeys = {

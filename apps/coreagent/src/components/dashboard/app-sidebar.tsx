@@ -2,7 +2,6 @@
 
 import * as React from "react"
 import {
-  GalleryVerticalEnd,
   Bot,
   Home,
   FileText,
@@ -13,7 +12,7 @@ import {
 
 import { NavAgents } from "./nav-agents"
 import { NavFooter } from "./nav-footer"
-import { TeamSwitcher } from "./team-switcher"
+import { ProjectSwitcher } from "./team-switcher"
 import {
   Sidebar,
   SidebarContent,
@@ -25,13 +24,6 @@ import { NavMain } from "./nav-main"
 
 // This is sample data.
 const data = {
-  teams: [
-    {
-      name: "Acme Inc",
-      logo: GalleryVerticalEnd,
-      plan: "Enterprise",
-    },
-  ],
   items: [
     {
       title: "Dashboard",
@@ -89,7 +81,7 @@ export const AppSidebar = React.memo(function AppSidebar({
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <TeamSwitcher teams={data.teams} />
+        <ProjectSwitcher />
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={data.items} />

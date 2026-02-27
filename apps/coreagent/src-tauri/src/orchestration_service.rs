@@ -22,7 +22,6 @@ pub struct OrchestrationRunData {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateOrchestrationRunRequest {
     pub parent_agent_id: String,
-    pub owner_user_id: String,
     pub title: String,
     pub objective: String,
     pub priority: Option<String>,
@@ -57,6 +56,8 @@ pub struct CreateOrchestrationTaskRequest {
     pub owner_agent_id: String,
     pub title: String,
     pub description: Option<String>,
+    pub required_ability_keys: Option<Vec<String>>,
+    pub preferred_role: Option<String>,
     pub task_order: Option<i32>,
     pub idempotency_key: Option<String>,
     pub max_retries: Option<i32>,
@@ -142,6 +143,80 @@ pub struct OrchestrationDiagnostics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationTaskAttemptData {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub task_id: Uuid,
+    pub attempt_number: i32,
+    pub executor_agent_id: Uuid,
+    pub status: String,
+    pub backoff_seconds: i32,
+    pub error_class: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub latency_ms: Option<i32>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationEventData {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub task_id: Option<Uuid>,
+    pub event_type: String,
+    pub severity: String,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationTaskFeedbackData {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub run_id: Uuid,
+    pub user_id: Uuid,
+    pub verdict: String,
+    pub notes: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationTaskDetailData {
+    pub task: OrchestrationTaskData,
+    pub attempts: Vec<OrchestrationTaskAttemptData>,
+    pub events: Vec<OrchestrationEventData>,
+    pub memories: Vec<OrchestrationMemoryData>,
+    pub feedback: Vec<OrchestrationTaskFeedbackData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentReviewCandidateData {
+    pub agent_id: Uuid,
+    pub role: String,
+    pub persona: String,
+    pub state: String,
+    pub score: i32,
+    pub current_load: i64,
+    pub hard_filter_passed: bool,
+    pub hard_fail_reasons: Vec<String>,
+    pub soft_match_reasons: Vec<String>,
+    pub enabled_ability_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentReviewData {
+    pub task_id: Uuid,
+    pub run_id: Uuid,
+    pub recommended_agent_id: Option<Uuid>,
+    pub confidence: f32,
+    pub required_ability_keys: Vec<String>,
+    pub preferred_role: Option<String>,
+    pub candidates: Vec<AssignmentReviewCandidateData>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDelegationData {
     pub id: Uuid,
     pub parent_agent_id: Uuid,
@@ -160,7 +235,6 @@ pub struct CreateAgentDelegationRequest {
     pub child_agent_id: String,
     pub role: String,
     pub ownership_scope: Option<String>,
-    pub created_by_user_id: String,
     pub required_ability_keys: Option<Vec<String>>,
 }
 
@@ -199,6 +273,26 @@ struct PolicyRejection {
 }
 
 impl OrchestrationService {
+    const EVENT_RUN_CREATED: &'static str = "run.created";
+    const EVENT_RUN_STATUS_CHANGED: &'static str = "run.status_changed";
+    const EVENT_RUN_RECOVERED: &'static str = "run.recovered";
+    const EVENT_RUN_SCHEDULED_UPDATE: &'static str = "run.scheduled_update";
+    const EVENT_TASK_CREATED: &'static str = "task.created";
+    const EVENT_TASK_STATUS_CHANGED: &'static str = "task.status_changed";
+    const EVENT_TASK_ASSIGNMENT_REVIEWED: &'static str = "task.assignment_reviewed";
+    const EVENT_TASK_RETRIED: &'static str = "task.retried";
+    const EVENT_TASK_REASSIGNED: &'static str = "task.reassigned";
+    const EVENT_TASK_SKIPPED: &'static str = "task.skipped";
+    const EVENT_DELEGATION_ALLOWED: &'static str = "delegation.allowed";
+    const EVENT_DELEGATION_BLOCKED: &'static str = "delegation.blocked";
+    const EVENT_DELEGATION_MANUAL_OVERRIDE: &'static str = "delegation.manual_override";
+    const EVENT_HEARTBEAT_UPDATED: &'static str = "heartbeat.updated";
+    const EVENT_HEARTBEAT_STALE: &'static str = "heartbeat.stale";
+    const EVENT_MEMORY_UPSERTED: &'static str = "memory.upserted";
+    const EVENT_MEMORY_PROMOTED: &'static str = "memory.promoted";
+    const EVENT_SCHEDULE_UPDATED: &'static str = "schedule.updated";
+    const EVENT_FEEDBACK_SUBMITTED: &'static str = "feedback.submitted";
+
     const MAX_RETRY_BACKOFF_SECONDS: i64 = 15 * 60;
     const DEFAULT_RETRY_BACKOFF_SECONDS: i64 = 5;
 
@@ -227,11 +321,39 @@ impl OrchestrationService {
         matches!(scope, "private" | "shared_run" | "parent_visible")
     }
 
+    fn normalize_role(role: &str) -> String {
+        let normalized = role.trim().to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "planner" | "researcher" | "executor" | "reviewer" | "custom"
+        ) {
+            normalized
+        } else {
+            "custom".to_string()
+        }
+    }
+
+    fn normalize_ability_keys(keys: Option<Vec<String>>) -> Vec<String> {
+        let mut out: Vec<String> = keys
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn is_valid_action_category(action_category: &str) -> bool {
         matches!(
             action_category,
             "planning" | "research" | "execution" | "review" | "synthesis" | "custom"
         )
+    }
+
+    fn is_valid_feedback_verdict(verdict: &str) -> bool {
+        matches!(verdict, "approved" | "rework" | "rejected")
     }
 
     fn next_retry_backoff_seconds(next_attempt_number: i32) -> i64 {
@@ -578,14 +700,113 @@ impl OrchestrationService {
         })
     }
 
+    fn decode_attempt(
+        row: &sea_orm::QueryResult,
+    ) -> Result<OrchestrationTaskAttemptData, String> {
+        Ok(OrchestrationTaskAttemptData {
+            id: row
+                .try_get("", "id")
+                .map_err(|e| format!("Failed decoding attempt id: {e}"))?,
+            run_id: row
+                .try_get("", "run_id")
+                .map_err(|e| format!("Failed decoding attempt run_id: {e}"))?,
+            task_id: row
+                .try_get("", "task_id")
+                .map_err(|e| format!("Failed decoding attempt task_id: {e}"))?,
+            attempt_number: row
+                .try_get("", "attempt_number")
+                .map_err(|e| format!("Failed decoding attempt_number: {e}"))?,
+            executor_agent_id: row
+                .try_get("", "executor_agent_id")
+                .map_err(|e| format!("Failed decoding executor_agent_id: {e}"))?,
+            status: row
+                .try_get("", "status")
+                .map_err(|e| format!("Failed decoding attempt status: {e}"))?,
+            backoff_seconds: row
+                .try_get("", "backoff_seconds")
+                .map_err(|e| format!("Failed decoding backoff_seconds: {e}"))?,
+            error_class: row
+                .try_get("", "error_class")
+                .map_err(|e| format!("Failed decoding error_class: {e}"))?,
+            error_message: row
+                .try_get("", "error_message")
+                .map_err(|e| format!("Failed decoding error_message: {e}"))?,
+            started_at: row
+                .try_get("", "started_at")
+                .map_err(|e| format!("Failed decoding started_at: {e}"))?,
+            ended_at: row
+                .try_get("", "ended_at")
+                .map_err(|e| format!("Failed decoding ended_at: {e}"))?,
+            latency_ms: row
+                .try_get("", "latency_ms")
+                .map_err(|e| format!("Failed decoding latency_ms: {e}"))?,
+            created_at: row
+                .try_get("", "created_at")
+                .map_err(|e| format!("Failed decoding created_at: {e}"))?,
+        })
+    }
+
+    fn decode_event(row: &sea_orm::QueryResult) -> Result<OrchestrationEventData, String> {
+        Ok(OrchestrationEventData {
+            id: row
+                .try_get("", "id")
+                .map_err(|e| format!("Failed decoding event id: {e}"))?,
+            run_id: row
+                .try_get("", "run_id")
+                .map_err(|e| format!("Failed decoding event run_id: {e}"))?,
+            task_id: row
+                .try_get("", "task_id")
+                .map_err(|e| format!("Failed decoding event task_id: {e}"))?,
+            event_type: row
+                .try_get("", "event_type")
+                .map_err(|e| format!("Failed decoding event_type: {e}"))?,
+            severity: row
+                .try_get("", "severity")
+                .map_err(|e| format!("Failed decoding event severity: {e}"))?,
+            payload: row
+                .try_get("", "payload")
+                .map_err(|e| format!("Failed decoding event payload: {e}"))?,
+            created_at: row
+                .try_get("", "created_at")
+                .map_err(|e| format!("Failed decoding event created_at: {e}"))?,
+        })
+    }
+
+    fn decode_feedback(
+        row: &sea_orm::QueryResult,
+    ) -> Result<OrchestrationTaskFeedbackData, String> {
+        Ok(OrchestrationTaskFeedbackData {
+            id: row
+                .try_get("", "id")
+                .map_err(|e| format!("Failed decoding feedback id: {e}"))?,
+            task_id: row
+                .try_get("", "task_id")
+                .map_err(|e| format!("Failed decoding feedback task_id: {e}"))?,
+            run_id: row
+                .try_get("", "run_id")
+                .map_err(|e| format!("Failed decoding feedback run_id: {e}"))?,
+            user_id: row
+                .try_get("", "user_id")
+                .map_err(|e| format!("Failed decoding feedback user_id: {e}"))?,
+            verdict: row
+                .try_get("", "verdict")
+                .map_err(|e| format!("Failed decoding feedback verdict: {e}"))?,
+            notes: row
+                .try_get("", "notes")
+                .map_err(|e| format!("Failed decoding feedback notes: {e}"))?,
+            created_at: row
+                .try_get("", "created_at")
+                .map_err(|e| format!("Failed decoding feedback created_at: {e}"))?,
+        })
+    }
+
     pub async fn create_run(
         db: &DatabaseConnection,
         request: CreateOrchestrationRunRequest,
+        session_user_id: Uuid,
     ) -> Result<OrchestrationRunData, String> {
         let parent_agent_id = Uuid::parse_str(&request.parent_agent_id)
             .map_err(|e| format!("Invalid parent_agent_id: {e}"))?;
-        let owner_user_id = Uuid::parse_str(&request.owner_user_id)
-            .map_err(|e| format!("Invalid owner_user_id: {e}"))?;
         if request.title.trim().is_empty() {
             return Err("title cannot be empty".to_string());
         }
@@ -598,7 +819,7 @@ impl OrchestrationService {
             return Err("priority must be one of: low, normal, high".to_string());
         }
 
-        Self::ensure_parent_agent_ownership(db, parent_agent_id, owner_user_id).await?;
+        Self::ensure_parent_agent_ownership(db, parent_agent_id, session_user_id).await?;
 
         let row = db
             .query_one(Statement::from_sql_and_values(
@@ -642,7 +863,7 @@ impl OrchestrationService {
                 "#,
                 vec![
                     parent_agent_id.into(),
-                    owner_user_id.into(),
+                    session_user_id.into(),
                     request.title.trim().to_string().into(),
                     request.objective.trim().to_string().into(),
                     priority.into(),
@@ -657,7 +878,7 @@ impl OrchestrationService {
             db,
             run.id,
             None,
-            "run_created",
+            Self::EVENT_RUN_CREATED,
             "info",
             serde_json::json!({
                 "run_id": run.id,
@@ -672,9 +893,23 @@ impl OrchestrationService {
     pub async fn list_runs(
         db: &DatabaseConnection,
         parent_agent_id: String,
+        status_filter: Option<String>,
+        page: Option<i64>,
+        per_page: Option<i64>,
     ) -> Result<Vec<OrchestrationRunData>, String> {
         let parent_agent_id = Uuid::parse_str(&parent_agent_id)
             .map_err(|e| format!("Invalid parent_agent_id: {e}"))?;
+        let normalized_status_filter = status_filter
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(status) = normalized_status_filter.as_deref() {
+            if !Self::is_valid_status(status) {
+                return Err("Invalid run status filter".to_string());
+            }
+        }
+        let page = page.unwrap_or(1).clamp(1, 100_000);
+        let per_page = per_page.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1) * per_page;
         let rows = db
             .query_all(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
@@ -694,9 +929,17 @@ impl OrchestrationService {
                         updated_at::text AS updated_at
                     FROM orchestration_runs
                     WHERE parent_agent_id = $1::uuid
+                      AND ($2::text IS NULL OR status = $2::text)
                     ORDER BY updated_at DESC
+                    LIMIT $3::bigint
+                    OFFSET $4::bigint
                 "#,
-                vec![parent_agent_id.into()],
+                vec![
+                    parent_agent_id.into(),
+                    normalized_status_filter.into(),
+                    per_page.into(),
+                    offset.into(),
+                ],
             ))
             .await
             .map_err(|e| format!("Failed listing orchestration runs: {e}"))?;
@@ -802,7 +1045,7 @@ impl OrchestrationService {
             db,
             run.id,
             None,
-            "run_status_updated",
+            Self::EVENT_RUN_STATUS_CHANGED,
             if run.status == "failed" {
                 "warning"
             } else {
@@ -835,6 +1078,21 @@ impl OrchestrationService {
             .map(|value| Uuid::parse_str(&value))
             .transpose()
             .map_err(|e| format!("Invalid parent_task_id: {e}"))?;
+        let required_ability_keys = Self::normalize_ability_keys(request.required_ability_keys);
+        let preferred_role = request
+            .preferred_role
+            .as_deref()
+            .map(Self::normalize_role)
+            .filter(|value| value != "custom");
+        if let Some(raw_role) = request.preferred_role.as_deref() {
+            let normalized = Self::normalize_role(raw_role);
+            if normalized == "custom" && raw_role.trim().to_ascii_lowercase() != "custom" {
+                return Err(
+                    "preferred_role must be one of: planner, researcher, executor, reviewer, custom"
+                        .to_string(),
+                );
+            }
+        }
         let max_retries = request.max_retries.unwrap_or(3).clamp(0, 10);
         let task_order = request.task_order.unwrap_or(0);
         let run_parent_agent_id = Self::get_run_parent_agent_id(db, run_id).await?;
@@ -868,6 +1126,8 @@ impl OrchestrationService {
                         owner_agent_id,
                         title,
                         description,
+                        required_ability_keys,
+                        preferred_role,
                         status,
                         task_order,
                         idempotency_key,
@@ -882,10 +1142,12 @@ impl OrchestrationService {
                         $3::uuid,
                         $4::text,
                         $5::text,
-                        'queued',
-                        $6::int,
+                        $6::jsonb,
                         $7::text,
+                        'queued',
                         $8::int,
+                        $9::text,
+                        $10::int,
                         NOW(),
                         NOW()
                     )
@@ -918,11 +1180,10 @@ impl OrchestrationService {
                         .description
                         .map(|value| value.trim().to_string())
                         .into(),
+                    serde_json::json!(required_ability_keys).to_string().into(),
+                    preferred_role.into(),
                     task_order.into(),
-                    request
-                        .idempotency_key
-                        .map(|value| value.trim().to_string())
-                        .into(),
+                    request.idempotency_key.map(|value| value.trim().to_string()).into(),
                     max_retries.into(),
                 ],
             ))
@@ -935,7 +1196,7 @@ impl OrchestrationService {
             db,
             task.run_id,
             Some(task.id),
-            "task_created",
+            Self::EVENT_TASK_CREATED,
             "info",
             serde_json::json!({
                 "task_id": task.id,
@@ -989,6 +1250,506 @@ impl OrchestrationService {
             out.push(Self::decode_task(&row)?);
         }
         Ok(out)
+    }
+
+    pub async fn get_task_detail(
+        db: &DatabaseConnection,
+        task_id: String,
+    ) -> Result<OrchestrationTaskDetailData, String> {
+        let task_id = Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id: {e}"))?;
+        let task_row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        run_id,
+                        parent_task_id,
+                        owner_agent_id,
+                        title,
+                        description,
+                        status,
+                        task_order,
+                        idempotency_key,
+                        attempt_count,
+                        max_retries,
+                        next_retry_at::text AS next_retry_at,
+                        last_failure_reason,
+                        last_heartbeat_at::text AS last_heartbeat_at,
+                        heartbeat_status,
+                        heartbeat_progress,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM orchestration_tasks
+                    WHERE id = $1::uuid
+                    LIMIT 1
+                "#,
+                vec![task_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading orchestration task detail: {e}"))?
+            .ok_or_else(|| "Task not found".to_string())?;
+        let task = Self::decode_task(&task_row)?;
+
+        let attempt_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        run_id,
+                        task_id,
+                        attempt_number,
+                        executor_agent_id,
+                        status,
+                        backoff_seconds,
+                        error_class,
+                        error_message,
+                        started_at::text AS started_at,
+                        ended_at::text AS ended_at,
+                        latency_ms,
+                        created_at::text AS created_at
+                    FROM orchestration_task_attempts
+                    WHERE task_id = $1::uuid
+                    ORDER BY attempt_number DESC, created_at DESC
+                "#,
+                vec![task.id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task attempts: {e}"))?;
+        let mut attempts = Vec::with_capacity(attempt_rows.len());
+        for row in attempt_rows {
+            attempts.push(Self::decode_attempt(&row)?);
+        }
+
+        let event_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        run_id,
+                        task_id,
+                        event_type,
+                        severity,
+                        payload,
+                        created_at::text AS created_at
+                    FROM orchestration_events
+                    WHERE task_id = $1::uuid
+                    ORDER BY created_at DESC
+                    LIMIT 200
+                "#,
+                vec![task.id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task events: {e}"))?;
+        let mut events = Vec::with_capacity(event_rows.len());
+        for row in event_rows {
+            events.push(Self::decode_event(&row)?);
+        }
+
+        let memory_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        run_id,
+                        task_id,
+                        agent_id,
+                        scope,
+                        key,
+                        summary,
+                        payload,
+                        promoted_at::text AS promoted_at,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    FROM orchestration_memories
+                    WHERE run_id = $1::uuid
+                      AND (task_id = $2::uuid OR scope IN ('shared_run', 'parent_visible'))
+                    ORDER BY created_at DESC
+                    LIMIT 200
+                "#,
+                vec![task.run_id.into(), task.id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task memories: {e}"))?;
+        let mut memories = Vec::with_capacity(memory_rows.len());
+        for row in memory_rows {
+            memories.push(Self::decode_memory(&row)?);
+        }
+
+        let feedback_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        task_id,
+                        run_id,
+                        user_id,
+                        verdict,
+                        notes,
+                        created_at::text AS created_at
+                    FROM orchestration_task_feedback
+                    WHERE task_id = $1::uuid
+                    ORDER BY created_at DESC
+                "#,
+                vec![task.id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task feedback: {e}"))?;
+        let mut feedback = Vec::with_capacity(feedback_rows.len());
+        for row in feedback_rows {
+            feedback.push(Self::decode_feedback(&row)?);
+        }
+
+        Ok(OrchestrationTaskDetailData {
+            task,
+            attempts,
+            events,
+            memories,
+            feedback,
+        })
+    }
+
+    pub async fn list_events(
+        db: &DatabaseConnection,
+        run_id: String,
+        limit: Option<i64>,
+    ) -> Result<Vec<OrchestrationEventData>, String> {
+        let run_id = Uuid::parse_str(&run_id).map_err(|e| format!("Invalid run_id: {e}"))?;
+        let limit = limit.unwrap_or(200).clamp(1, 500);
+        let rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        id,
+                        run_id,
+                        task_id,
+                        event_type,
+                        severity,
+                        payload,
+                        created_at::text AS created_at
+                    FROM orchestration_events
+                    WHERE run_id = $1::uuid
+                    ORDER BY created_at DESC
+                    LIMIT $2::bigint
+                "#,
+                vec![run_id.into(), limit.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed listing orchestration events: {e}"))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(Self::decode_event(&row)?);
+        }
+        Ok(out)
+    }
+
+    pub async fn review_task_assignment(
+        db: &DatabaseConnection,
+        task_id: String,
+        required_ability_keys: Option<Vec<String>>,
+        preferred_role: Option<String>,
+    ) -> Result<AssignmentReviewData, String> {
+        let task_id = Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id: {e}"))?;
+        let task_row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT
+                        t.id,
+                        t.run_id,
+                        t.required_ability_keys,
+                        t.preferred_role,
+                        r.parent_agent_id
+                    FROM orchestration_tasks t
+                    JOIN orchestration_runs r ON r.id = t.run_id
+                    WHERE t.id = $1::uuid
+                    LIMIT 1
+                "#,
+                vec![task_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task for assignment review: {e}"))?
+            .ok_or_else(|| "Task not found".to_string())?;
+        let run_id: Uuid = task_row
+            .try_get("", "run_id")
+            .map_err(|e| format!("Failed decoding review run_id: {e}"))?;
+        let parent_agent_id: Uuid = task_row
+            .try_get("", "parent_agent_id")
+            .map_err(|e| format!("Failed decoding review parent_agent_id: {e}"))?;
+        let task_required_ability_keys_json: serde_json::Value = task_row
+            .try_get("", "required_ability_keys")
+            .map_err(|e| format!("Failed decoding task required_ability_keys: {e}"))?;
+        let task_required_ability_keys: Vec<String> = task_required_ability_keys_json
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(|s| s.trim().to_ascii_lowercase()))
+            .filter(|value| !value.is_empty())
+            .collect();
+        let task_preferred_role: Option<String> = task_row
+            .try_get("", "preferred_role")
+            .map_err(|e| format!("Failed decoding task preferred_role: {e}"))?;
+
+        let preferred_role = preferred_role
+            .as_deref()
+            .map(Self::normalize_role)
+            .or(task_preferred_role.as_deref().map(Self::normalize_role))
+            .filter(|value| value != "custom");
+        let required_ability_keys: HashSet<String> = if let Some(explicit) = required_ability_keys {
+            Self::normalize_ability_keys(Some(explicit)).into_iter().collect()
+        } else {
+            Self::normalize_ability_keys(Some(task_required_ability_keys))
+                .into_iter()
+                .collect()
+        };
+        let requires_tooling = !required_ability_keys.is_empty();
+
+        let delegation_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT child_agent_id, role
+                    FROM agent_delegations
+                    WHERE parent_agent_id = $1::uuid
+                      AND is_active = true
+                "#,
+                vec![parent_agent_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading active delegations for review: {e}"))?;
+
+        let mut candidate_roles: HashMap<Uuid, String> = HashMap::new();
+        candidate_roles.insert(parent_agent_id, "planner".to_string());
+        for row in delegation_rows {
+            let child_agent_id: Uuid = row
+                .try_get("", "child_agent_id")
+                .map_err(|e| format!("Failed decoding review child_agent_id: {e}"))?;
+            let role: String = row
+                .try_get("", "role")
+                .map_err(|e| format!("Failed decoding review child role: {e}"))?;
+            candidate_roles.insert(child_agent_id, Self::normalize_role(&role));
+        }
+
+        let load_rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT owner_agent_id, COUNT(*)::bigint AS active_count
+                    FROM orchestration_tasks
+                    WHERE run_id = $1::uuid
+                      AND status IN ('queued', 'planned', 'in_progress', 'waiting')
+                    GROUP BY owner_agent_id
+                "#,
+                vec![run_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading candidate workload counts: {e}"))?;
+        let mut load_by_agent: HashMap<Uuid, i64> = HashMap::new();
+        for row in load_rows {
+            let owner_agent_id: Uuid = row
+                .try_get("", "owner_agent_id")
+                .map_err(|e| format!("Failed decoding workload owner_agent_id: {e}"))?;
+            let active_count: i64 = row
+                .try_get("", "active_count")
+                .map_err(|e| format!("Failed decoding workload active_count: {e}"))?;
+            load_by_agent.insert(owner_agent_id, active_count);
+        }
+
+        let mut candidates = Vec::new();
+        for (agent_id, role) in candidate_roles {
+            let agent_row = db
+                .query_one(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    r#"
+                        SELECT COALESCE(persona, '') AS persona, COALESCE(state, 'active') AS state
+                        FROM agents
+                        WHERE id = $1::uuid
+                        LIMIT 1
+                    "#,
+                    vec![agent_id.into()],
+                ))
+                .await
+                .map_err(|e| format!("Failed loading candidate agent for review: {e}"))?
+                .ok_or_else(|| "Candidate agent not found".to_string())?;
+            let persona: String = agent_row
+                .try_get("", "persona")
+                .map_err(|e| format!("Failed decoding candidate persona: {e}"))?;
+            let state: String = agent_row
+                .try_get("", "state")
+                .map_err(|e| format!("Failed decoding candidate state: {e}"))?;
+            let enabled_ability_keys_set = Self::get_enabled_ability_keys_for_agent(db, agent_id)
+                .await
+                .unwrap_or_default();
+            let mut enabled_ability_keys: Vec<String> =
+                enabled_ability_keys_set.iter().cloned().collect();
+            enabled_ability_keys.sort();
+
+            let mut hard_fail_reasons = Vec::new();
+            if state != "active" {
+                hard_fail_reasons.push("agent_not_active".to_string());
+            }
+            if !required_ability_keys.is_empty() {
+                let missing: Vec<String> = required_ability_keys
+                    .iter()
+                    .filter(|key| !enabled_ability_keys_set.contains(key.as_str()))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    hard_fail_reasons.push(format!(
+                        "missing_required_abilities:{}",
+                        missing.join(",")
+                    ));
+                }
+            } else {
+                hard_fail_reasons.push(
+                    "missing_required_abilities_definition_for_task".to_string(),
+                );
+            }
+
+            let hard_filter_passed = hard_fail_reasons.is_empty();
+            let current_load = *load_by_agent.get(&agent_id).unwrap_or(&0);
+            let mut soft_match_reasons = Vec::new();
+            let mut score = if hard_filter_passed { 60 } else { 0 };
+            if let Some(preferred_role) = preferred_role.as_deref() {
+                if role == preferred_role {
+                    score += 20;
+                    soft_match_reasons.push("role_exact_match".to_string());
+                } else if persona.to_ascii_lowercase().contains(preferred_role) {
+                    score += 10;
+                    soft_match_reasons.push("persona_role_match".to_string());
+                }
+            } else {
+                score += 5;
+            }
+            let load_bonus = (20 - (current_load as i32 * 5)).max(0);
+            score += load_bonus;
+            soft_match_reasons.push(format!("load_bonus:{load_bonus}"));
+            if !required_ability_keys.is_empty() && hard_filter_passed {
+                score += 10;
+                soft_match_reasons.push("required_abilities_satisfied".to_string());
+            }
+
+            candidates.push(AssignmentReviewCandidateData {
+                agent_id,
+                role,
+                persona,
+                state,
+                score,
+                current_load,
+                hard_filter_passed,
+                hard_fail_reasons,
+                soft_match_reasons,
+                enabled_ability_keys,
+            });
+        }
+
+        candidates.sort_by(|a, b| {
+            b.hard_filter_passed
+                .cmp(&a.hard_filter_passed)
+                .then(b.score.cmp(&a.score))
+                .then(a.current_load.cmp(&b.current_load))
+        });
+        let passing: Vec<&AssignmentReviewCandidateData> =
+            candidates.iter().filter(|item| item.hard_filter_passed).collect();
+        let recommended_agent_id = passing.first().map(|candidate| candidate.agent_id);
+        let confidence = if passing.is_empty() {
+            0.0
+        } else if passing.len() == 1 {
+            0.85
+        } else {
+            let top = passing[0].score;
+            let next = passing[1].score;
+            ((top - next) as f32 / 100.0 + 0.5).clamp(0.35, 0.95)
+        };
+        let rationale = if let Some(recommended) = recommended_agent_id {
+            format!(
+                "recommended={} confidence={:.2} requires_tooling={} preferred_role={}",
+                recommended,
+                confidence,
+                requires_tooling,
+                preferred_role.clone().unwrap_or_else(|| "none".to_string())
+            )
+        } else {
+            "no_eligible_agent_found_after_hard_filters".to_string()
+        };
+        let required_ability_keys_vec: Vec<String> =
+            required_ability_keys.iter().cloned().collect();
+
+        Self::log_event(
+            db,
+            run_id,
+            Some(task_id),
+            Self::EVENT_TASK_ASSIGNMENT_REVIEWED,
+            if recommended_agent_id.is_some() {
+                "info"
+            } else {
+                "warning"
+            },
+            serde_json::json!({
+                "task_id": task_id,
+                "recommended_agent_id": recommended_agent_id,
+                "confidence": confidence,
+                "required_ability_keys": required_ability_keys_vec,
+                "preferred_role": preferred_role.clone(),
+                "requires_tooling": requires_tooling,
+                "candidate_count": candidates.len(),
+                "rationale": rationale,
+            }),
+        )
+        .await?;
+
+        Ok(AssignmentReviewData {
+            task_id,
+            run_id,
+            recommended_agent_id,
+            confidence,
+            required_ability_keys: required_ability_keys.into_iter().collect(),
+            preferred_role,
+            candidates,
+            rationale,
+        })
+    }
+
+    pub async fn auto_assign_task(
+        db: &DatabaseConnection,
+        task_id: String,
+        requested_by_agent_id: Option<String>,
+        required_ability_keys: Option<Vec<String>>,
+        preferred_role: Option<String>,
+    ) -> Result<OrchestrationTaskData, String> {
+        let review = Self::review_task_assignment(
+            db,
+            task_id.clone(),
+            required_ability_keys,
+            preferred_role,
+        )
+        .await?;
+        let recommended_agent_id = review
+            .recommended_agent_id
+            .ok_or_else(|| "AUTO_ASSIGNMENT_BLOCKED::no_eligible_agent".to_string())?;
+        let requested_by_agent_id = if let Some(value) = requested_by_agent_id {
+            Uuid::parse_str(&value).map_err(|e| format!("Invalid requested_by_agent_id: {e}"))?
+        } else {
+            Self::get_run_parent_agent_id(db, review.run_id).await?
+        };
+        Self::reassign_task(
+            db,
+            task_id,
+            recommended_agent_id.to_string(),
+            requested_by_agent_id.to_string(),
+            Some(format!(
+                "auto_assignment_review_confidence={:.2}",
+                review.confidence
+            )),
+            Some(review.required_ability_keys),
+        )
+        .await
     }
 
     pub async fn update_task_status(
@@ -1089,7 +1850,7 @@ impl OrchestrationService {
             db,
             task.run_id,
             Some(task.id),
-            "task_status_updated",
+            Self::EVENT_TASK_STATUS_CHANGED,
             if task.status == "failed" {
                 "warning"
             } else {
@@ -1144,7 +1905,7 @@ impl OrchestrationService {
         let max_retries: i32 = current_row
             .try_get("", "max_retries")
             .map_err(|e| format!("Failed decoding retry max_retries: {e}"))?;
-        if status != "failed" {
+        if status != "failed" && status != "completed" {
             return Err(format!("RETRY_NOT_ALLOWED::status::{status}"));
         }
         let next_attempt_number = attempt_count + 1;
@@ -1240,12 +2001,219 @@ impl OrchestrationService {
             db,
             run_id,
             Some(task.id),
-            "task_retry_scheduled",
+            Self::EVENT_TASK_RETRIED,
             "warning",
             serde_json::json!({
                 "task_id": task.id,
                 "attempt_number": task.attempt_count,
                 "backoff_seconds": backoff_seconds,
+                "requested_by_agent_id": requested_by_agent_id,
+            }),
+        )
+        .await?;
+        Ok(task)
+    }
+
+    pub async fn submit_task_feedback(
+        db: &DatabaseConnection,
+        task_id: String,
+        verdict: String,
+        notes: Option<String>,
+        requested_by_user_id: Uuid,
+        requested_by_agent_id: String,
+    ) -> Result<OrchestrationTaskFeedbackData, String> {
+        let task_id = Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id: {e}"))?;
+        let requested_by_agent_id = Uuid::parse_str(&requested_by_agent_id)
+            .map_err(|e| format!("Invalid requested_by_agent_id: {e}"))?;
+        let normalized_verdict = verdict.trim().to_string();
+        if !Self::is_valid_feedback_verdict(&normalized_verdict) {
+            return Err("verdict must be one of: approved, rework, rejected".to_string());
+        }
+
+        let task_context = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT t.id, t.run_id, r.owner_user_id
+                    FROM orchestration_tasks t
+                    JOIN orchestration_runs r ON r.id = t.run_id
+                    WHERE t.id = $1::uuid
+                    LIMIT 1
+                "#,
+                vec![task_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task context for feedback: {e}"))?
+            .ok_or_else(|| "Task not found".to_string())?;
+        let run_id: Uuid = task_context
+            .try_get("", "run_id")
+            .map_err(|e| format!("Failed decoding feedback run_id: {e}"))?;
+        let run_owner_user_id: Uuid = task_context
+            .try_get("", "owner_user_id")
+            .map_err(|e| format!("Failed decoding feedback owner_user_id: {e}"))?;
+        if requested_by_user_id != run_owner_user_id {
+            return Err("TASK_FEEDBACK_DENIED::user_not_run_owner".to_string());
+        }
+
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    INSERT INTO orchestration_task_feedback (
+                        id,
+                        task_id,
+                        run_id,
+                        user_id,
+                        verdict,
+                        notes,
+                        created_at
+                    )
+                    VALUES (
+                        gen_random_uuid(),
+                        $1::uuid,
+                        $2::uuid,
+                        $3::uuid,
+                        $4::text,
+                        $5::text,
+                        NOW()
+                    )
+                    RETURNING
+                        id,
+                        task_id,
+                        run_id,
+                        user_id,
+                        verdict,
+                        notes,
+                        created_at::text AS created_at
+                "#,
+                vec![
+                    task_id.into(),
+                    run_id.into(),
+                    requested_by_user_id.into(),
+                    normalized_verdict.clone().into(),
+                    notes
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .into(),
+                ],
+            ))
+            .await
+            .map_err(|e| format!("Failed submitting task feedback: {e}"))?
+            .ok_or_else(|| "No row returned while submitting task feedback".to_string())?;
+        let feedback = Self::decode_feedback(&row)?;
+        Self::log_event(
+            db,
+            run_id,
+            Some(task_id),
+            Self::EVENT_FEEDBACK_SUBMITTED,
+            "info",
+            serde_json::json!({
+                "feedback_id": feedback.id,
+                "task_id": task_id,
+                "user_id": requested_by_user_id,
+                "verdict": normalized_verdict,
+                "notes": feedback.notes,
+            }),
+        )
+        .await?;
+
+        if feedback.verdict == "rework" {
+            let _ = Self::retry_task(
+                db,
+                task_id.to_string(),
+                requested_by_agent_id.to_string(),
+            )
+            .await?;
+        }
+        Ok(feedback)
+    }
+
+    pub async fn skip_task(
+        db: &DatabaseConnection,
+        task_id: String,
+        requested_by_agent_id: String,
+        reason: Option<String>,
+    ) -> Result<OrchestrationTaskData, String> {
+        let task_id = Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id: {e}"))?;
+        let requested_by_agent_id = Uuid::parse_str(&requested_by_agent_id)
+            .map_err(|e| format!("Invalid requested_by_agent_id: {e}"))?;
+        let current_row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    SELECT run_id, status
+                    FROM orchestration_tasks
+                    WHERE id = $1::uuid
+                    LIMIT 1
+                "#,
+                vec![task_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed loading task for skip: {e}"))?
+            .ok_or_else(|| "Task not found".to_string())?;
+        let run_id: Uuid = current_row
+            .try_get("", "run_id")
+            .map_err(|e| format!("Failed decoding skip run_id: {e}"))?;
+        let current_status: String = current_row
+            .try_get("", "status")
+            .map_err(|e| format!("Failed decoding skip status: {e}"))?;
+        if matches!(current_status.as_str(), "completed" | "cancelled") {
+            return Err(format!("SKIP_NOT_ALLOWED::status::{current_status}"));
+        }
+        let reason = reason
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "task_skipped_by_user".to_string());
+
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    UPDATE orchestration_tasks
+                    SET
+                        status = 'cancelled',
+                        last_failure_reason = $2::text,
+                        next_retry_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = $1::uuid
+                    RETURNING
+                        id,
+                        run_id,
+                        parent_task_id,
+                        owner_agent_id,
+                        title,
+                        description,
+                        status,
+                        task_order,
+                        idempotency_key,
+                        attempt_count,
+                        max_retries,
+                        next_retry_at::text AS next_retry_at,
+                        last_failure_reason,
+                        last_heartbeat_at::text AS last_heartbeat_at,
+                        heartbeat_status,
+                        heartbeat_progress,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                "#,
+                vec![task_id.into(), reason.clone().into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed skipping orchestration task: {e}"))?
+            .ok_or_else(|| "No row returned while skipping task".to_string())?;
+        let task = Self::decode_task(&row)?;
+        Self::log_event(
+            db,
+            run_id,
+            Some(task.id),
+            Self::EVENT_TASK_SKIPPED,
+            "warning",
+            serde_json::json!({
+                "task_id": task.id,
+                "from_status": current_status,
+                "to_status": task.status,
+                "reason": reason,
                 "requested_by_agent_id": requested_by_agent_id,
             }),
         )
@@ -1433,13 +2401,12 @@ impl OrchestrationService {
     pub async fn create_agent_delegation(
         db: &DatabaseConnection,
         request: CreateAgentDelegationRequest,
+        session_user_id: Uuid,
     ) -> Result<AgentDelegationData, String> {
         let parent_agent_id = Uuid::parse_str(&request.parent_agent_id)
             .map_err(|e| format!("Invalid parent_agent_id: {e}"))?;
         let child_agent_id = Uuid::parse_str(&request.child_agent_id)
             .map_err(|e| format!("Invalid child_agent_id: {e}"))?;
-        let created_by_user_id = Uuid::parse_str(&request.created_by_user_id)
-            .map_err(|e| format!("Invalid created_by_user_id: {e}"))?;
         if parent_agent_id == child_agent_id {
             return Err("Cannot delegate an agent to itself".to_string());
         }
@@ -1471,7 +2438,7 @@ impl OrchestrationService {
                 vec![
                     parent_agent_id.into(),
                     child_agent_id.into(),
-                    created_by_user_id.into(),
+                    session_user_id.into(),
                 ],
             ))
             .await
@@ -1559,7 +2526,7 @@ impl OrchestrationService {
                     child_agent_id.into(),
                     request.role.trim().to_string().into(),
                     ownership_scope.into(),
-                    created_by_user_id.into(),
+                    session_user_id.into(),
                 ],
             ))
             .await
@@ -1601,6 +2568,49 @@ impl OrchestrationService {
             out.push(Self::decode_agent_delegation(&row)?);
         }
         Ok(out)
+    }
+
+    pub async fn revoke_agent_delegation(
+        db: &DatabaseConnection,
+        delegation_id: String,
+        requested_by_user_id: Uuid,
+    ) -> Result<AgentDelegationData, String> {
+        let delegation_id =
+            Uuid::parse_str(&delegation_id).map_err(|e| format!("Invalid delegation_id: {e}"))?;
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                    UPDATE agent_delegations ad
+                    SET
+                        is_active = false,
+                        updated_at = NOW()
+                    WHERE ad.id = $1::uuid
+                      AND EXISTS (
+                          SELECT 1
+                          FROM agents a
+                          WHERE a.id = ad.parent_agent_id
+                            AND a.user_id = $2::uuid
+                      )
+                    RETURNING
+                        id,
+                        parent_agent_id,
+                        child_agent_id,
+                        role,
+                        ownership_scope,
+                        is_active,
+                        created_by_user_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                "#,
+                vec![delegation_id.into(), requested_by_user_id.into()],
+            ))
+            .await
+            .map_err(|e| format!("Failed revoking agent delegation: {e}"))?
+            .ok_or_else(|| {
+                "Delegation not found or requester does not own the parent agent".to_string()
+            })?;
+        Self::decode_agent_delegation(&row)
     }
 
     pub async fn reassign_task(
@@ -1699,7 +2709,7 @@ impl OrchestrationService {
             db,
             run_id,
             Some(task.id),
-            "task_reassigned",
+            Self::EVENT_TASK_REASSIGNED,
             "info",
             serde_json::json!({
                 "task_id": task.id,
@@ -1773,7 +2783,7 @@ impl OrchestrationService {
                     db,
                     run_id,
                     Some(task_id),
-                    "delegation_policy_blocked",
+                    Self::EVENT_DELEGATION_BLOCKED,
                     "warning",
                     payload,
                 )
@@ -1855,11 +2865,16 @@ impl OrchestrationService {
             .map_err(|e| format!("Failed recording orchestration delegation: {e}"))?
             .ok_or_else(|| "No row returned while recording delegation".to_string())?;
         let delegation = Self::decode_delegation(&row)?;
+        let delegation_event_type = if policy_decision == "manual_override" {
+            Self::EVENT_DELEGATION_MANUAL_OVERRIDE
+        } else {
+            Self::EVENT_DELEGATION_ALLOWED
+        };
         Self::log_event(
             db,
             run_id,
             Some(task_id),
-            "delegation_policy_decision",
+            delegation_event_type,
             if policy_decision == "allowed" {
                 "info"
             } else {
@@ -1964,7 +2979,7 @@ impl OrchestrationService {
         .await
         .map_err(|e| format!("Failed updating task heartbeat projections: {e}"))?;
 
-        Ok(OrchestrationHeartbeatData {
+        let heartbeat = OrchestrationHeartbeatData {
             id: row
                 .try_get("", "id")
                 .map_err(|e| format!("Failed decoding heartbeat id: {e}"))?,
@@ -1990,7 +3005,22 @@ impl OrchestrationService {
             updated_at: row
                 .try_get("", "updated_at")
                 .map_err(|e| format!("Failed decoding heartbeat updated_at: {e}"))?,
-        })
+        };
+        Self::log_event(
+            db,
+            run_id,
+            Some(task_id),
+            Self::EVENT_HEARTBEAT_UPDATED,
+            "info",
+            serde_json::json!({
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "status": heartbeat.status,
+                "progress": heartbeat.progress,
+            }),
+        )
+        .await?;
+        Ok(heartbeat)
     }
 
     pub async fn upsert_memory(
@@ -2090,7 +3120,7 @@ impl OrchestrationService {
             db,
             run_id,
             task_id,
-            "memory_upserted",
+            Self::EVENT_MEMORY_UPSERTED,
             "info",
             serde_json::json!({
                 "memory_id": memory.id,
@@ -2233,7 +3263,7 @@ impl OrchestrationService {
             db,
             run_id,
             memory.task_id,
-            "memory_promoted",
+            Self::EVENT_MEMORY_PROMOTED,
             "info",
             serde_json::json!({
                 "memory_id": memory.id,
@@ -2363,7 +3393,7 @@ impl OrchestrationService {
             db,
             schedule.run_id,
             None,
-            "schedule_updated",
+            Self::EVENT_SCHEDULE_UPDATED,
             "info",
             serde_json::json!({
                 "enabled": schedule.enabled,
@@ -2511,7 +3541,7 @@ impl OrchestrationService {
                 db,
                 run_id,
                 Some(task_id),
-                "task_retry_released",
+                Self::EVENT_TASK_RETRIED,
                 "info",
                 serde_json::json!({
                     "task_id": task_id,
@@ -2550,7 +3580,7 @@ impl OrchestrationService {
                 db,
                 run_id,
                 None,
-                "run_recovered_after_restart",
+                Self::EVENT_RUN_RECOVERED,
                 "info",
                 serde_json::json!({
                     "run_id": run_id,
@@ -2628,7 +3658,7 @@ impl OrchestrationService {
                 db,
                 run_id,
                 Some(task_id),
-                "stale_task_detected",
+                Self::EVENT_HEARTBEAT_STALE,
                 "warning",
                 serde_json::json!({
                     "task_id": task_id,
@@ -2684,7 +3714,7 @@ impl OrchestrationService {
                         gen_random_uuid(),
                         $1::uuid,
                         NULL,
-                        'scheduled_update',
+                        $3::text,
                         'info',
                         $2::jsonb,
                         NOW()
@@ -2698,6 +3728,7 @@ impl OrchestrationService {
                     })
                     .to_string()
                     .into(),
+                    Self::EVENT_RUN_SCHEDULED_UPDATE.into(),
                 ],
             ))
             .await
@@ -2785,5 +3816,41 @@ mod tests {
         assert!(!OrchestrationService::is_valid_action_category(
             "delete_all"
         ));
+    }
+
+    #[test]
+    fn validates_feedback_verdicts() {
+        assert!(OrchestrationService::is_valid_feedback_verdict("approved"));
+        assert!(OrchestrationService::is_valid_feedback_verdict("rework"));
+        assert!(OrchestrationService::is_valid_feedback_verdict("rejected"));
+        assert!(!OrchestrationService::is_valid_feedback_verdict("pending"));
+    }
+
+    #[test]
+    fn orchestration_event_taxonomy_uses_dotted_names() {
+        let event_types = [
+            OrchestrationService::EVENT_RUN_CREATED,
+            OrchestrationService::EVENT_RUN_STATUS_CHANGED,
+            OrchestrationService::EVENT_RUN_RECOVERED,
+            OrchestrationService::EVENT_RUN_SCHEDULED_UPDATE,
+            OrchestrationService::EVENT_TASK_CREATED,
+            OrchestrationService::EVENT_TASK_STATUS_CHANGED,
+            OrchestrationService::EVENT_TASK_RETRIED,
+            OrchestrationService::EVENT_TASK_REASSIGNED,
+            OrchestrationService::EVENT_TASK_SKIPPED,
+            OrchestrationService::EVENT_DELEGATION_ALLOWED,
+            OrchestrationService::EVENT_DELEGATION_BLOCKED,
+            OrchestrationService::EVENT_DELEGATION_MANUAL_OVERRIDE,
+            OrchestrationService::EVENT_HEARTBEAT_UPDATED,
+            OrchestrationService::EVENT_HEARTBEAT_STALE,
+            OrchestrationService::EVENT_MEMORY_UPSERTED,
+            OrchestrationService::EVENT_MEMORY_PROMOTED,
+            OrchestrationService::EVENT_SCHEDULE_UPDATED,
+            OrchestrationService::EVENT_FEEDBACK_SUBMITTED,
+        ];
+        for event_type in event_types {
+            assert!(event_type.contains('.'));
+            assert!(!event_type.contains('_'));
+        }
     }
 }

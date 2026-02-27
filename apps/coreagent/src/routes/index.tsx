@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useQueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
 import {
   closestCenter,
@@ -24,7 +25,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { toast } from 'sonner';
-import { ChevronDown, ChevronUp, PauseCircle, PlayCircle, TerminalSquare, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, MessageSquare, PauseCircle, PlayCircle, Send, TerminalSquare, Trash2, X } from 'lucide-react';
 import { Header } from '@/components/header';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -57,18 +58,9 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
 import { useAuth } from '@/hooks/use-auth';
 import { useAgents } from '@/hooks/useAgents';
+import { useMessages } from '@/hooks/useConversations';
 import type { Agent } from '@/types';
 import {
   OrchestrationMemory,
@@ -80,7 +72,11 @@ import {
 } from '@/hooks/useOrchestration';
 import { type RuntimeRunConsoleEvent, useRuntimeRunConsole } from '@/hooks/useRuntimeRunConsole';
 import { useRuntimeSyncDiagnostics } from '@/hooks/useRegistrySkills';
-import { orchestrationKeys } from '@/lib/query-keys';
+import { useCurrentProject } from '@/hooks/useProjects';
+import { conversationKeys, orchestrationKeys } from '@/lib/query-keys';
+import { REQUIREMENT_TEMPLATES, templateAbilityCsv } from '@/lib/orchestration-requirement-templates';
+import { getCachedData } from '@/lib/tauri-store';
+import { tauriCommandClient } from '@/lib/tauri-command-client';
 
 export const Route = createFileRoute('/')({
   component: Dashboard,
@@ -95,7 +91,7 @@ type BoardLaneMeta = {
 };
 
 const BOARD_LANES: BoardLaneMeta[] = [
-  { id: 'idle', title: 'Idle Queue', description: 'Agents waiting for assignment' },
+  { id: 'idle', title: 'Idle Queue', description: 'Agents waiting for work to be made available' },
   { id: 'working', title: 'Working Now', description: 'Agents actively executing tasks' },
   { id: 'review', title: 'Ready For Review', description: 'Agents waiting for review or handoff' },
 ];
@@ -108,8 +104,6 @@ const INITIAL_BOARD: BoardState = {
   working: [],
   review: [],
 };
-
-const BOARD_LANE_STORAGE_KEY = 'coreagent.orchestration.board-lanes.v2';
 
 type StepId = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -124,6 +118,9 @@ type WizardState = {
   delegationScope: 'delegated' | 'shared' | 'observer';
   taskTitle: string;
   taskDescription: string;
+  taskRequiredAbilities: string;
+  taskPreferredRole: 'planner' | 'researcher' | 'executor' | 'reviewer' | 'custom';
+  taskRequirementTemplateId: string;
   taskOwnerAgentId: string;
   scheduleEnabled: boolean;
   scheduleIntervalMinutes: string;
@@ -135,9 +132,13 @@ type WizardState = {
 type TaskCandidate = {
   id: string;
   runId: string;
+  parentAgentId: string;
   runTitle: string;
   title: string;
+  description?: string | null;
   status: OrchestrationTask['status'];
+  ownerAgentId: string;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -186,6 +187,9 @@ function buildInitialState(defaultAgentId = ''): WizardState {
     delegationScope: 'delegated',
     taskTitle: '',
     taskDescription: '',
+    taskRequiredAbilities: '',
+    taskPreferredRole: 'custom',
+    taskRequirementTemplateId: '',
     taskOwnerAgentId: defaultAgentId,
     scheduleEnabled: true,
     scheduleIntervalMinutes: '15',
@@ -196,7 +200,7 @@ function buildInitialState(defaultAgentId = ''): WizardState {
 }
 
 function inferLaneFromAgent(_agent: Agent): BoardLaneId {
-  // New agents should start idle until explicitly assigned or moved.
+  // New agents start idle until work is available.
   return 'idle';
 }
 
@@ -239,25 +243,14 @@ function agentColorClass(agentId: string): string {
 }
 
 function readPersistedLaneMap(): PersistedLaneMap {
-  if (typeof window === 'undefined') return {};
-
-  try {
-    const raw = window.localStorage.getItem(BOARD_LANE_STORAGE_KEY);
-    if (!raw) return {};
-
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const next: PersistedLaneMap = {};
-
-    for (const [agentId, lane] of Object.entries(parsed)) {
-      if (isBoardLaneId(lane)) {
-        next[agentId] = lane;
-      }
+  const cached = getCachedData<PersistedLaneMap>(orchestrationKeys.boardLanes()) ?? {};
+  const next: PersistedLaneMap = {};
+  for (const [agentId, lane] of Object.entries(cached)) {
+    if (isBoardLaneId(lane)) {
+      next[agentId] = lane;
     }
-
-    return next;
-  } catch {
-    return {};
   }
+  return next;
 }
 
 function toPersistedLaneMap(board: BoardState): PersistedLaneMap {
@@ -270,15 +263,9 @@ function toPersistedLaneMap(board: BoardState): PersistedLaneMap {
   return laneMap;
 }
 
-function writePersistedLaneMap(board: BoardState): void {
-  if (typeof window === 'undefined') return;
-
-  try {
-    const laneMap = toPersistedLaneMap(board);
-    window.localStorage.setItem(BOARD_LANE_STORAGE_KEY, JSON.stringify(laneMap));
-  } catch {
-    // Ignore persistence failures and keep in-memory board behavior.
-  }
+function writePersistedLaneMap(queryClient: QueryClient, board: BoardState): void {
+  const laneMap = toPersistedLaneMap(board);
+  queryClient.setQueryData(orchestrationKeys.boardLanes(), laneMap);
 }
 
 function findLaneForId(board: BoardState, id: string): BoardLaneId | undefined {
@@ -292,6 +279,10 @@ function laneVariant(laneId: BoardLaneId): 'outline' | 'default' | 'secondary' {
   if (laneId === 'working') return 'default';
   if (laneId === 'review') return 'secondary';
   return 'outline';
+}
+
+function laneLabel(laneId: BoardLaneId): string {
+  return BOARD_LANES.find((lane) => lane.id === laneId)?.title ?? laneId;
 }
 
 function moveAgentToLane(previous: BoardState, agentId: string, targetLane: BoardLaneId): BoardState {
@@ -347,9 +338,11 @@ function applyDragMove(previous: BoardState, activeId: string, overId: string): 
 type AgentCardProps = {
   agent: Agent;
   laneId: BoardLaneId;
+  isSelected: boolean;
+  onSelect: (agentId: string) => void;
 };
 
-function AgentCard({ agent, laneId }: AgentCardProps) {
+function AgentCard({ agent, laneId, isSelected, onSelect }: AgentCardProps) {
   const {
     attributes,
     listeners,
@@ -367,13 +360,21 @@ function AgentCard({ agent, laneId }: AgentCardProps) {
         'rounded-md border bg-background p-3 shadow-sm',
         'cursor-grab active:cursor-grabbing',
         isDragging ? 'opacity-70 ring-2 ring-primary/40' : '',
+        isSelected ? 'ring-2 ring-primary/60' : '',
       ].join(' ')}
+      onClick={() => onSelect(agent.id)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect(agent.id);
+        }
+      }}
       {...attributes}
       {...listeners}
     >
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium leading-tight">{agent.name}</p>
-        <Badge variant={laneVariant(laneId)}>{laneId}</Badge>
+        <Badge variant={laneVariant(laneId)}>{laneLabel(laneId)}</Badge>
       </div>
       <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{agent.persona}</p>
       <div className="mt-3 flex items-center justify-between text-[11px] text-muted-foreground">
@@ -387,9 +388,11 @@ function AgentCard({ agent, laneId }: AgentCardProps) {
 type LaneColumnProps = {
   lane: BoardLaneMeta;
   agentsInLane: Agent[];
+  selectedAgentId: string;
+  onSelectAgent: (agentId: string) => void;
 };
 
-function LaneColumn({ lane, agentsInLane }: LaneColumnProps) {
+function LaneColumn({ lane, agentsInLane, selectedAgentId, onSelectAgent }: LaneColumnProps) {
   const { setNodeRef, isOver } = useDroppable({ id: lane.id });
 
   return (
@@ -409,7 +412,15 @@ function LaneColumn({ lane, agentsInLane }: LaneColumnProps) {
               Drop agent here
             </div>
           ) : (
-            agentsInLane.map((agent) => <AgentCard key={agent.id} agent={agent} laneId={lane.id} />)
+            agentsInLane.map((agent) => (
+              <AgentCard
+                key={agent.id}
+                agent={agent}
+                laneId={lane.id}
+                isSelected={selectedAgentId === agent.id}
+                onSelect={onSelectAgent}
+              />
+            ))
           )}
         </div>
       </SortableContext>
@@ -417,10 +428,58 @@ function LaneColumn({ lane, agentsInLane }: LaneColumnProps) {
   );
 }
 
+type BacklogTasksColumnProps = {
+  tasks: TaskCandidate[];
+  isLoading: boolean;
+  selectedTaskId: string;
+  onSelectTask: (taskId: string) => void;
+};
+
+function BacklogTasksColumn({ tasks, isLoading, selectedTaskId, onSelectTask }: BacklogTasksColumnProps) {
+  return (
+    <div className="flex flex-col rounded-lg border overflow-auto bg-muted/20 p-3">
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold">Backlog</p>
+          <p className="text-xs text-muted-foreground">Tasks waiting to be completed</p>
+        </div>
+        <Badge variant="outline">{tasks.length}</Badge>
+      </div>
+      <div className="flex flex-1 flex-col gap-2">
+        {isLoading ? (
+          <p className="text-xs text-muted-foreground">Loading backlog tasks...</p>
+        ) : tasks.length === 0 ? (
+          <div className="flex h-24 items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+            No pending tasks
+          </div>
+        ) : (
+          tasks.map((task) => (
+            <button
+              key={task.id}
+              type="button"
+              className={`rounded-md border bg-background p-3 text-left shadow-sm ${
+                selectedTaskId === task.id ? 'ring-2 ring-primary/60' : ''
+              }`}
+              onClick={() => onSelectTask(task.id)}
+            >
+              <p className="text-sm font-medium">{task.title}</p>
+              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{task.description || 'No description'}</p>
+              <div className="mt-3 flex items-center justify-between text-[11px] text-muted-foreground">
+                <span className="truncate">{task.runTitle}</span>
+                <Badge variant="outline">{task.status}</Badge>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Dashboard() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  const { data: agents = [], isLoading: isAgentsLoading } = useAgents(user?.id || '');
+  const { data: agents = [] } = useAgents(user?.id || '');
   const persistedLaneMap = useMemo(() => readPersistedLaneMap(), []);
 
   const [board, setBoard] = useState<BoardState>(INITIAL_BOARD);
@@ -430,19 +489,22 @@ function Dashboard() {
   const [activeStep, setActiveStep] = useState<StepId>(0);
   const [wizardState, setWizardState] = useState<WizardState>(() => buildInitialState(''));
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [idleToWorkingDialogOpen, setIdleToWorkingDialogOpen] = useState(false);
-  const [idleToWorkingContext, setIdleToWorkingContext] = useState<{
-    agentId: string;
-    agentName: string;
-  } | null>(null);
-  const [idleToWorkingTasks, setIdleToWorkingTasks] = useState<TaskCandidate[]>([]);
-  const [isLoadingIdleToWorkingTasks, setIsLoadingIdleToWorkingTasks] = useState(false);
+  const [selectedBoardAgentId, setSelectedBoardAgentId] = useState<string>('');
+  const [selectedBacklogTaskId, setSelectedBacklogTaskId] = useState<string>('');
+  const [backlogTasks, setBacklogTasks] = useState<TaskCandidate[]>([]);
+  const [isLoadingBacklogTasks, setIsLoadingBacklogTasks] = useState(false);
   const [runtimeSelectedAgentIds, setRuntimeSelectedAgentIds] = useState<string[]>([]);
   const [runtimeAutoScroll, setRuntimeAutoScroll] = useState(true);
   const [runtimeConsoleExpanded, setRuntimeConsoleExpanded] = useState(false);
+  const [managerChatOpen, setManagerChatOpen] = useState(true);
+  const [managerChatInput, setManagerChatInput] = useState('');
+  const [managerConversationId, setManagerConversationId] = useState('');
+  const [isEnsuringManagerConversation, setIsEnsuringManagerConversation] = useState(false);
   const runtimeConsoleBottomRef = useRef<HTMLDivElement | null>(null);
   const { events: runtimeConsoleEvents, clearEvents: clearRuntimeConsoleEvents } = useRuntimeRunConsole();
   const { data: runtimeSyncDiagnostics } = useRuntimeSyncDiagnostics();
+  const { data: currentProject = null } = useCurrentProject(Boolean(user?.id));
+  const { data: managerMessages = [] } = useMessages(managerConversationId);
 
   const createRun = useCreateOrchestrationRun(wizardState.parentAgentId);
   const createDelegation = useCreateAgentDelegation(wizardState.parentAgentId);
@@ -484,8 +546,49 @@ function Dashboard() {
 
   useEffect(() => {
     if (agents.length === 0) return;
-    writePersistedLaneMap(board);
-  }, [agents.length, board]);
+    writePersistedLaneMap(queryClient, board);
+  }, [agents.length, board, queryClient]);
+
+  useEffect(() => {
+    if (agents.length === 0) {
+      setSelectedBoardAgentId('');
+      return;
+    }
+    if (selectedBoardAgentId && agents.some((agent) => agent.id === selectedBoardAgentId)) {
+      return;
+    }
+    setSelectedBoardAgentId('');
+  }, [agents, selectedBoardAgentId]);
+
+  useEffect(() => {
+    if (!currentProject?.id) {
+      setManagerConversationId('');
+      return;
+    }
+    let cancelled = false;
+    setIsEnsuringManagerConversation(true);
+    void tauriCommandClient
+      .ensureProjectManagerConversation(currentProject.id)
+      .then((conversation) => {
+        if (cancelled) return;
+        setManagerConversationId(conversation.id);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        const message =
+          error instanceof Error ? error.message : 'Failed to bind manager conversation to project.';
+        toast.error(message);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsEnsuringManagerConversation(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentProject?.id]);
 
   const agentById = useMemo(() => {
     return new Map(agents.map((agent) => [agent.id, agent]));
@@ -536,18 +639,38 @@ function Dashboard() {
     [agents, wizardState.parentAgentId]
   );
 
+  const selectedBoardAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedBoardAgentId),
+    [agents, selectedBoardAgentId]
+  );
+
+  const selectedBoardAgentLane = selectedBoardAgentId ? findLaneForId(board, selectedBoardAgentId) : undefined;
+
   const setField = <K extends keyof WizardState>(key: K, value: WizardState[K]) => {
     setWizardState((prev) => ({ ...prev, [key]: value }));
   };
 
-  const launchWizardForAgent = (agentId: string) => {
-    const next = buildInitialState(agentId);
-    setWizardState(next);
-    setActiveStep(1);
-    setWizardOpen(true);
+  const applyWizardRequirementTemplate = (templateId: string) => {
+    const template = REQUIREMENT_TEMPLATES.find((item) => item.id === templateId);
+    if (!template) {
+      setWizardState((prev) => ({
+        ...prev,
+        taskRequirementTemplateId: '',
+      }));
+      return;
+    }
+    setWizardState((prev) => ({
+      ...prev,
+      taskRequirementTemplateId: template.id,
+      taskPreferredRole: template.preferredRole,
+      taskRequiredAbilities: templateAbilityCsv(template.id),
+    }));
   };
 
-  const loadOpenTasksForAgent = async (agentId: string): Promise<TaskCandidate[]> => {
+  const loadOpenTasksForAgent = async (
+    agentId: string,
+    options?: { ownedByAgentOnly?: boolean }
+  ): Promise<TaskCandidate[]> => {
     const runs = await invoke<OrchestrationRun[]>('list_orchestration_runs', { parentAgentId: agentId });
     if (runs.length === 0) {
       return [];
@@ -559,15 +682,19 @@ function Dashboard() {
         return tasks
           .filter(
             (task) =>
-              task.owner_agent_id === agentId &&
+              (!options?.ownedByAgentOnly || task.owner_agent_id === agentId) &&
               (task.status === 'queued' || task.status === 'planned' || task.status === 'waiting')
           )
           .map((task) => ({
             id: task.id,
             runId: run.id,
+            parentAgentId: agentId,
             runTitle: run.title,
             title: task.title,
+            description: task.description,
             status: task.status,
+            ownerAgentId: task.owner_agent_id,
+            createdAt: task.created_at,
             updatedAt: task.updated_at,
           }));
       })
@@ -578,20 +705,74 @@ function Dashboard() {
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   };
 
-  const openIdleToWorkingDialog = (agentId: string) => {
-    const agentName = agentById.get(agentId)?.name ?? 'Agent';
-    setIdleToWorkingContext({ agentId, agentName });
-    setIdleToWorkingTasks([]);
-    setIdleToWorkingDialogOpen(true);
-    setIsLoadingIdleToWorkingTasks(true);
+  const loadGlobalBacklogTasks = async (): Promise<TaskCandidate[]> => {
+    const scopedAgents = currentProject
+      ? agents.filter((agent) => agent.id === currentProject.manager_agent_id)
+      : agents;
+    const allTaskBatches = await Promise.all(scopedAgents.map((agent) => loadOpenTasksForAgent(agent.id)));
+    const deduped = new Map<string, TaskCandidate>();
+    for (const task of allTaskBatches.flat()) {
+      if (currentProject && task.runId !== currentProject.run_id) {
+        continue;
+      }
+      deduped.set(task.id, task);
+    }
+    return Array.from(deduped.values()).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  };
 
-    void loadOpenTasksForAgent(agentId)
-      .then((tasks) => setIdleToWorkingTasks(tasks))
-      .catch(() => {
-        setIdleToWorkingTasks([]);
-        toast.error('Could not load available tasks for this agent.');
+  useEffect(() => {
+    if (agents.length === 0) {
+      setBacklogTasks([]);
+      setSelectedBacklogTaskId('');
+      return;
+    }
+    setIsLoadingBacklogTasks(true);
+    void loadGlobalBacklogTasks()
+      .then((tasks) => {
+        setBacklogTasks(tasks);
+        if (!tasks.some((task) => task.id === selectedBacklogTaskId)) {
+          setSelectedBacklogTaskId(tasks[0]?.id ?? '');
+        }
       })
-      .finally(() => setIsLoadingIdleToWorkingTasks(false));
+      .catch(() => {
+        setBacklogTasks([]);
+        setSelectedBacklogTaskId('');
+        toast.error('Could not load global backlog tasks.');
+      })
+      .finally(() => setIsLoadingBacklogTasks(false));
+  }, [agents, currentProject]);
+
+  const selectedBacklogTask = useMemo(
+    () => backlogTasks.find((task) => task.id === selectedBacklogTaskId),
+    [selectedBacklogTaskId, backlogTasks]
+  );
+
+  const moveBacklogAgentToWorking = async (agentId: string) => {
+    const queuedTasks = await loadGlobalBacklogTasks();
+    if (queuedTasks.length === 0) {
+      throw new Error('No backlog tasks available to pick up.');
+    }
+    const pickedTask = queuedTasks.find((task) => task.ownerAgentId === agentId) ?? queuedTasks[0];
+    if (pickedTask.ownerAgentId !== agentId) {
+      await invoke<OrchestrationTask>('reassign_orchestration_task', {
+        taskId: pickedTask.id,
+        newOwnerAgentId: agentId,
+        requestedByAgentId: agentId,
+        reason: 'auto_pickup_from_backlog_lane',
+      });
+    }
+    await invoke<OrchestrationTask>('update_orchestration_task_status', {
+      taskId: pickedTask.id,
+      status: 'in_progress',
+      failureReason: null,
+    });
+    setBoard((previous) => moveAgentToLane(previous, agentId, 'working'));
+    const refreshedBacklog = await loadGlobalBacklogTasks();
+    setBacklogTasks(refreshedBacklog);
+    if (selectedBacklogTaskId === pickedTask.id) {
+      setSelectedBacklogTaskId(refreshedBacklog[0]?.id ?? '');
+    }
+    toast.success(`Moved to Working and picked "${pickedTask.title}".`);
   };
 
   const validateStep = (step: StepId): string | null => {
@@ -609,6 +790,11 @@ function Dashboard() {
         return null;
       case 3: {
         if (!wizardState.taskTitle.trim()) return 'Task title is required.';
+        const requiredAbilityKeys = wizardState.taskRequiredAbilities
+          .split(',')
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0);
+        if (requiredAbilityKeys.length === 0) return 'Task requires at least one required ability key.';
         if (!wizardState.taskOwnerAgentId) return 'Task owner is required.';
         if (wizardState.taskOwnerAgentId !== wizardState.parentAgentId) {
           const ownerAlreadyDelegated = activeDelegatedIds.includes(wizardState.taskOwnerAgentId);
@@ -685,14 +871,12 @@ function Dashboard() {
             child_agent_id: candidateChildAgentId,
             role: wizardState.delegationRole,
             ownership_scope: wizardState.delegationScope,
-            created_by_user_id: user.id,
           });
         }
       }
 
       const createdRun = await createRun.mutateAsync({
         parent_agent_id: wizardState.parentAgentId,
-        owner_user_id: user.id,
         title: wizardState.runTitle.trim(),
         objective: wizardState.runObjective.trim(),
         priority: wizardState.runPriority,
@@ -712,6 +896,11 @@ function Dashboard() {
           owner_agent_id: wizardState.taskOwnerAgentId,
           title: wizardState.taskTitle.trim(),
           description: wizardState.taskDescription.trim() || null,
+          required_ability_keys: wizardState.taskRequiredAbilities
+            .split(',')
+            .map((value) => value.trim().toLowerCase())
+            .filter((value) => value.length > 0),
+          preferred_role: wizardState.taskPreferredRole,
         },
       });
 
@@ -779,7 +968,9 @@ function Dashboard() {
     }
 
     if (activeLane === 'idle' && overLane === 'working') {
-      openIdleToWorkingDialog(activeId);
+      void moveBacklogAgentToWorking(activeId).catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'Could not move backlog agent to working.');
+      });
       return;
     }
 
@@ -888,62 +1079,119 @@ function Dashboard() {
     runtimeConsoleBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [runtimeAutoScroll, runtimeFilteredEvents, runtimeConsoleExpanded]);
 
+  const showSelectedDetailsPane = Boolean(selectedBoardAgent || selectedBacklogTask);
+  const selectedAgentBacklogCount = selectedBoardAgent
+    ? backlogTasks.filter((task) => task.ownerAgentId === selectedBoardAgent.id).length
+    : 0;
+  const currentProjectBacklogCount = backlogTasks.length;
+  const managerChatMessages = managerMessages
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .slice(-30);
+
+  const sendManagerMessage = async () => {
+    if (!currentProject?.id) {
+      toast.error('Select a project before messaging the manager.');
+      return;
+    }
+    const content = managerChatInput.trim();
+    if (!content) return;
+
+    try {
+      const response = await tauriCommandClient.sendProjectManagerMessage(currentProject.id, content);
+      const resolvedConversationId = response.conversation_id;
+      if (resolvedConversationId && resolvedConversationId !== managerConversationId) {
+        setManagerConversationId(resolvedConversationId);
+      }
+      await queryClient.invalidateQueries({
+        queryKey: conversationKeys.messages(resolvedConversationId || managerConversationId),
+      });
+      setManagerChatInput('');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to send manager message.');
+    }
+  };
+
   return (
     <div className="space-y-6 px-4">
       <Header
         title="Orchestration Board"
-        description="Visualize agents by lane and create structured orchestration assignments from one flow."
+        description={
+          currentProject
+            ? `Current project: ${currentProject.name}`
+            : 'Review task backlog, move agents into work lanes, and inspect selected cards.'
+        }
       >
-        <Button
-          onClick={() => {
-            if (!wizardState.parentAgentId && agents.length > 0) {
-              setWizardState(buildInitialState(agents[0].id));
-            }
-            setWizardOpen(true);
-          }}
-          disabled={!user || isAgentsLoading || agents.length === 0}
-        >
-          <PlayCircle className="mr-2 h-4 w-4" />
-          Create Job Assignment
-        </Button>
+        <div className="rounded-md border bg-background/80 px-3 py-2">
+          {currentProject ? (
+            <div className="flex flex-row items-center gap-2">
+              <p className="truncate font-medium">{currentProject.manager_agent_name}</p>
+              <Badge variant="outline">{currentProjectBacklogCount} tasks</Badge>
+            </div>
+          ) : null}
+        </div>
       </Header>
 
-      <div className="flex h-[calc(100vh-9.4rem)] min-h-0 flex-col gap-4">
-        <div className="min-h-0 flex-1">
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            modifiers={[restrictToWindowEdges]}
-            onDragStart={(event) => setActiveDragAgentId(String(event.active.id))}
-            onDragEnd={handleDragEnd}
-            onDragCancel={() => setActiveDragAgentId(null)}
+      <div
+        className={`grid h-[calc(100vh-9.4rem)] min-h-0 gap-4 ${
+          showSelectedDetailsPane ? 'lg:grid-cols-[minmax(0,3fr)_minmax(360px,1fr)]' : 'lg:grid-cols-1'
+        }`}
+      >
+        <div className="min-h-0 flex flex-col gap-4">
+          <div className="min-h-0 flex-1">
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              modifiers={[restrictToWindowEdges]}
+              onDragStart={(event) => setActiveDragAgentId(String(event.active.id))}
+              onDragEnd={handleDragEnd}
+              onDragCancel={() => setActiveDragAgentId(null)}
+            >
+              <div className="grid h-full min-h-0 gap-4 lg:grid-cols-4 overflow-y-auto">
+                <BacklogTasksColumn
+                  tasks={backlogTasks}
+                  isLoading={isLoadingBacklogTasks}
+                  selectedTaskId={selectedBacklogTaskId}
+                  onSelectTask={(taskId) => {
+                    setSelectedBacklogTaskId(taskId);
+                    setSelectedBoardAgentId('');
+                  }}
+                />
+                {BOARD_LANES.map((lane) => {
+                  const agentsInLane = board[lane.id]
+                    .map((id) => agentById.get(id))
+                    .filter((agent): agent is Agent => Boolean(agent));
+
+                  return (
+                    <LaneColumn
+                      key={lane.id}
+                      lane={lane}
+                      agentsInLane={agentsInLane}
+                      selectedAgentId={selectedBoardAgentId}
+                      onSelectAgent={(agentId) => {
+                        setSelectedBoardAgentId(agentId);
+                        setSelectedBacklogTaskId('');
+                      }}
+                    />
+                  );
+                })}
+              </div>
+
+              <DragOverlay>
+                {activeDragAgent ? (
+                  <div className="w-64 rounded-md border bg-background p-3 shadow-lg">
+                    <p className="text-sm font-medium">{activeDragAgent.name}</p>
+                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activeDragAgent.persona}</p>
+                  </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
+          </div>
+
+          <section
+            className={`w-full overflow-hidden rounded-md border bg-background transition-[height] duration-200 ${
+              runtimeConsoleExpanded ? 'h-[42%] min-h-[240px]' : 'h-12'
+            }`}
           >
-            <div className="grid h-full min-h-0 gap-4 lg:grid-cols-3 overflow-y-auto">
-              {BOARD_LANES.map((lane) => {
-                const agentsInLane = board[lane.id]
-                  .map((id) => agentById.get(id))
-                  .filter((agent): agent is Agent => Boolean(agent));
-
-                return <LaneColumn key={lane.id} lane={lane} agentsInLane={agentsInLane} />;
-              })}
-            </div>
-
-            <DragOverlay>
-              {activeDragAgent ? (
-                <div className="w-64 rounded-md border bg-background p-3 shadow-lg">
-                  <p className="text-sm font-medium">{activeDragAgent.name}</p>
-                  <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activeDragAgent.persona}</p>
-                </div>
-              ) : null}
-            </DragOverlay>
-          </DndContext>
-        </div>
-
-        <section
-          className={`w-full overflow-hidden rounded-md border bg-background transition-[height] duration-200 ${
-            runtimeConsoleExpanded ? 'h-[42%] min-h-[240px]' : 'h-12'
-          }`}
-        >
           <div
             className="flex h-12 cursor-pointer items-center justify-between border-b px-4"
             role="button"
@@ -1080,80 +1328,157 @@ function Dashboard() {
               </div>
             </div>
           ) : null}
-        </section>
+          </section>
+        </div>
+
+        {showSelectedDetailsPane ? (
+          <aside className="min-h-0 overflow-y-auto rounded-md border bg-background p-4">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold">Card Details</p>
+              <p className="text-xs text-muted-foreground">Details for the currently selected backlog task or agent card.</p>
+            </div>
+
+            {selectedBacklogTask ? (
+              <div className="mt-4 space-y-4">
+                <div className="rounded-md border p-3">
+                  <p className="text-sm font-semibold">{selectedBacklogTask.title}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {selectedBacklogTask.description || 'No task description provided.'}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Run: {selectedBacklogTask.runTitle}</p>
+                  <p className="text-xs text-muted-foreground">Status: {selectedBacklogTask.status}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Owner: {agentById.get(selectedBacklogTask.ownerAgentId)?.name ?? selectedBacklogTask.ownerAgentId}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Updated: {new Date(selectedBacklogTask.updatedAt).toLocaleString()}
+                  </p>
+                </div>
+              </div>
+            ) : selectedBoardAgent ? (
+              <div className="mt-4 space-y-4">
+                <div className="rounded-md border p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold">{selectedBoardAgent.name}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{selectedBoardAgent.persona}</p>
+                    </div>
+                    <Badge variant={selectedBoardAgentLane === 'working' ? 'default' : 'outline'}>
+                      {selectedBoardAgentLane ? laneLabel(selectedBoardAgentLane) : laneLabel('idle')}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {selectedBoardAgent.provider_type} · {selectedBoardAgent.model_id}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Backlog tasks assigned: {selectedAgentBacklogCount}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">Idle Pickup</p>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      if (!selectedBoardAgentId) return;
+                      void moveBacklogAgentToWorking(selectedBoardAgentId).catch((error) => {
+                        toast.error(error instanceof Error ? error.message : 'Could not move selected agent to working.');
+                      });
+                    }}
+                    disabled={selectedBoardAgentLane === 'working'}
+                  >
+                    Move To Working
+                  </Button>
+                </div>
+                {!isLoadingBacklogTasks && backlogTasks.length === 0 ? (
+                  <Alert>
+                    <AlertTitle>No backlog tasks</AlertTitle>
+                    <AlertDescription>Tasks will appear here when the manager agent generates project work.</AlertDescription>
+                  </Alert>
+                ) : null}
+              </div>
+            ) : null}
+          </aside>
+        ) : null}
       </div>
 
-      <AlertDialog
-        open={idleToWorkingDialogOpen}
-        onOpenChange={(open) => {
-          setIdleToWorkingDialogOpen(open);
-          if (!open) {
-            setIdleToWorkingContext(null);
-            setIdleToWorkingTasks([]);
-            setIsLoadingIdleToWorkingTasks(false);
-          }
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Move To Working</AlertDialogTitle>
-            <AlertDialogDescription>
-              {idleToWorkingContext?.agentName ?? 'Agent'} can move to working after selecting task context.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          {isLoadingIdleToWorkingTasks ? (
-            <p className="text-sm text-muted-foreground">Loading available tasks...</p>
-          ) : idleToWorkingTasks.length === 0 ? (
-            <Alert>
-              <AlertTitle>No queued tasks found</AlertTitle>
-              <AlertDescription>
-                Open the assignment wizard to create a run and task before moving this agent to working.
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm font-medium">Available tasks</p>
-              <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border p-2">
-                {idleToWorkingTasks.map((task) => (
-                  <div key={task.id} className="rounded-md border p-2">
-                    <p className="text-sm font-medium">{task.title}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {task.runTitle} · {task.status}
-                    </p>
-                  </div>
-                ))}
+      {currentProject ? (
+        <div className="fixed right-6 bottom-6 z-40 w-[360px]">
+          <div className="rounded-lg border bg-background/95 shadow-xl backdrop-blur">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="h-4 w-4 text-muted-foreground" />
+                <p className="text-sm font-semibold">Manager Chat</p>
+                <span className="text-xs text-muted-foreground">{currentProject.manager_agent_name}</span>
               </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                onClick={() => setManagerChatOpen((value) => !value)}
+                aria-label={managerChatOpen ? 'Collapse manager chat' : 'Expand manager chat'}
+              >
+                {managerChatOpen ? <X className="h-4 w-4" /> : <MessageSquare className="h-4 w-4" />}
+              </Button>
             </div>
-          )}
 
-          <AlertDialogFooter>
-            <AlertDialogCancel>Keep In Idle</AlertDialogCancel>
-            {idleToWorkingTasks.length > 0 ? (
-              <AlertDialogAction
-                onClick={() => {
-                  if (!idleToWorkingContext) return;
-                  setBoard((previous) => moveAgentToLane(previous, idleToWorkingContext.agentId, 'working'));
-                  toast.success('Agent moved to Working with queued task context.');
-                  setIdleToWorkingDialogOpen(false);
-                }}
-              >
-                Move To Working
-              </AlertDialogAction>
-            ) : (
-              <AlertDialogAction
-                onClick={() => {
-                  if (!idleToWorkingContext) return;
-                  setIdleToWorkingDialogOpen(false);
-                  launchWizardForAgent(idleToWorkingContext.agentId);
-                }}
-              >
-                Open Assignment Wizard
-              </AlertDialogAction>
-            )}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            {managerChatOpen ? (
+              <>
+                <div className="h-64 overflow-y-auto p-3">
+                  {managerChatMessages.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No manager messages yet. Send details and requirements to start planning.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {managerChatMessages.map((message) => (
+                        <div
+                          key={message.id}
+                          className={`rounded-md px-2 py-1 text-xs ${
+                            message.role === 'user' ? 'bg-primary/10' : 'bg-muted'
+                          }`}
+                        >
+                          <p className="mb-1 font-medium uppercase tracking-wide text-[10px] text-muted-foreground">
+                            {message.role === 'user' ? 'You' : currentProject.manager_agent_name}
+                          </p>
+                          <p className="whitespace-pre-wrap">{message.content}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="border-t p-2">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      value={managerChatInput}
+                      onChange={(event) => setManagerChatInput(event.target.value)}
+                      placeholder="Add requirements or answer manager questions..."
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          void sendManagerMessage();
+                        }
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      size="icon"
+                      onClick={() => void sendManagerMessage()}
+                      disabled={isEnsuringManagerConversation || !managerConversationId}
+                    >
+                      <Send className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <Dialog
         open={wizardOpen}
@@ -1349,6 +1674,31 @@ function Dashboard() {
           {activeStep === 3 ? (
             <div className="space-y-3">
               <div className="space-y-2">
+                <Label>Requirement Template</Label>
+                <Select
+                  value={wizardState.taskRequirementTemplateId || 'custom'}
+                  onValueChange={(value) => {
+                    if (value === 'custom') {
+                      applyWizardRequirementTemplate('');
+                      return;
+                    }
+                    applyWizardRequirementTemplate(value);
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Choose a template" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="custom">Custom</SelectItem>
+                    {REQUIREMENT_TEMPLATES.map((template) => (
+                      <SelectItem key={template.id} value={template.id}>
+                        {template.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
                 <Label>Task Title</Label>
                 <Input
                   value={wizardState.taskTitle}
@@ -1363,6 +1713,43 @@ function Dashboard() {
                   onChange={(event) => setField('taskDescription', event.target.value)}
                   placeholder="Include architecture notes, schema deltas, and unresolved risks"
                 />
+              </div>
+              <div className="space-y-2">
+                <Label>Required Abilities</Label>
+                <Input
+                  value={wizardState.taskRequiredAbilities}
+                  onChange={(event) => {
+                    setField('taskRequirementTemplateId', '');
+                    setField('taskRequiredAbilities', event.target.value);
+                  }}
+                  placeholder="search_web, read_repo, run_tests"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated ability keys used by assignment review.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Preferred Role</Label>
+                <Select
+                  value={wizardState.taskPreferredRole}
+                  onValueChange={(value) =>
+                    {
+                      setField('taskRequirementTemplateId', '');
+                      setField('taskPreferredRole', value as WizardState['taskPreferredRole']);
+                    }
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Preferred role" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="custom">custom</SelectItem>
+                    <SelectItem value="planner">planner</SelectItem>
+                    <SelectItem value="researcher">researcher</SelectItem>
+                    <SelectItem value="executor">executor</SelectItem>
+                    <SelectItem value="reviewer">reviewer</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label>Assign Task To</Label>
@@ -1477,6 +1864,10 @@ function Dashboard() {
                 <p className="font-medium">Task</p>
                 <p className="text-muted-foreground">{wizardState.taskTitle}</p>
                 <p className="text-muted-foreground">Owner: {wizardState.taskOwnerAgentId}</p>
+                <p className="text-muted-foreground">
+                  Required abilities: {wizardState.taskRequiredAbilities || 'none'}
+                </p>
+                <p className="text-muted-foreground">Preferred role: {wizardState.taskPreferredRole}</p>
               </div>
               <div className="rounded-md border p-3">
                 <p className="font-medium">Updates and Memory</p>

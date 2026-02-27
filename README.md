@@ -162,6 +162,49 @@ pnpm --filter coreagent exec vitest run \
   - handshake/advisory propagation metrics plus full resilience and security gate coverage are still pending
 - Skills graph MVP (section 7) remains **not started** (no graph route/module/persistence/API delivered yet).
 
+## Current Delivery Update (2026-02-26, Phase 4 Orchestration Status)
+
+Status check performed against:
+- `agent-to-agent.md` (Phase 4 implementation-aligned orchestration PRD)
+- `prd.md` (active roadmap / Phase 4 gate)
+
+### Phase 4 Milestone Status (M1-M6)
+
+- `M1` Command contract stabilization: **completed**
+  - added: task detail, skip task, revoke delegation, run list filtering/pagination
+  - commands wired in Tauri + hooks/UI integration
+- `M2` Feedback persistence + flow: **completed**
+  - `orchestration_task_feedback` integrated in foundation migration
+  - feedback submit flow (`approved` / `rework` / `rejected`) implemented
+- `M3` Run/task detail UX: **completed (board-integrated)**
+  - right-side run/task detail pane in root board
+  - task inspect + attempts/events/memory/feedback visibility
+- `M4` Event taxonomy + diagnostics polish: **completed (taxonomy), partial (polish)**
+  - orchestration event names standardized to dotted taxonomy (`run.*`, `task.*`, etc.)
+  - additional diagnostics polish remains iterative
+- `M5` Session-bound identity enforcement: **completed**
+  - orchestration writes now enforced against authenticated session ownership in Tauri command layer
+  - client-supplied user IDs removed from orchestration write payload requirements
+- `M6` Reliability pass: **in progress**
+  - transition/retry/taxonomy/tests expanded
+  - full reliability/security audit gate in `prd.md` still open
+
+### Additional Orchestration Enhancements Shipped
+
+- Deterministic assignment review + auto-assign flow:
+  - hard filters: active agent, required abilities, delegation/policy eligibility
+  - soft scoring: role/persona/load
+  - rationale trace event: `task.assignment_reviewed`
+- Task requirements are explicit (no text heuristics):
+  - `required_ability_keys` + `preferred_role` on orchestration tasks
+  - requirements template picker in both board wizard and orchestration panel task creation
+
+### Remaining Phase 4 Execution Focus
+
+1. Final reliability/security audit for orchestration/runtime critical paths (`prd.md` gate).
+2. Diagnostics UX refinement for operator-grade observability.
+3. Confirm post-audit closure and move remaining work to next roadmap phase.
+
 ## Next Validation Steps
 
 1. Start services:

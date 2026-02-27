@@ -1084,6 +1084,30 @@ CREATE TABLE orchestration_runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Projects are the user-facing orchestration container for multi-device state.
+-- Each project is rooted in one orchestration run managed by the selected manager agent.
+CREATE TABLE orchestration_projects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    manager_agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    root_run_id UUID NOT NULL UNIQUE REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+    manager_conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'paused', 'completed', 'archived')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Per-user current project selection (replaces local-only selection state).
+CREATE TABLE orchestration_project_selections (
+    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    project_id UUID REFERENCES orchestration_projects(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE orchestration_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
@@ -1091,6 +1115,8 @@ CREATE TABLE orchestration_tasks (
     owner_agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT,
+    required_ability_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
+    preferred_role TEXT CHECK (preferred_role IN ('planner', 'researcher', 'executor', 'reviewer', 'custom')),
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued', 'planned', 'in_progress', 'waiting', 'completed', 'failed', 'cancelled', 'paused')),
     task_order INTEGER NOT NULL DEFAULT 0,
@@ -1190,6 +1216,16 @@ CREATE TABLE orchestration_schedules (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE orchestration_task_feedback (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id UUID NOT NULL REFERENCES orchestration_tasks(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL CHECK (verdict IN ('approved', 'rework', 'rejected')),
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX idx_agent_delegations_parent_active
 ON agent_delegations(parent_agent_id, is_active);
 
@@ -1198,6 +1234,15 @@ ON orchestration_runs(parent_agent_id, status, updated_at DESC);
 
 CREATE INDEX idx_orchestration_runs_owner_status_updated
 ON orchestration_runs(owner_user_id, status, updated_at DESC);
+
+CREATE INDEX idx_orchestration_projects_owner_created
+ON orchestration_projects(owner_user_id, created_at DESC);
+
+CREATE INDEX idx_orchestration_projects_manager_created
+ON orchestration_projects(manager_agent_id, created_at DESC);
+
+CREATE INDEX idx_orchestration_projects_manager_conversation
+ON orchestration_projects(manager_conversation_id);
 
 CREATE INDEX idx_orchestration_tasks_run_order
 ON orchestration_tasks(run_id, task_order, created_at);
@@ -1235,10 +1280,22 @@ ON orchestration_memories(agent_id, scope, created_at DESC);
 CREATE INDEX idx_orchestration_schedules_due
 ON orchestration_schedules(enabled, next_run_at);
 
+CREATE INDEX idx_orchestration_task_feedback_run_created
+ON orchestration_task_feedback(run_id, created_at DESC);
+
+CREATE INDEX idx_orchestration_task_feedback_task_created
+ON orchestration_task_feedback(task_id, created_at DESC);
+
 CREATE TRIGGER update_agent_delegations_updated_at BEFORE UPDATE ON agent_delegations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_orchestration_runs_updated_at BEFORE UPDATE ON orchestration_runs
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_orchestration_projects_updated_at BEFORE UPDATE ON orchestration_projects
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_orchestration_project_selections_updated_at BEFORE UPDATE ON orchestration_project_selections
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_orchestration_tasks_updated_at BEFORE UPDATE ON orchestration_tasks
@@ -1252,6 +1309,8 @@ CREATE TRIGGER update_orchestration_schedules_updated_at BEFORE UPDATE ON orches
 
 ALTER TABLE agent_delegations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orchestration_projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orchestration_project_selections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_task_attempts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_delegations ENABLE ROW LEVEL SECURITY;
@@ -1259,6 +1318,7 @@ ALTER TABLE orchestration_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_heartbeats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orchestration_schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orchestration_task_feedback ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Users can access their agent delegations"
 ON agent_delegations FOR ALL USING (
@@ -1279,6 +1339,22 @@ ON orchestration_runs FOR ALL USING (
         WHERE a.id = orchestration_runs.parent_agent_id
           AND a.user_id = auth.uid()
     )
+);
+
+CREATE POLICY "Users can access orchestration projects they own"
+ON orchestration_projects FOR ALL USING (
+    orchestration_projects.owner_user_id = auth.uid()
+    OR EXISTS (
+        SELECT 1
+        FROM agents a
+        WHERE a.id = orchestration_projects.manager_agent_id
+          AND a.user_id = auth.uid()
+    )
+);
+
+CREATE POLICY "Users can access their project selections"
+ON orchestration_project_selections FOR ALL USING (
+    orchestration_project_selections.user_id = auth.uid()
 );
 
 CREATE POLICY "Users can access orchestration tasks through run ownership"
@@ -1407,6 +1483,24 @@ ON orchestration_schedules FOR ALL USING (
     )
 );
 
+CREATE POLICY "Users can access orchestration task feedback through run ownership"
+ON orchestration_task_feedback FOR ALL USING (
+    EXISTS (
+        SELECT 1
+        FROM orchestration_runs r
+        WHERE r.id = orchestration_task_feedback.run_id
+          AND (
+            r.owner_user_id = auth.uid()
+            OR EXISTS (
+                SELECT 1
+                FROM agents a
+                WHERE a.id = r.parent_agent_id
+                  AND a.user_id = auth.uid()
+            )
+          )
+    )
+);
+
 -- ============================================================================
 -- Skills Graph Snapshots
 -- ============================================================================
@@ -1489,4 +1583,3 @@ BEGIN
     RETURN deleted_count;
 END;
 $$;
-

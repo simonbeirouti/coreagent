@@ -5,11 +5,14 @@ import { createElement, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { createTestQueryClient } from '@/test/utils';
 import {
+  OrchestrationEventRecord,
   OrchestrationRun,
   OrchestrationTask,
   useCreateOrchestrationRun,
+  useOrchestrationEvents,
   useOrchestrationRuns,
   useReassignOrchestrationTask,
+  useSubmitOrchestrationTaskFeedback,
 } from './useOrchestration';
 import { orchestrationKeys } from '@/lib/query-keys';
 
@@ -88,7 +91,6 @@ describe('useOrchestration', () => {
     const { result } = renderHook(() => useCreateOrchestrationRun('agent-1'), { wrapper });
     const mutatePromise = result.current.mutateAsync({
       parent_agent_id: 'agent-1',
-      owner_user_id: 'user-1',
       title: 'New Run',
       objective: 'New objective',
       priority: 'high',
@@ -119,6 +121,14 @@ describe('useOrchestration', () => {
     const settledRuns = queryClient.getQueryData<OrchestrationRun[]>(orchestrationKeys.runs('agent-1')) ?? [];
     expect(settledRuns.map((value) => value.id)).toContain('server-run-1');
     expect(settledRuns.map((value) => value.id)).not.toContain(tempId);
+    expect(invokeMock).toHaveBeenCalledWith('create_orchestration_run', {
+      request: {
+        parent_agent_id: 'agent-1',
+        title: 'New Run',
+        objective: 'New objective',
+        priority: 'high',
+      },
+    });
   });
 
   it('rolls back optimistic run creation on error', async () => {
@@ -148,7 +158,6 @@ describe('useOrchestration', () => {
     await expect(
       result.current.mutateAsync({
         parent_agent_id: 'agent-1',
-        owner_user_id: 'user-1',
         title: 'Should fail',
         objective: 'Fail objective',
       })
@@ -209,5 +218,59 @@ describe('useOrchestration', () => {
 
     const rolledBackTasks = queryClient.getQueryData<OrchestrationTask[]>(orchestrationKeys.tasks('run-1')) ?? [];
     expect(rolledBackTasks[0]?.owner_agent_id).toBe('agent-1');
+  });
+
+  it('loads run events', async () => {
+    const invokeMock = vi.mocked(invoke);
+    const events: OrchestrationEventRecord[] = [
+      {
+        id: 'event-1',
+        run_id: 'run-1',
+        task_id: 'task-1',
+        event_type: 'task.created',
+        severity: 'info',
+        payload: {},
+        created_at: '2026-02-26T00:00:00.000Z',
+      },
+    ];
+    invokeMock.mockResolvedValueOnce(events);
+    const queryClient = createTestQueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+
+    const { result } = renderHook(() => useOrchestrationEvents('run-1', 50), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(events);
+    expect(invokeMock).toHaveBeenCalledWith('list_orchestration_events', { runId: 'run-1', limit: 50 });
+  });
+
+  it('submits task feedback without client user id', async () => {
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockResolvedValueOnce({
+      id: 'feedback-1',
+      task_id: 'task-1',
+      run_id: 'run-1',
+      user_id: 'user-1',
+      verdict: 'approved',
+      notes: null,
+      created_at: '2026-02-26T00:00:00.000Z',
+    });
+    const queryClient = createTestQueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+
+    const { result } = renderHook(() => useSubmitOrchestrationTaskFeedback('run-1'), { wrapper });
+    await result.current.mutateAsync({
+      taskId: 'task-1',
+      verdict: 'approved',
+      notes: null,
+      requestedByAgentId: 'agent-1',
+    });
+    expect(invokeMock).toHaveBeenCalledWith('submit_orchestration_task_feedback', {
+      taskId: 'task-1',
+      verdict: 'approved',
+      notes: null,
+      requestedByAgentId: 'agent-1',
+    });
   });
 });

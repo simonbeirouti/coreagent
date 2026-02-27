@@ -28,6 +28,87 @@ export const tauriCommandClient = {
   deleteAgent(agentId: string) {
     return invoke<void>('delete_agent', { agentId });
   },
+  listProviderModels(providerType: 'openai' | 'anthropic') {
+    return invoke<Array<{ id: string; provider: 'openai' | 'anthropic'; display_name: string }>>(
+      'list_provider_models',
+      { providerType }
+    );
+  },
+  createOrchestrationProject(request: {
+    manager_agent_id: string;
+    name: string;
+    objective: string;
+    priority?: 'low' | 'normal' | 'high';
+  }) {
+    return invoke<{
+      id: string;
+      owner_user_id: string;
+      manager_agent_id: string;
+      run_id: string;
+      manager_conversation_id?: string | null;
+      name: string;
+      objective: string;
+      status: string;
+      manager_agent_name: string;
+      manager_model_id: string;
+      created_at: string;
+      updated_at: string;
+    }>('create_orchestration_project', { request });
+  },
+  listOrchestrationProjects() {
+    return invoke<Array<{
+      id: string;
+      owner_user_id: string;
+      manager_agent_id: string;
+      run_id: string;
+      manager_conversation_id?: string | null;
+      name: string;
+      objective: string;
+      status: string;
+      manager_agent_name: string;
+      manager_model_id: string;
+      created_at: string;
+      updated_at: string;
+    }>>('list_orchestration_projects');
+  },
+  getCurrentOrchestrationProject() {
+    return invoke<{
+      id: string;
+      owner_user_id: string;
+      manager_agent_id: string;
+      run_id: string;
+      manager_conversation_id?: string | null;
+      name: string;
+      objective: string;
+      status: string;
+      manager_agent_name: string;
+      manager_model_id: string;
+      created_at: string;
+      updated_at: string;
+    } | null>('get_current_orchestration_project');
+  },
+  setCurrentOrchestrationProject(projectId: string) {
+    return invoke<{
+      id: string;
+      owner_user_id: string;
+      manager_agent_id: string;
+      run_id: string;
+      manager_conversation_id?: string | null;
+      name: string;
+      objective: string;
+      status: string;
+      manager_agent_name: string;
+      manager_model_id: string;
+      created_at: string;
+      updated_at: string;
+    } | null>('set_current_orchestration_project', { projectId });
+  },
+  ensureProjectManagerConversation(projectId: string) {
+    return invoke<Conversation>('ensure_project_manager_conversation', { projectId });
+  },
+  sendProjectManagerMessage(projectId: string, content: string) {
+    return invoke<Message>('send_project_manager_message', { projectId, content });
+  },
 
   // Conversations and messages
   listConversations(agentId: string) {
